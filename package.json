@@ -1,0 +1,46 @@
+{
+  "name": "code-ingest",
+  "displayName": "Code Ingest",
+  "description": "Generate LLM-ready codebase digests.",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.103.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {},
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint .",
+    "pretest": "npm run compile",
+    "test": "vscode-test",
+    "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outdir=dist"
+  },
+  "dependencies": {
+    "minimatch": "^9.0.4",
+    "zustand": "^4.5.2"
+  },
+  "devDependencies": {
+    "@types/mocha": "10.0.6",
+    "@types/node": "20.14.2",
+    "@types/vscode": "1.103.0",
+    "@typescript-eslint/eslint-plugin": "8.42.0",
+    "@typescript-eslint/parser": "8.42.0",
+    "@vscode/test-cli": "0.0.11",
+    "@vscode/test-electron": "2.5.2",
+    "chai": "4.4.1",
+    "esbuild": "0.21.5",
+    "eslint": "9.12.0",
+    "eslint-config-prettier": "9.1.0",
+    "mocha": "10.4.0",
+    "rimraf": "5.0.5",
+    "ts-node": "10.9.2",
+    "typescript": "5.5.4"
+  }
+}
