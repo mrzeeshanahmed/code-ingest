@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Code Ingest Dashboard</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="main.js" defer></script>
+  </head>
+  <body>
+  <svg aria-hidden="true" focusable="false" class="sprite-sheet">
+      <defs>
+        <symbol id="icon-folder" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M1.75 3a.75.75 0 0 0-.75.75v8.5c0 .414.336.75.75.75h12.5a.75.75 0 0 0 .75-.75V5.5a.75.75 0 0 0-.75-.75h-5.69l-1.22-1.464A1.25 1.25 0 0 0 6.324 3H1.75Z" />
+        </symbol>
+        <symbol id="icon-file" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M4.75 1A1.75 1.75 0 0 0 3 2.75v10.5c0 .966.784 1.75 1.75 1.75h6.5A1.75 1.75 0 0 0 13 13.25V6.56a1.75 1.75 0 0 0-.513-1.238l-3.81-3.81A1.75 1.75 0 0 0 7.438 1H4.75Zm4.5 1.56 2.44 2.44h-2.19a.25.25 0 0 1-.25-.25V2.56Z" />
+        </symbol>
+        <symbol id="icon-refresh" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M7.75 2a5.75 5.75 0 1 0 4.06 9.81.75.75 0 1 0-1.08-1.04 4.25 4.25 0 1 1 0-6.04l-.18.19a.75.75 0 1 0 1.08 1.04l1.06-1.06a.75.75 0 0 0 0-1.06L11.63 2.7a.75.75 0 1 0-1.06 1.06l.18.18A5.72 5.72 0 0 0 7.75 2Z" />
+        </symbol>
+      </defs>
+    </svg>
+
+    <div class="dashboard">
+      <header class="dashboard__header">
+        <div class="dashboard__title-group">
+          <svg class="dashboard__title-icon" aria-hidden="true">
+            <use href="#icon-folder"></use>
+          </svg>
+          <h1 class="dashboard__title">Code Ingest Dashboard</h1>
+        </div>
+        <div class="dashboard__actions" role="group" aria-label="Dashboard actions">
+          <button class="button" type="button" data-action="refresh">
+            <svg class="button__icon" aria-hidden="true">
+              <use href="#icon-refresh"></use>
+            </svg>
+            <span>Refresh</span>
+          </button>
+          <button class="button" type="button" data-action="generate">
+            <svg class="button__icon" aria-hidden="true">
+              <use href="#icon-file"></use>
+            </svg>
+            <span>Generate Digest</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="dashboard__main">
+        <section class="panel panel--tree" aria-labelledby="tree-heading">
+          <header class="panel__header">
+            <h2 id="tree-heading">Workspace Files</h2>
+            <div class="panel__controls">
+              <button class="icon-button" type="button" data-action="expand-all" title="Expand all">
+                <svg aria-hidden="true">
+                  <use href="#icon-folder"></use>
+                </svg>
+              </button>
+              <button class="icon-button" type="button" data-action="collapse-all" title="Collapse all">
+                <svg aria-hidden="true">
+                  <use href="#icon-folder"></use>
+                </svg>
+              </button>
+            </div>
+          </header>
+          <div class="panel__body" aria-label="Workspace files">
+            <ul class="tree" role="tree">
+              <li class="empty-state" role="treeitem" aria-disabled="true">No files selected yet.</li>
+            </ul>
+          </div>
+        </section>
+
+        <section class="panel panel--preview" aria-labelledby="preview-heading">
+          <header class="panel__header">
+            <h2 id="preview-heading">Digest Preview</h2>
+            <div class="panel__controls">
+              <button class="icon-button" type="button" data-action="refresh-preview" title="Refresh preview">
+                <svg aria-hidden="true">
+                  <use href="#icon-refresh"></use>
+                </svg>
+              </button>
+            </div>
+          </header>
+          <div class="panel__body">
+            <article class="preview" data-state="empty">
+              <header class="preview__header">
+                <h3 class="preview__title">Awaiting Selection</h3>
+                <p class="preview__subtitle">Select files from the tree to generate a live digest preview.</p>
+              </header>
+              <section class="preview__content" aria-live="polite"></section>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

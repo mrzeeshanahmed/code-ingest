@@ -6,12 +6,13 @@
 		"rootDir": "src",
 		"sourceMap": true,
 		"strict": true,
-		"lib": ["es2020"],
+		"lib": ["es2020", "dom"],
 		"moduleResolution": "node",
 		"esModuleInterop": true,
 		"resolveJsonModule": true,
 		"skipLibCheck": true,
-		"forceConsistentCasingInFileNames": true
+		"forceConsistentCasingInFileNames": true,
+		"isolatedModules": true
 	},
 	"include": ["src/**/*"],
 	"exclude": ["node_modules", "dist", "out", "test"]
