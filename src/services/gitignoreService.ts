@@ -1,170 +1,462 @@
-import * as path from 'path';
-import { promises as fs } from 'fs';
-import { Minimatch } from 'minimatch';
+import * as path from "node:path";
+import { promises as fs } from "node:fs";
+import type { Stats } from "node:fs";
+import { Minimatch } from "minimatch";
+
+export interface MatcherCacheEntry {
+  patterns: string[];
+  compiled: Minimatch[];
+  lastModified: Date;
+  checkPath: (relativePath: string) => boolean | undefined;
+  sources: Array<{ filePath: string; mtime: number }>;
+}
+
+export interface MatcherCache {
+  [dirPath: string]: MatcherCacheEntry;
+}
+
+export interface GitignoreServiceOptions {
+  gitignoreFiles?: string[];
+  getIgnoreFilesSetting?: () => string[] | undefined;
+  maxCacheEntries?: number;
+  logger?: (message: string, meta?: Record<string, unknown>) => void;
+}
+
+interface PatternInfo {
+  readonly raw: string;
+  readonly normalized: string;
+  readonly negated: boolean;
+  readonly matcher: Minimatch;
+}
+
+interface DirectoryMatchers {
+  readonly entry: MatcherCacheEntry;
+  readonly cacheKey: string;
+}
+
+const DEFAULT_IGNORE_FILES = [".gitignore", ".gitingestignore"] as const;
+const DEFAULT_CACHE_SIZE = 128;
+
+function toPosix(p: string): string {
+  return p.split(path.sep).join("/");
+}
+
+function isNegation(line: string): boolean {
+  return line.startsWith("!") && !line.startsWith("\\!");
+}
+
+function stripEscapes(input: string): string {
+  return input.replace(/\\([ #!\\])/g, "$1");
+}
 
 /**
- * A function that returns true when a given file path should be ignored,
- * false when explicitly un-ignored, and null when no pattern matches.
- */
-export type PathMatcher = (filePath: string) => boolean | null;
-
-/**
- * Service responsible for loading and caching `.gitignore` matchers. This
- * implementation minimizes filesystem access by caching compiled matchers per
- * directory and applying .gitignore precedence correctly (parent -> child).
+ * Service responsible for walking the filesystem hierarchy, loading gitignore-like
+ * files, compiling them into minimatch matchers, and caching the results with LRU
+ * eviction semantics. Consumers can query whether a given file should be ignored,
+ * preload directories, or inspect the cache for diagnostics.
  */
 export class GitignoreService {
-  private readonly matchersByDir: Map<string, PathMatcher> = new Map();
+  private readonly cache = new Map<string, MatcherCacheEntry>();
+  private readonly logger: ((message: string, meta?: Record<string, unknown>) => void) | undefined;
+  private readonly maxCacheEntries: number;
+  private readonly getConfiguredIgnoreFiles: (() => string[] | undefined) | undefined;
+  private readonly explicitIgnoreFiles: string[] | undefined;
 
-  constructor() {}
-
-  /**
-   * Search upwards from `startDir` collecting `.gitignore` file paths. Stops
-   * when a `.git` directory is found (repo root) or the filesystem root is
-   * reached. Returned array is ordered from root -> closest (parent to child)
-   * so callers can apply rules in increasing specificity.
-   */
-  private async findGitignoreFiles(startDir: string): Promise<string[]> {
-    const files: string[] = [];
-    let dir = path.resolve(startDir);
-
-    while (true) {
-      const gitignorePath = path.join(dir, '.gitignore');
-      try {
-        const stat = await fs.stat(gitignorePath).catch(() => null);
-        if (stat && stat.isFile()) files.push(gitignorePath);
-      } catch {
-        // ignore IO errors for individual checks
-      }
-
-      // stop if we've reached a repo root marker
-      try {
-        const gitDir = path.join(dir, '.git');
-        const gitStat = await fs.stat(gitDir).catch(() => null);
-        if (gitStat && (gitStat.isDirectory() || gitStat.isFile())) break;
-      } catch {
-        // ignore
-      }
-
-      const parent = path.dirname(dir);
-      if (parent === dir) break; // reached filesystem root
-      dir = parent;
-    }
-
-    // files collected are from child->parent; reverse to parent->child
-    return files.reverse();
+  constructor(options: GitignoreServiceOptions = {}) {
+    this.logger = options.logger;
+    this.maxCacheEntries = Math.max(1, options.maxCacheEntries ?? DEFAULT_CACHE_SIZE);
+    this.getConfiguredIgnoreFiles = options.getIgnoreFilesSetting;
+    this.explicitIgnoreFiles = options.gitignoreFiles;
   }
 
   /**
-   * Read and compile a `.gitignore` into a PathMatcher. Uses cache aggressively
-   * to avoid repeated parsing. The matcher returns `true` for ignore, `false`
-   * for explicit un-ignore (negation), and `null` when no pattern matches.
+   * Resolve the ordered list of ignore file names. Configuration can override
+   * the defaults; duplicates are removed while preserving order.
    */
-  private async getMatcher(gitignorePath: string): Promise<PathMatcher> {
-    const dir = path.dirname(gitignorePath);
-    const cached = this.matchersByDir.get(dir);
-    if (cached) return cached;
-
-    // Read file
-    let content: string;
-    try {
-      content = await fs.readFile(gitignorePath, 'utf8');
-    } catch {
-      // On read errors, cache a matcher that never matches to avoid repeated IO
-      const noop: PathMatcher = () => null;
-      this.matchersByDir.set(dir, noop);
-      return noop;
-    }
-
-    const lines = content.split(/\r?\n/);
-    type Pattern = { raw: string; negated: boolean; pattern: string };
-    const patterns: Pattern[] = [];
-
-    for (let raw of lines) {
-      raw = raw.trim();
-      if (!raw || raw.startsWith('#')) continue; // skip empty/comment
-
-      let negated = false;
-      if (raw.startsWith('!')) {
-        negated = true;
-        raw = raw.slice(1);
+  private resolveIgnoreFileNames(): string[] {
+    const configured = this.getConfiguredIgnoreFiles?.();
+    const candidates = this.explicitIgnoreFiles ?? configured ?? DEFAULT_IGNORE_FILES;
+    const seen = new Set<string>();
+    const names: string[] = [];
+    for (const name of candidates) {
+      const trimmed = name?.trim();
+      if (!trimmed) continue;
+      if (!seen.has(trimmed)) {
+        names.push(trimmed);
+        seen.add(trimmed);
       }
-
-      if (!raw) continue; // lone !
-
-      // gitignore directory-relative patterns: keep as-is for matching
-      patterns.push({ raw: raw, negated, pattern: raw });
     }
+    return names.length > 0 ? names : [...DEFAULT_IGNORE_FILES];
+  }
 
-    const matcher: PathMatcher = (filePath: string) => {
-      // compute path relative to gitignore directory
-      let rel = path.relative(dir, filePath);
-      // Normalize to posix-style for minimatch
-      rel = rel.split(path.sep).join('/');
+  /**
+   * Walk from the target path up to the repository root collecting ignore files
+   * (default: .gitignore & .gitingestignore). Files are returned in root-to-leaf order.
+   */
+  public async findGitignoreFiles(targetPath: string): Promise<string[]> {
+    const ignoreFiles: string[] = [];
+    const ignoreNames = this.resolveIgnoreFileNames();
 
-      let lastMatch: boolean | null = null;
+    let current = await this.resolveStartDirectory(targetPath);
+    const visited = new Set<string>();
 
-      for (const p of patterns) {
-        let pat = p.pattern;
+    while (!visited.has(current)) {
+      visited.add(current);
 
-        // If pattern starts with '/', treat it as anchored to the gitignore dir
-        if (pat.startsWith('/')) pat = pat.slice(1);
-
-        // If pattern ends with '/', it matches directories; convert to glob
-        if (pat.endsWith('/')) pat = pat + '**';
-
-  type MMOpts = { dot?: boolean; nocase?: boolean; matchBase?: boolean };
-  const opts: MMOpts = { dot: true, nocase: false };
-        const usesMatchBase = pat.indexOf('/') === -1;
-  if (usesMatchBase) opts.matchBase = true;
-
-        try {
-          const m = new Minimatch(pat, opts as MMOpts);
-          if (m.match(rel)) {
-            lastMatch = p.negated ? false : true;
-          }
-        } catch {
-          // ignore pattern parsing errors and continue
+      for (const name of ignoreNames) {
+        const candidate = path.join(current, name);
+        const stat = await this.statSafe(candidate);
+        if (stat?.isFile()) {
+          ignoreFiles.push(candidate);
         }
       }
 
-      return lastMatch;
-    };
+      const gitMarker = await this.statSafe(path.join(current, ".git"));
+      if (gitMarker?.isDirectory() || gitMarker?.isFile()) {
+        break;
+      }
 
-    this.matchersByDir.set(dir, matcher);
-    return matcher;
+      const parent = path.dirname(current);
+      if (parent === current) {
+        break;
+      }
+      current = parent;
+    }
+
+    return ignoreFiles.reverse();
   }
 
   /**
-   * Public API: determine whether `filePath` should be ignored. This method
-   * collects all applicable .gitignore files (parent -> child), evaluates
-   * patterns in order, and returns the final decision. Negations in more
-   * specific .gitignore files can override ignores from parent files.
+   * Determine whether a path should be ignored by applying hierarchical gitignore rules.
    */
   public async isIgnored(filePath: string): Promise<boolean> {
-    const startDir = path.dirname(path.resolve(filePath));
-    const gitignoreFiles = await this.findGitignoreFiles(startDir);
+    const absolutePath = path.resolve(filePath);
+    const ignoreFiles = await this.findGitignoreFiles(absolutePath);
+    if (ignoreFiles.length === 0) {
+      return false;
+    }
 
-    // If no gitignore files found, nothing is ignored
-    if (gitignoreFiles.length === 0) return false;
+    const processedDirs: string[] = [];
+    const seen = new Set<string>();
+    for (const file of ignoreFiles) {
+      const dir = path.dirname(file);
+      if (!seen.has(dir)) {
+        processedDirs.push(dir);
+        seen.add(dir);
+      }
+    }
 
-    let decision: boolean | null = null;
-
-    // Evaluate matchers in order parent -> child so that child rules override
-    for (const gi of gitignoreFiles) {
-      const matcher = await this.getMatcher(gi);
-      const result = matcher(filePath);
-      if (result !== null) decision = result;
+    let decision: boolean | undefined;
+    for (const dir of processedDirs) {
+      const matcher = await this.getDirectoryMatchers(dir);
+      if (!matcher) {
+        continue;
+      }
+      const relative = this.normalizeRelativePath(dir, absolutePath);
+      if (relative === undefined) {
+        continue;
+      }
+      const result = matcher.entry.checkPath(relative);
+      if (typeof result === "boolean") {
+        decision = result;
+      }
     }
 
     return decision === true;
   }
 
-  public clearCache(): void {
-    this.matchersByDir.clear();
+  /**
+   * Batch helper that reuses cached matchers while evaluating multiple paths.
+   */
+  public async isIgnoredBatch(filePaths: string[]): Promise<Map<string, boolean>> {
+    const results = new Map<string, boolean>();
+    for (const filePath of filePaths) {
+      // eslint-disable-next-line no-await-in-loop
+      results.set(filePath, await this.isIgnored(filePath));
+    }
+    return results;
   }
 
-  public preloadDir(dir: string, matcher: PathMatcher): void {
-    this.matchersByDir.set(dir, matcher);
+  /**
+   * Build a matcher function from gitignore content. Relative paths should be provided
+   * using POSIX separators. Useful for unit tests.
+   */
+  public buildMatcher(gitignoreContent: string): (relativePath: string) => boolean | undefined {
+    const patterns = this.compilePatterns(".", "<inline>", gitignoreContent);
+    return (relativePath: string) => {
+      const candidate = toPosix(relativePath);
+      let decision: boolean | undefined;
+      for (const pattern of patterns) {
+        if (!pattern.matcher.match(candidate)) {
+          continue;
+        }
+        decision = pattern.negated ? false : true;
+      }
+      return decision;
+    };
+  }
+
+  /**
+   * Force eager loading of ignore files for a directory.
+   */
+  public async preloadDirectory(dirPath: string): Promise<void> {
+    await this.getDirectoryMatchers(path.resolve(dirPath));
+  }
+
+  /**
+   * Remove all cached matcher entries.
+   */
+  public clearCache(): void {
+    this.cache.clear();
+  }
+
+  /**
+   * Load a gitignore file from disk. Exposed for unit tests.
+   */
+  public async loadIgnoreFile(filePath: string): Promise<string | undefined> {
+    try {
+      return await fs.readFile(filePath, "utf8");
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      if (err.code !== "ENOENT") {
+        this.logger?.("gitignore.read.error", { filePath, error: err.message });
+      }
+      return undefined;
+    }
+  }
+
+  /**
+   * Compile gitignore content into pattern metadata. Exposed for testing.
+   */
+  public compilePatterns(dirPath: string, fileName: string, gitignoreContent: string): PatternInfo[] {
+    const baseDir = path.resolve(path.dirname(path.join(dirPath, fileName)));
+    const lines = gitignoreContent.split(/\r?\n/);
+    const patterns: PatternInfo[] = [];
+
+    for (const rawLine of lines) {
+      let line = rawLine;
+      if (!line || line.trim().length === 0) {
+        continue;
+      }
+
+      if (line.startsWith("#") && !line.startsWith("\\#")) {
+        continue;
+      }
+
+      let trimmed = line.trimEnd();
+      trimmed = stripEscapes(trimmed);
+
+      let negated = false;
+      if (isNegation(trimmed)) {
+        negated = true;
+        trimmed = trimmed.slice(1);
+      }
+
+      const cleaned = trimmed.trim();
+      if (!cleaned) {
+        continue;
+      }
+
+      let pattern = cleaned;
+      const anchored = pattern.startsWith("/");
+      if (anchored) {
+        pattern = pattern.slice(1);
+      }
+
+      let directoryOnly = pattern.endsWith("/");
+      if (directoryOnly) {
+        pattern = pattern.slice(0, -1);
+      }
+
+      let normalized = toPosix(pattern);
+      if (directoryOnly) {
+        normalized = normalized.length > 0 ? `${normalized}/**` : "**";
+      }
+
+      const options: { dot: boolean; nocomment: boolean; matchBase?: boolean } = {
+        dot: true,
+        nocomment: true
+      };
+
+      if (!anchored && normalized.indexOf("/") === -1) {
+        options.matchBase = true;
+      }
+
+      try {
+        const matcher = new Minimatch(normalized, options);
+        patterns.push({
+          raw: negated ? `!${cleaned}` : cleaned,
+          normalized,
+          negated,
+          matcher
+        });
+      } catch (error) {
+        const err = error as Error;
+        this.logger?.("gitignore.pattern.invalid", {
+          baseDir,
+          fileName,
+          pattern: rawLine,
+          error: err.message
+        });
+      }
+    }
+
+    return patterns;
+  }
+
+  /**
+   * Snapshot the current matcher cache for diagnostics.
+   */
+  public getCacheSnapshot(): MatcherCache {
+    const snapshot: MatcherCache = {};
+    for (const [key, entry] of this.cache.entries()) {
+      snapshot[key] = {
+        patterns: [...entry.patterns],
+        compiled: entry.compiled,
+        lastModified: new Date(entry.lastModified.getTime()),
+        checkPath: entry.checkPath,
+        sources: [...entry.sources]
+      };
+    }
+    return snapshot;
+  }
+
+  private async resolveStartDirectory(targetPath: string): Promise<string> {
+    const resolved = path.resolve(targetPath);
+    const stat = await this.statSafe(resolved);
+    if (stat?.isDirectory()) {
+      return resolved;
+    }
+    return path.dirname(resolved);
+  }
+
+  private async getDirectoryMatchers(dirPath: string): Promise<DirectoryMatchers | undefined> {
+    const directory = path.resolve(dirPath);
+    const cached = await this.tryGetCachedEntry(directory);
+    if (cached) {
+      return { entry: cached, cacheKey: directory };
+    }
+
+    const ignoreFiles = await this.collectIgnoreFiles(directory);
+    if (ignoreFiles.length === 0) {
+      return undefined;
+    }
+
+    const patterns: PatternInfo[] = [];
+    const rawPatterns: string[] = [];
+    const sources: Array<{ filePath: string; mtime: number }> = [];
+
+    for (const filePath of ignoreFiles) {
+      const content = await this.loadIgnoreFile(filePath);
+      if (typeof content !== "string") {
+        continue;
+      }
+      const stat = await this.statSafe(filePath);
+      if (stat) {
+        sources.push({ filePath, mtime: stat.mtimeMs });
+      }
+      const compiled = this.compilePatterns(directory, path.basename(filePath), content);
+      patterns.push(...compiled);
+      rawPatterns.push(...compiled.map((pattern) => pattern.raw));
+    }
+
+    const entry: MatcherCacheEntry = {
+      patterns: rawPatterns,
+      compiled: patterns.map((pattern) => pattern.matcher),
+      lastModified: new Date(sources.reduce((acc, value) => Math.max(acc, value.mtime), 0)),
+      sources,
+      checkPath: (relativePath: string) => {
+        const candidate = toPosix(relativePath);
+        let decision: boolean | undefined;
+        for (const pattern of patterns) {
+          if (!pattern.matcher.match(candidate)) {
+            continue;
+          }
+          decision = pattern.negated ? false : true;
+        }
+        return decision;
+      }
+    };
+
+    this.storeInCache(directory, entry);
+    return { entry, cacheKey: directory };
+  }
+
+  private async tryGetCachedEntry(directory: string): Promise<MatcherCacheEntry | undefined> {
+    const cached = this.cache.get(directory);
+    if (!cached) {
+      return undefined;
+    }
+
+    const valid = await this.isCacheEntryValid(cached);
+    if (!valid) {
+      this.cache.delete(directory);
+      return undefined;
+    }
+
+    this.touchCacheEntry(directory, cached);
+    return cached;
+  }
+
+  private touchCacheEntry(directory: string, entry: MatcherCacheEntry): void {
+    this.cache.delete(directory);
+    this.cache.set(directory, entry);
+  }
+
+  private storeInCache(directory: string, entry: MatcherCacheEntry): void {
+    this.cache.set(directory, entry);
+    if (this.cache.size > this.maxCacheEntries) {
+      const [firstKey] = this.cache.keys();
+      if (typeof firstKey === "string") {
+        this.cache.delete(firstKey);
+      }
+    }
+  }
+
+  private async isCacheEntryValid(entry: MatcherCacheEntry): Promise<boolean> {
+    if (entry.sources.length === 0) {
+      return true;
+    }
+    for (const source of entry.sources) {
+      const stat = await this.statSafe(source.filePath);
+      if (!stat || stat.mtimeMs !== source.mtime) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private async collectIgnoreFiles(directory: string): Promise<string[]> {
+    const ignoreNames = this.resolveIgnoreFileNames();
+    const files: string[] = [];
+    for (const name of ignoreNames) {
+      const candidate = path.join(directory, name);
+      const stat = await this.statSafe(candidate);
+      if (stat?.isFile()) {
+        files.push(candidate);
+      }
+    }
+    return files;
+  }
+
+  private normalizeRelativePath(baseDir: string, filePath: string): string | undefined {
+    const relative = path.relative(baseDir, filePath);
+    if (!relative || relative.startsWith("..")) {
+      return undefined;
+    }
+    return toPosix(relative === "" ? "./" : relative);
+  }
+
+  private async statSafe(targetPath: string): Promise<Stats | undefined> {
+    try {
+      return await fs.stat(targetPath);
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      if (err.code && ["ENOENT", "ENOTDIR", "EACCES"].includes(err.code)) {
+        return undefined;
+      }
+      this.logger?.("gitignore.stat.error", { targetPath, error: err.message });
+      return undefined;
+    }
   }
 }

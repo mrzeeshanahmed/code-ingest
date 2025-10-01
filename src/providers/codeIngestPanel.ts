@@ -35,7 +35,8 @@ export class CodeIngestPanel {
     );
 
     CodeIngestPanel.instance = new CodeIngestPanel(panel, extensionUri);
-    await setWebviewHtml({ webview: panel.webview, extensionUri });
+    const htmlPath = vscode.Uri.joinPath(extensionUri, "resources", "webview", "index.html").fsPath;
+    setWebviewHtml(panel.webview, htmlPath);
   }
 
   updateState(state: unknown): void {

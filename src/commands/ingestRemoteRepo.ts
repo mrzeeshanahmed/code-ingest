@@ -7,9 +7,16 @@ import type { CommandServices } from "./types";
 import { authenticate, partialClone, resolveRefToSha } from "../services/githubService";
 import { spawnGitPromise } from "../utils/procRedact";
 import { DigestGenerator } from "../services/digestGenerator";
-import { ContentProcessor } from "../services/contentProcessor";
+import { ContentProcessor, type BinaryFilePolicy } from "../services/contentProcessor";
 import { TokenAnalyzer } from "../services/tokenAnalyzer";
-import type { DigestConfig } from "../utils/validateConfig";
+import { GitignoreService } from "../services/gitignoreService";
+import { FilterService } from "../services/filterService";
+import { FileScanner } from "../services/fileScanner";
+import { NotebookProcessor } from "../services/notebookProcessor";
+import { ConfigurationService } from "../services/configurationService";
+import { ErrorReporter } from "../services/errorReporter";
+import { DEFAULT_CONFIG } from "../config/constants";
+import { formatDigest } from "../utils/digestFormatters";
 
 const EXCLUDED_DIRECTORIES = new Set([".git", "node_modules"]);
 
@@ -81,7 +88,7 @@ async function collectFilesRecursive(rootDir: string, token: vscode.Cancellation
   }
 
   await walk(rootDir);
-  return files;
+  return files.sort((a, b) => a.localeCompare(b));
 }
 
 interface IngestOutcome {
@@ -90,6 +97,7 @@ interface IngestOutcome {
   sha: string;
   totalTokens: number;
   diagnostics: string[];
+  workspaceRoot: string;
 }
 
 export function registerIngestRemoteRepoCommand(
@@ -160,8 +168,8 @@ export function registerIngestRemoteRepoCommand(
         title: `Code Ingest: Ingesting ${repoSlug}@${trimmedRef}`,
         cancellable: true
       }, async (progress, cancellationToken) => {
-        let tempDir: string | undefined;
-        let token: string | undefined;
+  let tempDir: string | undefined;
+  let token: string | undefined;
 
         throwIfCancelled(cancellationToken);
         progress.report({ message: "Authenticating with GitHub..." });
@@ -233,35 +241,96 @@ export function registerIngestRemoteRepoCommand(
           }
 
           throwIfCancelled(cancellationToken);
-          progress.report({ message: "Generating repository digest..." });
+          progress.report({ message: "Preparing ingestion pipeline..." });
 
-          const digestConfig: DigestConfig = {
-            workspaceRoot,
-            repoName: repoSlug,
-            sectionSeparator: "\n\n"
-          };
-
-          const digestGenerator = new DigestGenerator(
-            { getFileContent: ContentProcessor.getFileContent },
+          const uniqueFiles = Array.from(new Set(filesToProcess.map((filePath) => path.resolve(filePath))));
+          const configurationMessages: string[] = [];
+          const configurationService = new ConfigurationService(
             {
-              estimate: TokenAnalyzer.estimate,
-              formatEstimate: TokenAnalyzer.formatEstimate,
-              warnIfExceedsLimit: TokenAnalyzer.warnIfExceedsLimit
+              ...DEFAULT_CONFIG,
+              workspaceRoot,
+              repoName: repoSlug,
+              include: ["**/*"],
+              exclude: [".git/**", "node_modules/**"],
+              sectionSeparator: "\n\n"
+            },
+            {
+              addError: (message: string) => configurationMessages.push(`config error: ${message}`),
+              addWarning: (message: string) => configurationMessages.push(`config warning: ${message}`)
             }
           );
 
-          const digestResult = await digestGenerator.generate(
-            filesToProcess.map((filePath) => ({ path: filePath })),
-            digestConfig
-          );
+          const resolvedConfig = configurationService.loadConfig();
+          const maxFiles = resolvedConfig.maxFiles ?? uniqueFiles.length;
+          const selectedFiles = uniqueFiles.slice(0, maxFiles);
+          if (selectedFiles.length < uniqueFiles.length) {
+            configurationMessages.push(
+              `config warning: File list truncated to ${selectedFiles.length} entries (maxFiles=${maxFiles}).`
+            );
+          }
 
-          return {
-            digest: digestResult.fullContent,
-            repoSlug,
-            sha,
-            totalTokens: digestResult.totalTokens,
-            diagnostics: digestResult.diagnostics
-          } satisfies IngestOutcome;
+          const gitignoreService = new GitignoreService();
+          const filterService = new FilterService({ workspaceRoot, gitignoreService });
+          const fileScanner = new FileScanner(vscode.Uri.file(workspaceRoot));
+          const processor = new ContentProcessor();
+          const analyzer = new TokenAnalyzer({ includeDefaultAdapters: true, enableCaching: true });
+          const outputChannel = vscode.window.createOutputChannel("Code Ingest: Remote Repo");
+          const errorReporter = new ErrorReporter(outputChannel);
+
+          try {
+            throwIfCancelled(cancellationToken);
+            progress.report({ message: "Generating repository digest..." });
+
+            const digestGenerator = new DigestGenerator(
+              fileScanner,
+              filterService,
+              processor,
+              NotebookProcessor,
+              analyzer,
+              configurationService,
+              errorReporter
+            );
+
+            const digestResult = await digestGenerator.generateDigest({
+              selectedFiles,
+              outputFormat: "markdown",
+              applyRedaction: true,
+              includeMetadata: true,
+              binaryFilePolicy: (resolvedConfig.binaryFilePolicy ?? "skip") as BinaryFilePolicy,
+              maxFiles,
+              progressCallback: (update) => {
+                if (cancellationToken.isCancellationRequested) {
+                  throw new vscode.CancellationError();
+                }
+
+                const segments = [
+                  `Phase: ${update.phase}`,
+                  update.totalFiles ? `${update.filesProcessed}/${update.totalFiles} files` : undefined,
+                  update.tokensProcessed ? `${update.tokensProcessed} tokens` : undefined
+                ].filter(Boolean);
+
+                progress.report({ message: segments.join(" · ") });
+              }
+            });
+
+            const formattedDigest = formatDigest(digestResult, { format: "markdown" });
+            const pipelineDiagnostics = [
+              ...configurationMessages,
+              ...digestResult.statistics.warnings.map((warning) => `warning: ${warning}`),
+              ...digestResult.statistics.errors.map((error) => `error: ${error}`)
+            ];
+
+            return {
+              digest: formattedDigest,
+              repoSlug,
+              sha,
+              totalTokens: digestResult.statistics.totalTokens,
+              diagnostics: pipelineDiagnostics,
+              workspaceRoot
+            } satisfies IngestOutcome;
+          } finally {
+            outputChannel.dispose();
+          }
         } finally {
           if (tempDir) {
             try {

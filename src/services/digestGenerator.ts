@@ -1,117 +1,748 @@
-import type { DigestConfig } from "../utils/validateConfig";
-import { Formatters } from "../utils/formatters";
+import * as path from "node:path";
+import * as fs from "node:fs";
+import { performance } from "node:perf_hooks";
+import * as vscode from "vscode";
+
 import { asyncPool } from "../utils/asyncPool";
 import { redactSecrets } from "../utils/redactSecrets";
+import type { DigestConfig } from "../utils/validateConfig";
 
-export interface FileNode {
+// Load package version at runtime to avoid TypeScript including package.json
+// in the compilation root (which causes TS6059 when rootDir is 'src').
+const PACKAGE_VERSION = (() => {
+  try {
+    const pkgPath = path.resolve(__dirname, '..', '..', 'package.json');
+    const raw = fs.readFileSync(pkgPath, 'utf8');
+    return JSON.parse(raw).version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
+import type { BinaryFilePolicy, ProcessedContent } from "./contentProcessor";
+import type { FileNode as ScannerFileNode } from "./fileScanner";
+import type { TokenBudgetOptions } from "./tokenAnalyzer";
+import type { NotebookProcessingOptions, ProcessedNotebook } from "./notebookProcessor";
+import type { FilterResult } from "./filterService";
+import type { ErrorReportContext } from "./errorReporter";
+import { FileScanner } from "./fileScanner";
+import { FilterService } from "./filterService";
+import { ContentProcessor } from "./contentProcessor";
+import { NotebookProcessor } from "./notebookProcessor";
+import { TokenAnalyzer } from "./tokenAnalyzer";
+import { ConfigurationService } from "./configurationService";
+import { ErrorReporter } from "./errorReporter";
+
+const DEFAULT_TOTAL_TOKEN_BUDGET = 16_000;
+const DEFAULT_PROGRESS_SAMPLE_INTERVAL = 250;
+const MIN_TRUNCATED_CONTENT_LENGTH = 128;
+const MAX_TRUNCATION_ITERATIONS = 6;
+
+export interface DigestOptions {
+  selectedFiles: string[];
+  outputFormat: "markdown" | "json" | "text";
+  maxFiles?: number;
+  maxTokens?: number;
+  includeMetadata?: boolean;
+  applyRedaction?: boolean;
+  redactionOverride?: boolean;
+  binaryFilePolicy?: BinaryFilePolicy;
+  progressCallback?: (progress: GenerationProgress) => void;
+}
+
+export interface GenerationProgress {
+  phase: "scanning" | "processing" | "analyzing" | "generating" | "formatting" | "complete";
+  filesProcessed: number;
+  totalFiles: number;
+  tokensProcessed: number;
+  currentFile?: string;
+  timeElapsed: number;
+  estimatedTimeRemaining?: number;
+  memoryUsage?: number;
+}
+
+export interface ProcessedFileContent {
   path: string;
+  relativePath: string;
+  tokens: number;
+  content: string;
+  languageId?: string;
+  encoding: ProcessedContent["encoding"];
+  truncated: boolean;
+  redacted: boolean;
+  metadata: {
+    size?: number;
+    lines?: number;
+    checksum?: string;
+    processingTime?: number;
+    notebook?: {
+      codeCells: number;
+      markdownCells: number;
+      rawCells: number;
+      outputs: {
+        text: number;
+        nonText: number;
+        skipped: number;
+      };
+      warnings: string[];
+    };
+  };
+  warnings: string[];
+  errors: string[];
+}
+
+export interface DigestSummary {
+  overview: {
+    totalFiles: number;
+    includedFiles: number;
+    skippedFiles: number;
+    binaryFiles: number;
+    totalTokens: number;
+  };
+  tableOfContents: Array<{ path: string; tokens: number; truncated: boolean }>;
+  notes: string[];
+}
+
+export interface DigestMetadata {
+  generatedAt: Date;
+  workspaceRoot: string;
+  totalFiles: number;
+  includedFiles: number;
+  skippedFiles: number;
+  binaryFiles: number;
+  tokenEstimate: number;
+  processingTime: number;
+  redactionApplied: boolean;
+  generatorVersion: string;
 }
 
 export interface DigestResult {
-  fullContent: string;
-  totalTokens: number;
-  diagnostics: string[];
+  content: {
+    files: ProcessedFileContent[];
+    summary: DigestSummary;
+    metadata: DigestMetadata;
+  };
+  statistics: {
+    filesProcessed: number;
+    totalTokens: number;
+    processingTime: number;
+    warnings: string[];
+    errors: string[];
+  };
+  redactionApplied: boolean;
+  truncationApplied: boolean;
 }
 
-type ContentProcessorContract = {
-  getFileContent(filePath: string, config: DigestConfig): Promise<string | null>;
-};
+interface FileCandidate {
+  absolutePath: string;
+  relativePath: string;
+  scannerNode: ScannerFileNode;
+}
 
-type TokenAnalyzerContract = {
-  estimate(content: string): number;
-  formatEstimate?(tokens: number): string;
-  warnIfExceedsLimit?(tokens: number, limit: number): string | null;
-};
-
-interface ProcessedChunk {
-  filePath: string;
-  content: string;
+interface FileProcessingOutcome {
+  file?: ProcessedFileContent;
+  warnings: string[];
+  errors: string[];
   tokens: number;
+  binary: boolean;
+  truncated: boolean;
 }
 
-interface ProcessResult {
-  chunk?: ProcessedChunk;
-  diagnostics: string[];
+interface PipelineContext {
+  config: DigestConfig;
+  workspaceRoot: string;
+  maxFiles: number;
+  maxTokens: number;
+  binaryPolicy: BinaryFilePolicy;
+  includeMetadata: boolean;
+  shouldRedact: boolean;
+}
+
+interface ScannerResult {
+  totalFiles: number;
+  nodes: ScannerFileNode[];
 }
 
 export class DigestGenerator {
-  constructor(
-    private readonly contentProcessor: ContentProcessorContract,
-    private readonly tokenAnalyzer: TokenAnalyzerContract
+  public constructor(
+    private readonly fileScanner: FileScanner,
+    private readonly filterService: FilterService,
+    private readonly contentProcessor: ContentProcessor,
+    private readonly notebookProcessor: typeof NotebookProcessor,
+    private readonly tokenAnalyzer: TokenAnalyzer,
+    private readonly configService: ConfigurationService,
+    private readonly errorReporter: ErrorReporter
   ) {}
 
-  public async generate(files: FileNode[], config: DigestConfig): Promise<DigestResult> {
-    const concurrency = config.maxConcurrency ?? 4;
-    const sectionSeparator = config.sectionSeparator ?? "\n\n";
-    const workspaceRoot = config.workspaceRoot ?? process.cwd();
+  public async generateDigest(options: DigestOptions): Promise<DigestResult> {
+    const startedAt = performance.now();
+    const emitProgress = this.createProgressEmitter(options.progressCallback, startedAt);
 
-    const taskFactories = files.map((file) => () => this.processFile(file, config));
-    const results = await asyncPool(taskFactories, concurrency);
+    const config = this.configService.loadConfig();
+    const context = this.resolvePipelineContext(options, config);
 
-    const diagnostics: string[] = [];
-    const chunks: ProcessedChunk[] = [];
+    emitProgress("scanning", {
+      filesProcessed: 0,
+      totalFiles: 0,
+      tokensProcessed: 0
+    });
 
-    for (const result of results) {
-      diagnostics.push(...result.diagnostics);
-      if (result.chunk) {
-        chunks.push(result.chunk);
+    const scannerResult = await this.scanWorkspace(emitProgress, context);
+
+    const candidates = await this.filterCandidates(scannerResult.nodes, context, options, emitProgress);
+    const sortedCandidates = this.sortCandidatesByPriority(candidates);
+
+    const limitedCandidates = sortedCandidates.slice(0, context.maxFiles);
+    const truncationByCount = sortedCandidates.length > context.maxFiles;
+
+    const processedFiles: ProcessedFileContent[] = [];
+    const warnings: string[] = [];
+    const errors: string[] = [];
+
+    let tokensProcessed = 0;
+    let filesProcessed = 0;
+    let binaryFiles = 0;
+    let truncationApplied = truncationByCount;
+
+    const tasks = limitedCandidates.map((candidate) => async () => {
+      const outcome = await this.processFileCandidate(candidate, context, tokensProcessed, emitProgress);
+      if (outcome.file) {
+        processedFiles.push(outcome.file);
+        filesProcessed += 1;
+        tokensProcessed += outcome.tokens;
+        if (outcome.binary) {
+          binaryFiles += 1;
+        }
+        if (outcome.truncated) {
+          truncationApplied = true;
+        }
+      }
+      warnings.push(...outcome.warnings);
+      errors.push(...outcome.errors);
+    });
+
+    await asyncPool(tasks, 1);
+
+    emitProgress("generating", {
+      filesProcessed,
+      totalFiles: limitedCandidates.length,
+      tokensProcessed
+    });
+
+    const summary: DigestSummary = {
+      overview: {
+        totalFiles: scannerResult.totalFiles,
+        includedFiles: processedFiles.length,
+        skippedFiles: scannerResult.totalFiles - processedFiles.length,
+        binaryFiles,
+        totalTokens: tokensProcessed
+      },
+      tableOfContents: processedFiles
+        .map((file) => ({ path: file.relativePath, tokens: file.tokens, truncated: file.truncated }))
+        .sort((a, b) => a.path.localeCompare(b.path)),
+      notes: [...warnings]
+    } satisfies DigestSummary;
+
+    emitProgress("formatting", {
+      filesProcessed,
+      totalFiles: limitedCandidates.length,
+      tokensProcessed
+    });
+
+    const metadata: DigestMetadata = {
+      generatedAt: new Date(),
+      workspaceRoot: context.workspaceRoot,
+      totalFiles: scannerResult.totalFiles,
+      includedFiles: processedFiles.length,
+      skippedFiles: Math.max(scannerResult.totalFiles - processedFiles.length, 0),
+      binaryFiles,
+      tokenEstimate: tokensProcessed,
+      processingTime: Math.round(performance.now() - startedAt),
+      redactionApplied: context.shouldRedact,
+      generatorVersion: PACKAGE_VERSION
+    } satisfies DigestMetadata;
+
+    emitProgress("complete", {
+      filesProcessed,
+      totalFiles: limitedCandidates.length,
+      tokensProcessed
+    });
+
+    return {
+      content: {
+        files: processedFiles.sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
+        summary,
+        metadata
+      },
+      statistics: {
+        filesProcessed: processedFiles.length,
+        totalTokens: tokensProcessed,
+        processingTime: metadata.processingTime,
+        warnings: [...new Set(warnings)],
+        errors
+      },
+      redactionApplied: context.shouldRedact,
+      truncationApplied
+    } satisfies DigestResult;
+  }
+
+  private resolvePipelineContext(options: DigestOptions, config: DigestConfig): PipelineContext {
+    const workspaceRoot = this.resolveWorkspaceRoot(config, options.selectedFiles);
+    const maxFiles = Math.max(1, options.maxFiles ?? config.maxFiles ?? 5_000);
+    const maxTokens = Math.max(1, options.maxTokens ?? DEFAULT_TOTAL_TOKEN_BUDGET);
+    const binaryPolicy = (options.binaryFilePolicy ?? config.binaryFilePolicy ?? "skip") as BinaryFilePolicy;
+    const includeMetadata = options.includeMetadata ?? true;
+    const shouldRedact = options.redactionOverride ? false : options.applyRedaction ?? true;
+
+    return {
+      config,
+      workspaceRoot,
+      maxFiles,
+      maxTokens,
+      binaryPolicy,
+      includeMetadata,
+      shouldRedact
+    } satisfies PipelineContext;
+  }
+
+  private resolveWorkspaceRoot(config: DigestConfig, selectedFiles: string[]): string {
+    if (typeof config.workspaceRoot === "string" && config.workspaceRoot.trim().length > 0) {
+      return path.resolve(config.workspaceRoot);
+    }
+
+    for (const file of selectedFiles) {
+      if (path.isAbsolute(file)) {
+        return path.dirname(file);
       }
     }
 
-    const totalTokens = chunks.reduce((sum, chunk) => sum + chunk.tokens, 0);
-    const processedFiles = chunks.length;
-    const processedPaths = chunks.map((chunk) => chunk.filePath);
-
-    const summary = Formatters.buildSummary(processedFiles, totalTokens);
-    const tree = Formatters.buildFileTree(processedPaths, workspaceRoot);
-    const contentSections = chunks.map((chunk) => chunk.content);
-
-  const assembled = [summary, tree, ...contentSections].filter((section) => section && section.length > 0);
-  const fullContent = assembled.join(sectionSeparator);
-  const redactedContent = redactSecrets(fullContent);
-
-  return { fullContent: redactedContent, totalTokens, diagnostics };
+    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
   }
 
-  private async processFile(file: FileNode, config: DigestConfig): Promise<ProcessResult> {
-    const diagnostics: string[] = [];
+  private async scanWorkspace(
+    emitProgress: ReturnType<typeof DigestGenerator.prototype.createProgressEmitter>,
+    context: PipelineContext
+  ): Promise<ScannerResult> {
+    const collected: ScannerFileNode[] = [];
+    let total = 0;
+    let lastEmit = 0;
+
+    const nodes = await this.fileScanner.scan({
+      maxEntries: context.maxFiles * 10,
+      onProgress: (processed, totalCount, currentPath) => {
+        total = totalCount ?? total;
+        const now = performance.now();
+        if (now - lastEmit >= DEFAULT_PROGRESS_SAMPLE_INTERVAL) {
+          const state = {
+            filesProcessed: processed,
+            totalFiles: totalCount ?? total,
+            tokensProcessed: 0,
+            ...(currentPath ? { currentFile: currentPath } : {})
+          };
+          emitProgress("scanning", state);
+          lastEmit = now;
+        }
+      }
+    });
+
+    collected.push(...nodes);
+
+    const totalFiles = collected.filter((node) => node.type === "file").length;
+
+    emitProgress("scanning", {
+      filesProcessed: totalFiles,
+      totalFiles,
+      tokensProcessed: 0
+    });
+
+    return { totalFiles, nodes: collected } satisfies ScannerResult;
+  }
+
+  private async filterCandidates(
+    nodes: ScannerFileNode[],
+    context: PipelineContext,
+    options: DigestOptions,
+    emitProgress: ReturnType<typeof DigestGenerator.prototype.createProgressEmitter>
+  ): Promise<FileCandidate[]> {
+    const files = nodes.filter((node) => node.type === "file");
+    const absolutePaths = files.map((node) => vscode.Uri.parse(node.uri).fsPath);
+
+    const filterResults = await this.filterService.batchFilter(absolutePaths, {
+      includePatterns: context.config.include ?? [],
+      excludePatterns: context.config.exclude ?? [],
+      useGitignore: context.config.respectGitIgnore ?? true,
+      followSymlinks: context.config.followSymlinks ?? false
+    });
+
+    const selectedAbsolute = new Set(
+      options.selectedFiles.map((file) => (path.isAbsolute(file) ? path.normalize(file) : path.resolve(context.workspaceRoot, file)))
+    );
+
+    const candidates: FileCandidate[] = [];
+
+    files.forEach((node, index) => {
+      const absolutePath = absolutePaths[index];
+      const filterResult = filterResults.get(absolutePath);
+      if (!this.shouldIncludeFile(filterResult)) {
+        return;
+      }
+
+      if (selectedAbsolute.size > 0 && !selectedAbsolute.has(path.normalize(absolutePath))) {
+        return;
+      }
+
+      const relativePath = path.relative(context.workspaceRoot, absolutePath) || path.basename(absolutePath);
+
+      candidates.push({
+        absolutePath,
+        relativePath: relativePath.split(path.sep).join("/"),
+        scannerNode: node
+      });
+    });
+
+    emitProgress("processing", {
+      filesProcessed: 0,
+      totalFiles: candidates.length,
+      tokensProcessed: 0
+    });
+
+    return candidates;
+  }
+
+  private shouldIncludeFile(result: FilterResult | undefined): boolean {
+    if (!result) {
+      return true;
+    }
+    return result.included;
+  }
+
+  private sortCandidatesByPriority(candidates: FileCandidate[]): FileCandidate[] {
+    const priorityMap = new Map<string, number>();
+
+    candidates.forEach((candidate) => {
+      priorityMap.set(candidate.absolutePath, this.computePriority(candidate.absolutePath));
+    });
+
+    return [...candidates].sort((a, b) => {
+      const priorityDiff = (priorityMap.get(b.absolutePath) ?? 0) - (priorityMap.get(a.absolutePath) ?? 0);
+      if (priorityDiff !== 0) {
+        return priorityDiff;
+      }
+      return a.relativePath.localeCompare(b.relativePath);
+    });
+  }
+
+  private computePriority(absolutePath: string): number {
+    const lower = absolutePath.toLowerCase();
+    if (/(package|yarn|pnpm)\.json$/.test(lower)) {
+      return 100;
+    }
+    if (/\b(tsconfig|webpack|rollup|babel|vite)\.\w+$/.test(lower)) {
+      return 80;
+    }
+    if (/\breadme|\.md$/.test(lower)) {
+      return 60;
+    }
+    if (/\bconfig/.test(lower) || /\.env/.test(lower)) {
+      return 40;
+    }
+    if (/\.test\./.test(lower) || /\.spec\./.test(lower)) {
+      return 10;
+    }
+    return 20;
+  }
+
+  private async processFileCandidate(
+    candidate: FileCandidate,
+    context: PipelineContext,
+    tokensProcessedSoFar: number,
+    emitProgress: ReturnType<typeof DigestGenerator.prototype.createProgressEmitter>
+  ): Promise<FileProcessingOutcome> {
+    const warnings: string[] = [];
+    const errors: string[] = [];
+
+    emitProgress("processing", {
+      filesProcessed: 0,
+      totalFiles: 0,
+      tokensProcessed: tokensProcessedSoFar,
+      currentFile: candidate.relativePath
+    });
+
+    let processedContent: ProcessedContent;
+    let notebookDetails: ProcessedNotebook | undefined;
 
     try {
-      const content = await this.contentProcessor.getFileContent(file.path, config);
-      if (!content) {
-        diagnostics.push(`Skipped ${file.path}: no content generated.`);
-        return { diagnostics };
+      processedContent = await this.contentProcessor.processFile(candidate.absolutePath, {
+        binaryFilePolicy: context.binaryPolicy,
+        detectLanguage: true
+      });
+
+      if (candidate.absolutePath.toLowerCase().endsWith(".ipynb")) {
+        notebookDetails = await this.notebookProcessor.processNotebook(candidate.absolutePath, this.resolveNotebookOptions(context.config));
+        warnings.push(...notebookDetails.warnings.map((message) => `${candidate.relativePath}: ${message}`));
       }
-
-      let tokens: number;
-      try {
-        tokens = this.tokenAnalyzer.estimate(content);
-      } catch (error) {
-        diagnostics.push(`Failed to estimate tokens for ${file.path}: ${DigestGenerator.stringifyError(error)}`);
-        return { diagnostics };
-      }
-
-      const header = Formatters.buildFileHeader(file.path, tokens);
-      const combined = `${header}\n${content}`;
-
-      return {
-        diagnostics,
-        chunk: {
-          filePath: file.path,
-          content: combined,
-          tokens
-        }
-      };
     } catch (error) {
-      diagnostics.push(`Error processing ${file.path}: ${DigestGenerator.stringifyError(error)}`);
-      return { diagnostics };
+      const message = this.stringifyError(error);
+      errors.push(`${candidate.relativePath}: failed to process content (${message}).`);
+      this.reportError(error, { source: "digest-generator", metadata: { file: candidate.absolutePath, stage: "process" } });
+      return {
+        warnings,
+        errors,
+        tokens: 0,
+        binary: false,
+        truncated: false
+      } satisfies FileProcessingOutcome;
+    }
+
+    const analysis = await this.analyzeContent(candidate, processedContent.content, context, tokensProcessedSoFar, warnings, errors, emitProgress);
+    const finalContent = context.shouldRedact ? redactSecrets(analysis.content) : analysis.content;
+
+    const metadata: ProcessedFileContent["metadata"] = {};
+    if (context.includeMetadata) {
+      if (typeof processedContent.size === "number") {
+        metadata.size = processedContent.size;
+      }
+      const lineCount = processedContent.metadata?.lines;
+      if (typeof lineCount === "number") {
+        metadata.lines = lineCount;
+      }
+      const checksum = processedContent.metadata?.checksum;
+      if (typeof checksum === "string") {
+        metadata.checksum = checksum;
+      }
+      if (typeof processedContent.processingTime === "number") {
+        metadata.processingTime = processedContent.processingTime;
+      }
+      if (notebookDetails) {
+        metadata.notebook = {
+          codeCells: notebookDetails.cellCount.code,
+          markdownCells: notebookDetails.cellCount.markdown,
+          rawCells: notebookDetails.cellCount.raw,
+          outputs: notebookDetails.outputCount,
+          warnings: notebookDetails.warnings
+        };
+      }
+    } else if (notebookDetails) {
+      metadata.notebook = {
+        codeCells: notebookDetails.cellCount.code,
+        markdownCells: notebookDetails.cellCount.markdown,
+        rawCells: notebookDetails.cellCount.raw,
+        outputs: notebookDetails.outputCount,
+        warnings: notebookDetails.warnings
+      };
+    }
+
+    const file: ProcessedFileContent = {
+      path: candidate.absolutePath,
+      relativePath: candidate.relativePath,
+      tokens: analysis.tokens,
+      content: finalContent,
+      languageId: processedContent.language,
+      encoding: processedContent.encoding,
+      truncated: processedContent.isTruncated || analysis.truncated,
+      redacted: context.shouldRedact,
+      metadata,
+      warnings: [...warnings],
+      errors: [...errors]
+    } satisfies ProcessedFileContent;
+
+    return {
+      file,
+      warnings,
+      errors,
+      tokens: analysis.tokens,
+      binary: processedContent.encoding !== "utf8",
+      truncated: file.truncated
+    } satisfies FileProcessingOutcome;
+  }
+
+  private resolveNotebookOptions(config: DigestConfig): NotebookProcessingOptions {
+    return {
+      includeCodeCells: config.includeCodeCells ?? true,
+      includeMarkdownCells: config.includeMarkdownCells ?? true,
+      includeOutputs: config.includeCellOutputs ?? false,
+      includeNonTextOutputs: false,
+      nonTextOutputMaxBytes: 256 * 1024,
+      cellSeparator: "\n\n",
+      outputSeparator: "\n",
+      preserveMarkdownFormatting: true
+    } satisfies NotebookProcessingOptions;
+  }
+
+  private async analyzeContent(
+    candidate: FileCandidate,
+    content: string,
+    context: PipelineContext,
+    tokensProcessedSoFar: number,
+    warnings: string[],
+    errors: string[],
+    emitProgress: ReturnType<typeof DigestGenerator.prototype.createProgressEmitter>
+  ): Promise<{ content: string; tokens: number; truncated: boolean }> {
+    emitProgress("analyzing", {
+      filesProcessed: 0,
+      totalFiles: 0,
+      tokensProcessed: tokensProcessedSoFar,
+      currentFile: candidate.relativePath
+    });
+
+    const remainingBudget = Math.max(context.maxTokens - tokensProcessedSoFar, 0);
+
+    try {
+      const analysis = await this.tokenAnalyzer.analyze(content, {
+        metadata: { path: candidate.relativePath },
+        budget: this.buildBudgetOptions(context.maxTokens)
+      });
+
+      warnings.push(...analysis.warnings.map((warning) => `${candidate.relativePath}: ${warning}`));
+
+      if (remainingBudget <= 0) {
+        warnings.push(`${candidate.relativePath}: token budget exhausted before processing.`);
+        return {
+          content: this.buildTruncationNotice(content, candidate.relativePath, 0),
+          tokens: 0,
+          truncated: true
+        };
+      }
+
+      if (tokensProcessedSoFar + analysis.tokens <= context.maxTokens) {
+        return {
+          content,
+          tokens: analysis.tokens,
+          truncated: analysis.exceededBudget
+        };
+      }
+
+      return this.truncateToBudget(content, candidate, context, remainingBudget, warnings);
+    } catch (error) {
+      const message = this.stringifyError(error);
+      errors.push(`${candidate.relativePath}: token analysis failed (${message}).`);
+      this.reportError(error, { source: "digest-generator", metadata: { file: candidate.absolutePath, stage: "analyze" } });
+      return {
+        content: this.buildTruncationNotice(content, candidate.relativePath, 0),
+        tokens: 0,
+        truncated: true
+      };
     }
   }
 
-  private static stringifyError(error: unknown): string {
-    if (error instanceof Error) {
+  private buildBudgetOptions(limit: number): TokenBudgetOptions {
+    const warnRatio = 0.85;
+    return {
+      limit,
+      warnRatio,
+      warnAt: Math.floor(limit * warnRatio),
+      failOnExceed: false
+    } satisfies TokenBudgetOptions;
+  }
+
+  private async truncateToBudget(
+    content: string,
+    candidate: FileCandidate,
+    context: PipelineContext,
+    remainingTokens: number,
+    warnings: string[]
+  ): Promise<{ content: string; tokens: number; truncated: boolean }> {
+    if (remainingTokens <= 0) {
+      warnings.push(`${candidate.relativePath}: excluded due to token budget.`);
+      return {
+        content: this.buildTruncationNotice(content, candidate.relativePath, 0),
+        tokens: 0,
+        truncated: true
+      };
+    }
+
+    let truncatedContent = content;
+    let estimatedTokens = Math.max(1, TokenAnalyzer.estimate(truncatedContent));
+    let iterations = 0;
+
+    while (iterations < MAX_TRUNCATION_ITERATIONS && estimatedTokens > remainingTokens && truncatedContent.length > MIN_TRUNCATED_CONTENT_LENGTH) {
+      const ratio = Math.max(0.1, remainingTokens / estimatedTokens);
+      const nextLength = Math.max(MIN_TRUNCATED_CONTENT_LENGTH, Math.floor(truncatedContent.length * ratio));
+      truncatedContent = truncatedContent.slice(0, nextLength);
+
+      const analysis = await this.tokenAnalyzer.analyze(truncatedContent, {
+        metadata: { path: candidate.relativePath, truncated: true },
+        budget: this.buildBudgetOptions(remainingTokens),
+        skipCache: true
+      });
+      estimatedTokens = analysis.tokens;
+      iterations += 1;
+    }
+
+    const tokens = Math.min(estimatedTokens, remainingTokens);
+    warnings.push(`${candidate.relativePath}: truncated to fit token budget.`);
+
+    return {
+      content: this.buildTruncationNotice(truncatedContent, candidate.relativePath, remainingTokens - tokens),
+      tokens,
+      truncated: true
+    };
+  }
+
+  private buildTruncationNotice(content: string, relativePath: string, remainingTokens: number): string {
+    const head = content.split(/\r?\n/).slice(0, 50).join("\n");
+    return [
+      head,
+      "",
+      `[[TRUNCATED]] ${relativePath}: token budget limit reached. Remaining allowance: ${remainingTokens} tokens.`
+    ].join("\n");
+  }
+
+  private stringifyError(error: unknown): string {
+    if (error instanceof Error && typeof error.message === "string") {
       return error.message;
     }
-    return String(error);
+    return typeof error === "string" ? error : JSON.stringify(error);
+  }
+
+  private reportError(error: unknown, context: ErrorReportContext): void {
+    try {
+      this.errorReporter.report(error, context);
+    } catch {
+      // Swallow reporter errors to keep pipeline resilient.
+    }
+  }
+
+  private createProgressEmitter(
+    callback: DigestOptions["progressCallback"],
+    startedAt: number
+  ): (
+    phase: GenerationProgress["phase"],
+    state: { filesProcessed: number; totalFiles: number; tokensProcessed: number; currentFile?: string }
+  ) => void {
+    return (phase, state) => {
+      if (!callback) {
+        return;
+      }
+
+      const elapsed = performance.now() - startedAt;
+      const estimatedRemaining = this.estimateTimeRemaining(state.filesProcessed, state.totalFiles, elapsed);
+      const memoryUsage = typeof process.memoryUsage === "function" ? process.memoryUsage().rss / (1024 * 1024) : undefined;
+
+      const progress: GenerationProgress = {
+        phase,
+        filesProcessed: state.filesProcessed,
+        totalFiles: state.totalFiles,
+        tokensProcessed: state.tokensProcessed,
+        timeElapsed: elapsed,
+        ...(state.currentFile ? { currentFile: state.currentFile } : {}),
+        ...(estimatedRemaining !== undefined ? { estimatedTimeRemaining: estimatedRemaining } : {}),
+        ...(memoryUsage !== undefined ? { memoryUsage } : {})
+      } satisfies GenerationProgress;
+
+      try {
+        callback(progress);
+      } catch {
+        // Ignore listener failures.
+      }
+    };
+  }
+
+  private estimateTimeRemaining(processed: number, total: number, elapsedMs: number): number | undefined {
+    if (processed <= 0 || processed > total) {
+      return undefined;
+    }
+    const avg = elapsedMs / processed;
+    const remaining = total - processed;
+    return Math.max(remaining, 0) * avg;
   }
 }

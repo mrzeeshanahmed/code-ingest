@@ -1,34 +1,34 @@
 export interface DigestConfig {
   /** Glob patterns to include when generating digests. */
-  include?: string[];
+  include?: string[] | undefined;
   /** Glob patterns to exclude when generating digests. */
-  exclude?: string[];
+  exclude?: string[] | undefined;
   /** Maximum directory traversal depth. */
-  maxDepth?: number;
+  maxDepth?: number | undefined;
   /** Maximum number of files to process in a single run. */
-  maxFiles?: number;
+  maxFiles?: number | undefined;
   /** Output format for generated digests. */
-  outputFormat?: 'json' | 'markdown' | string;
+  outputFormat?: 'json' | 'markdown' | string | undefined;
   /** Policy for handling binary files encountered during scanning. */
-  binaryFilePolicy?: 'skip' | 'base64' | 'placeholder' | string;
+  binaryFilePolicy?: 'skip' | 'base64' | 'placeholder' | string | undefined;
   /** Human readable repository name. */
-  repoName?: string;
+  repoName?: string | undefined;
   /** Whether symbolic links should be followed during traversal. */
-  followSymlinks?: boolean;
+  followSymlinks?: boolean | undefined;
   /** Respect gitignore files when discovering entries. */
-  respectGitIgnore?: boolean;
+  respectGitIgnore?: boolean | undefined;
   /** Whether to include code cells when processing notebooks. */
-  includeCodeCells?: boolean;
+  includeCodeCells?: boolean | undefined;
   /** Whether to include markdown cells when processing notebooks. */
-  includeMarkdownCells?: boolean;
+  includeMarkdownCells?: boolean | undefined;
   /** Whether to include notebook cell outputs. */
-  includeCellOutputs?: boolean;
+  includeCellOutputs?: boolean | undefined;
   /** Maximum number of concurrent file processing tasks. */
-  maxConcurrency?: number;
+  maxConcurrency?: number | undefined;
   /** Separator string used when assembling multi-section outputs. */
-  sectionSeparator?: string;
+  sectionSeparator?: string | undefined;
   /** Absolute workspace root used for building relative paths in summaries. */
-  workspaceRoot?: string;
+  workspaceRoot?: string | undefined;
 }
 
 export interface Diagnostics {

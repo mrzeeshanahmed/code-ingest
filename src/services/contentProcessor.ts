@@ -1,72 +1,747 @@
-import * as path from "path";
-import { promises as fs } from "fs";
-import type { DigestConfig } from "../utils/validateConfig";
+import { Buffer } from "node:buffer";
+import * as fs from "node:fs";
+import { promises as fsp } from "node:fs";
+import * as path from "node:path";
+import { performance } from "node:perf_hooks";
+import * as vscode from "vscode";
+
+import { asyncPool } from "../utils/asyncPool";
+import { wrapError } from "../utils/errorHandling";
 import { NotebookProcessor } from "./notebookProcessor";
 
-const BINARY_PLACEHOLDER_PREFIX = "[binary file]";
+export type BinaryFilePolicy = "skip" | "base64" | "placeholder";
 
-export class ContentProcessor {
-  /**
-   * Reads a file from disk and returns its textual representation based on the
-   * provided configuration. Binary files are handled according to
-   * `config.binaryFilePolicy`.
-   */
-  public static async getFileContent(filePath: string, config: DigestConfig): Promise<string | null> {
-    const resolved = path.resolve(filePath);
-    try {
-      if (resolved.toLowerCase().endsWith(".ipynb")) {
-        const raw = await fs.readFile(resolved, "utf8");
-        return NotebookProcessor.buildNotebookContent(raw, config);
-      }
+export interface ProcessedContentMetadata {
+  readonly lines: number;
+  readonly checksum?: string;
+  readonly truncatedBytes?: number;
+  readonly [key: string]: unknown;
+}
 
-      const buffer = await fs.readFile(resolved);
+export interface ProcessedContent {
+  readonly content: string;
+  readonly language: string;
+  readonly encoding: "utf8" | "base64" | "binary-placeholder";
+  readonly size: number;
+  readonly isTruncated: boolean;
+  readonly processingTime: number;
+  readonly metadata?: ProcessedContentMetadata;
+}
 
-      if (ContentProcessor.isBinary(buffer)) {
-        return ContentProcessor.handleBinary(buffer, resolved, config);
-      }
+export interface ProcessingOptions {
+  readonly binaryFilePolicy?: BinaryFilePolicy;
+  readonly maxFileSize?: number;
+  readonly streamingThreshold?: number;
+  readonly encoding?: BufferEncoding;
+  readonly detectLanguage?: boolean;
+  readonly whitelistExtensions?: string[];
+  readonly blacklistExtensions?: string[];
+  readonly languageOverride?: string;
+  readonly onProgress?: (progress: { bytesRead: number; totalBytes?: number; done?: boolean }) => void;
+  readonly timeoutMs?: number;
+  readonly concurrency?: number;
+}
 
-      const text = buffer.toString("utf8");
-      return ContentProcessor.normalizeLineEndings(text);
-    } catch {
-      return null;
+interface ResolvedProcessingOptions {
+  readonly binaryFilePolicy: BinaryFilePolicy;
+  readonly maxFileSize: number;
+  readonly streamingThreshold: number;
+  readonly encoding: BufferEncoding;
+  readonly detectLanguage: boolean;
+  readonly whitelistExtensions: Set<string>;
+  readonly blacklistExtensions: Set<string>;
+  readonly languageOverride: string | undefined;
+  readonly onProgress: ((progress: { bytesRead: number; totalBytes?: number; done?: boolean }) => void) | undefined;
+  readonly timeoutMs: number;
+  readonly concurrency: number;
+}
+
+interface BinaryDetectionResult {
+  readonly isBinary: boolean;
+  readonly reason?: string;
+  readonly sample: Buffer;
+}
+
+interface ContentProcessorDependencies {
+  readonly logger?: (message: string, metadata?: Record<string, unknown>) => void;
+  readonly now?: () => number;
+}
+
+const DEFAULT_MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
+const DEFAULT_STREAMING_THRESHOLD = 1 * 1024 * 1024; // 1MB
+const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_ENCODING: BufferEncoding = "utf8";
+const DEFAULT_BINARY_POLICY: BinaryFilePolicy = "skip";
+const DEFAULT_CONCURRENCY = 4;
+const SAMPLE_BYTES = 8192;
+const CHECKSUM_SAMPLE_BYTES = 2048;
+const BINARY_SIGNATURES: Array<{ signature: Buffer; offset: number }> = [
+  { signature: Buffer.from("%PDF-", "ascii"), offset: 0 },
+  { signature: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), offset: 0 },
+  { signature: Buffer.from([0xff, 0xd8, 0xff]), offset: 0 },
+  { signature: Buffer.from("PK\u0003\u0004", "binary"), offset: 0 },
+  { signature: Buffer.from("GIF87a", "ascii"), offset: 0 },
+  { signature: Buffer.from("GIF89a", "ascii"), offset: 0 },
+  { signature: Buffer.from([0x4d, 0x5a]), offset: 0 }
+];
+
+const BINARY_EXTENSIONS = new Set([
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".bmp",
+  ".ico",
+  ".zip",
+  ".gz",
+  ".tar",
+  ".7z",
+  ".rar",
+  ".pdf",
+  ".exe",
+  ".dll",
+  ".so",
+  ".dylib",
+  ".bin",
+  ".dat",
+  ".class",
+  ".jar",
+  ".wasm",
+  ".woff",
+  ".woff2",
+  ".ttf",
+  ".otf"
+]);
+
+const LANGUAGE_BY_EXTENSION = new Map<string, string>([
+  [".ts", "typescript"],
+  [".tsx", "typescriptreact"],
+  [".js", "javascript"],
+  [".jsx", "javascriptreact"],
+  [".json", "json"],
+  [".css", "css"],
+  [".scss", "scss"],
+  [".sass", "scss"],
+  [".html", "html"],
+  [".md", "markdown"],
+  [".py", "python"],
+  [".rb", "ruby"],
+  [".java", "java"],
+  [".go", "go"],
+  [".rs", "rust"],
+  [".c", "c"],
+  [".h", "c"],
+  [".cpp", "cpp"],
+  [".hpp", "cpp"],
+  [".cs", "csharp"],
+  [".swift", "swift"],
+  [".kt", "kotlin"],
+  [".m", "objective-c"],
+  [".mm", "objective-cpp"],
+  [".sh", "shellscript"],
+  [".yml", "yaml"],
+  [".yaml", "yaml"],
+  [".toml", "toml"],
+  [".ini", "ini"],
+  [".sql", "sql"],
+  [".ipynb", "json"],
+  [".svg", "xml"],
+  [".xml", "xml"]
+]);
+
+function normalizeLineEndings(input: string): string {
+  return input.replace(/\r\n/g, "\n");
+}
+
+function concatChunks(chunks: Buffer[], totalLength?: number): Buffer {
+  const targetLength = totalLength ?? chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  if (targetLength <= 0) {
+    return Buffer.alloc(0);
+  }
+  const result = new Uint8Array(targetLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    if (offset >= targetLength) {
+      break;
+    }
+    const remaining = targetLength - offset;
+    const writable = Math.min(chunk.length, remaining);
+    if (writable > 0) {
+      result.set(chunk.subarray(0, writable), offset);
+      offset += writable;
     }
   }
+  const finalLength = Math.min(offset, targetLength);
+  return Buffer.from(result.buffer, result.byteOffset, finalLength);
+}
 
-  private static normalizeLineEndings(input: string): string {
-    return input.replace(/\r\n/g, "\n");
+function bufferMatchesSignature(sample: Buffer, signature: Buffer, offset: number): boolean {
+  if (offset < 0 || offset + signature.length > sample.length) {
+    return false;
   }
-
-  private static handleBinary(buffer: Buffer, filePath: string, config: DigestConfig): string | null {
-    const policy = (config.binaryFilePolicy ?? "skip").toLowerCase();
-
-    switch (policy) {
-      case "placeholder":
-        return `${BINARY_PLACEHOLDER_PREFIX} ${path.basename(filePath)}`;
-      case "base64":
-        return buffer.toString("base64");
-      case "skip":
-      default:
-        return null;
-    }
-  }
-
-  private static isBinary(buffer: Buffer): boolean {
-    if (buffer.length === 0) {
+  for (let index = 0; index < signature.length; index += 1) {
+    if (sample[offset + index] !== signature[index]) {
       return false;
     }
+  }
+  return true;
+}
 
-    const length = Math.min(buffer.length, 8000);
-    let suspicious = 0;
-    for (let i = 0; i < length; i++) {
-      const byte = buffer[i];
-      if (byte === 0) {
-        return true;
-      }
-      if (byte < 7 || (byte > 13 && byte < 32)) {
-        suspicious++;
-      }
+export class ContentProcessor {
+  private readonly logger: ContentProcessorDependencies["logger"];
+  private readonly now: () => number;
+
+  constructor(dependencies: ContentProcessorDependencies = {}) {
+    this.logger = dependencies.logger;
+    this.now = dependencies.now ?? (() => performance.now());
+  }
+
+  public async processFile(filePath: string, options: ProcessingOptions = {}): Promise<ProcessedContent> {
+    const resolvedPath = path.resolve(filePath);
+    const resolvedOptions = this.resolveOptions(options);
+    const startedAt = this.now();
+
+    let stats: fs.Stats;
+    try {
+      stats = await fsp.stat(resolvedPath);
+    } catch (error) {
+      throw wrapError(error, { filePath: resolvedPath, stage: "stat" });
     }
 
-    return suspicious / length > 0.3;
+    if (!stats.isFile()) {
+      throw wrapError(new Error("Target is not a file"), { filePath: resolvedPath });
+    }
+
+    if (resolvedPath.toLowerCase().endsWith(".ipynb")) {
+      return this.processNotebook(resolvedPath, stats, resolvedOptions, startedAt);
+    }
+
+    if (stats.size === 0) {
+      return this.buildResult({
+        encoding: "utf8",
+        content: "",
+        size: 0,
+        isTruncated: false,
+        startedAt,
+        options: resolvedOptions,
+        language: resolvedOptions.languageOverride ?? "plaintext"
+      });
+    }
+
+    if (stats.size > resolvedOptions.streamingThreshold) {
+      return this.processFileStream(resolvedPath, options, stats, startedAt);
+    }
+
+    try {
+      const buffer = await fsp.readFile(resolvedPath);
+      const detection = await this.analyseBinary(resolvedPath, buffer, stats, resolvedOptions);
+      if (detection.isBinary) {
+        return this.handleBinary(resolvedPath, stats.size, detection, startedAt, resolvedOptions);
+      }
+
+      const content = normalizeLineEndings(buffer.toString(resolvedOptions.encoding));
+      const language = this.resolveLanguage(resolvedPath, content, resolvedOptions);
+      return this.buildResult({
+        encoding: "utf8",
+        content,
+        size: stats.size,
+        isTruncated: stats.size > resolvedOptions.maxFileSize,
+        startedAt,
+        options: resolvedOptions,
+        language,
+        truncatedBytes: Math.max(0, stats.size - resolvedOptions.maxFileSize)
+      });
+    } catch (error) {
+      throw wrapError(error, { filePath: resolvedPath, stage: "read" });
+    }
+  }
+
+  public async processFileStream(
+    filePath: string,
+    options: ProcessingOptions = {},
+    stats?: fs.Stats,
+    startedAt: number = this.now()
+  ): Promise<ProcessedContent> {
+    const resolvedPath = path.resolve(filePath);
+    const resolvedOptions = this.resolveOptions(options);
+    const fileStats = stats ?? (await fsp.stat(resolvedPath));
+
+    if (resolvedPath.toLowerCase().endsWith(".ipynb")) {
+      return this.processNotebook(resolvedPath, fileStats, resolvedOptions, startedAt);
+    }
+
+    const sample = await this.readSampleBuffer(resolvedPath, resolvedOptions);
+    const detection = await this.analyseBinary(resolvedPath, sample, fileStats, resolvedOptions);
+    if (detection.isBinary) {
+      return this.handleBinary(resolvedPath, fileStats.size, detection, startedAt, resolvedOptions);
+    }
+
+    const result = await this.consumeStream(resolvedPath, fileStats, resolvedOptions, startedAt);
+    return result;
+  }
+
+  public async detectBinaryFile(filePath: string): Promise<boolean> {
+    const resolvedPath = path.resolve(filePath);
+    const defaults = this.resolveOptions({});
+    const sample = await this.readSampleBuffer(resolvedPath, defaults);
+    const stats = await fsp.stat(resolvedPath);
+    const detection = await this.analyseBinary(resolvedPath, sample, stats, defaults);
+    return detection.isBinary;
+  }
+
+  public detectLanguage(filePath: string, content?: string): string {
+    return this.resolveLanguage(filePath, content ?? "", this.resolveOptions({ detectLanguage: true }));
+  }
+
+  public estimateLines(content: string): number {
+    if (!content) {
+      return 0;
+    }
+    const normalized = content.endsWith("\n") ? content.slice(0, -1) : content;
+    if (!normalized) {
+      return content.endsWith("\n") ? 1 : 0;
+    }
+    return normalized.split(/\n/).length + (content.endsWith("\n") ? 1 : 0);
+  }
+
+  public async processFiles(filePaths: string[], options: ProcessingOptions = {}): Promise<ProcessedContent[]> {
+    const resolvedOptions = this.resolveOptions(options);
+    const factories = filePaths.map((filePath) => () => this.processFile(filePath, options));
+    return asyncPool(factories, resolvedOptions.concurrency);
+  }
+
+  private resolveOptions(options: ProcessingOptions): ResolvedProcessingOptions {
+    const configuration = vscode.workspace.getConfiguration("codeIngest");
+    const binaryPolicy = (options.binaryFilePolicy ?? configuration.get<BinaryFilePolicy>("binaryFilePolicy") ?? DEFAULT_BINARY_POLICY) as BinaryFilePolicy;
+    const maxFileSize = options.maxFileSize ?? configuration.get<number>("maxFileSize") ?? DEFAULT_MAX_FILE_SIZE;
+    const streamingThreshold = options.streamingThreshold ?? configuration.get<number>("streamingThreshold") ?? DEFAULT_STREAMING_THRESHOLD;
+    const detectLanguage = options.detectLanguage ?? configuration.get<boolean>("detectLanguage") ?? true;
+    const encoding = options.encoding ?? (configuration.get<BufferEncoding>("encoding") ?? DEFAULT_ENCODING);
+    const timeoutMs = options.timeoutMs ?? configuration.get<number>("processingTimeout") ?? DEFAULT_TIMEOUT_MS;
+    const concurrency = Math.max(1, options.concurrency ?? configuration.get<number>("processingConcurrency") ?? DEFAULT_CONCURRENCY);
+
+    const whitelist = new Set((options.whitelistExtensions ?? configuration.get<string[]>("binaryWhitelist") ?? []).map((ext) => ext.toLowerCase()));
+    const blacklist = new Set((options.blacklistExtensions ?? configuration.get<string[]>("binaryBlacklist") ?? []).map((ext) => ext.toLowerCase()));
+
+    return {
+      binaryFilePolicy: binaryPolicy,
+      maxFileSize,
+      streamingThreshold,
+      detectLanguage,
+      encoding,
+      timeoutMs,
+      concurrency,
+      whitelistExtensions: whitelist,
+      blacklistExtensions: blacklist,
+      languageOverride: options.languageOverride ?? undefined,
+      onProgress: options.onProgress
+    };
+  }
+
+  private async processNotebook(
+    filePath: string,
+    stats: fs.Stats,
+    options: ResolvedProcessingOptions,
+    startedAt: number
+  ): Promise<ProcessedContent> {
+    let raw: string;
+    try {
+      raw = await fsp.readFile(filePath, "utf8");
+    } catch (error) {
+      throw wrapError(error, { filePath, stage: "read-notebook" });
+    }
+
+    const converted = NotebookProcessor.buildNotebookContent(raw, {
+      binaryFilePolicy: options.binaryFilePolicy
+    } as never);
+
+    const normalized = normalizeLineEndings(converted ?? "");
+    const language = options.languageOverride ?? "json";
+    return this.buildResult({
+      encoding: "utf8",
+      content: normalized,
+      size: stats.size,
+      isTruncated: stats.size > options.maxFileSize,
+      startedAt,
+      options,
+      language,
+      truncatedBytes: Math.max(0, stats.size - options.maxFileSize)
+    });
+  }
+
+  private async readSampleBuffer(filePath: string, options: ResolvedProcessingOptions): Promise<Buffer> {
+    const sampleSize = Math.max(1, Math.min(SAMPLE_BYTES, options.streamingThreshold));
+    const highWaterMark = Math.min(sampleSize, 64 * 1024);
+
+    return new Promise<Buffer>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let collected = 0;
+      const stream = fs.createReadStream(filePath, { start: 0, highWaterMark });
+
+      stream.on("data", (chunk: Buffer) => {
+        if (collected >= sampleSize) {
+          return;
+        }
+        const remaining = sampleSize - collected;
+        if (chunk.length >= remaining) {
+          chunks.push(chunk.slice(0, remaining));
+          collected += remaining;
+          stream.destroy();
+        } else {
+          chunks.push(chunk);
+          collected += chunk.length;
+          if (collected >= sampleSize) {
+            stream.destroy();
+          }
+        }
+      });
+
+      stream.once("error", (error) => {
+        reject(error);
+      });
+
+      stream.once("close", () => {
+        resolve(concatChunks(chunks, Math.min(collected, sampleSize)));
+      });
+    });
+  }
+
+  private async analyseBinary(
+    filePath: string,
+    sample: Buffer,
+    stats: fs.Stats,
+    options: ResolvedProcessingOptions
+  ): Promise<BinaryDetectionResult> {
+    const ext = path.extname(filePath).toLowerCase();
+    if (options.whitelistExtensions.has(ext)) {
+      return { isBinary: false, sample };
+    }
+    if (options.blacklistExtensions.has(ext)) {
+      return { isBinary: true, reason: "blacklist", sample };
+    }
+
+    if (this.matchesBinarySignature(sample)) {
+      return { isBinary: true, reason: "signature", sample };
+    }
+
+    if (BINARY_EXTENSIONS.has(ext)) {
+      return { isBinary: true, reason: "extension", sample };
+    }
+
+    if (this.containsNullBytes(sample)) {
+      return { isBinary: true, reason: "null-bytes", sample };
+    }
+
+    const entropy = this.calculateEntropy(sample);
+    const density = this.nonPrintableRatio(sample);
+    if (entropy > 4.5 && density > 0.3) {
+      return { isBinary: true, reason: "entropy", sample };
+    }
+
+    if (stats.size > options.maxFileSize && !options.detectLanguage) {
+      return { isBinary: true, reason: "oversize", sample };
+    }
+
+    return { isBinary: false, sample };
+  }
+
+  private matchesBinarySignature(sample: Buffer): boolean {
+    return BINARY_SIGNATURES.some(({ signature, offset }) => bufferMatchesSignature(sample, signature, offset));
+  }
+
+  private containsNullBytes(sample: Buffer): boolean {
+    for (let index = 0; index < sample.length; index += 1) {
+      if (sample[index] === 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private calculateEntropy(sample: Buffer): number {
+    if (sample.length === 0) {
+      return 0;
+    }
+    const counts = new Array<number>(256).fill(0);
+    for (let index = 0; index < sample.length; index += 1) {
+      counts[sample[index]] += 1;
+    }
+    let entropy = 0;
+    for (const count of counts) {
+      if (count === 0) {
+        continue;
+      }
+      const probability = count / sample.length;
+      entropy -= probability * Math.log2(probability);
+    }
+    return entropy;
+  }
+
+  private nonPrintableRatio(sample: Buffer): number {
+    if (sample.length === 0) {
+      return 0;
+    }
+    let nonPrintable = 0;
+    for (let index = 0; index < sample.length; index += 1) {
+      const byte = sample[index];
+      if (byte < 9 || (byte > 13 && byte < 32) || byte === 127) {
+        nonPrintable += 1;
+      }
+    }
+    return nonPrintable / sample.length;
+  }
+
+  private handleBinary(
+    filePath: string,
+    size: number,
+    detection: BinaryDetectionResult,
+    startedAt: number,
+    options: ResolvedProcessingOptions
+  ): ProcessedContent {
+    const policy = options.binaryFilePolicy;
+    const language = options.languageOverride ?? "binary";
+    switch (policy) {
+      case "skip":
+        return this.buildResult({
+          encoding: "binary-placeholder",
+          content: "",
+          size,
+          isTruncated: false,
+          startedAt,
+          options,
+          language,
+          metadata: { lines: 0, reason: detection.reason ?? "skip" }
+        });
+      case "placeholder":
+        return this.buildResult({
+          encoding: "binary-placeholder",
+          content: `[binary file] ${path.basename(filePath)}`,
+          size,
+          isTruncated: false,
+          startedAt,
+          options,
+          language,
+          metadata: { lines: 1, reason: detection.reason ?? "placeholder" }
+        });
+      case "base64":
+      default: {
+        const buffer = fs.readFileSync(filePath);
+        return this.buildResult({
+          encoding: "base64",
+          content: buffer.toString("base64"),
+          size,
+          isTruncated: false,
+          startedAt,
+          options,
+          language,
+          metadata: { lines: this.estimateLines(buffer.toString(options.encoding)), reason: detection.reason ?? "base64" }
+        });
+      }
+    }
+  }
+
+  private async consumeStream(
+    filePath: string,
+    stats: fs.Stats,
+    options: ResolvedProcessingOptions,
+    startedAt: number
+  ): Promise<ProcessedContent> {
+    const stream = fs.createReadStream(filePath, { highWaterMark: 64 * 1024 });
+    const chunks: Buffer[] = [];
+    let bytesRead = 0;
+    let truncated = false;
+    let truncatedBytes = 0;
+
+    const onProgress = options.onProgress;
+    const handleProgress = (done: boolean) => {
+      if (onProgress) {
+        try {
+          onProgress({ bytesRead, totalBytes: stats.size, done });
+        } catch (error) {
+          this.logger?.("contentProcessor.progress.error", { filePath, error: (error as Error).message });
+        }
+      }
+    };
+
+    const dataPromise = new Promise<Buffer[]>((resolve, reject) => {
+      const timeout = options.timeoutMs > 0 ? setTimeout(() => {
+        stream.destroy(new Error("Processing timed out"));
+      }, options.timeoutMs) : undefined;
+
+      stream.on("data", (chunk: Buffer) => {
+        bytesRead += chunk.length;
+        if (bytesRead > options.maxFileSize) {
+          const allowed = options.maxFileSize - (bytesRead - chunk.length);
+          if (allowed > 0) {
+            chunks.push(chunk.slice(0, allowed));
+          }
+          truncated = true;
+          truncatedBytes = stats.size - options.maxFileSize;
+          handleProgress(false);
+          stream.destroy();
+          return;
+        }
+        chunks.push(chunk);
+        handleProgress(false);
+      });
+
+      stream.once("error", (error) => {
+        if (timeout) {
+          clearTimeout(timeout);
+        }
+        reject(error);
+      });
+
+      stream.once("close", () => {
+        if (timeout) {
+          clearTimeout(timeout);
+        }
+        resolve(chunks);
+      });
+    });
+
+    try {
+      const collected = await dataPromise;
+      handleProgress(true);
+      const buffer = concatChunks(collected);
+      const content = normalizeLineEndings(buffer.toString(options.encoding));
+      const language = this.resolveLanguage(filePath, content, options);
+      return this.buildResult({
+        encoding: "utf8",
+        content,
+        size: stats.size,
+        isTruncated: truncated,
+        startedAt,
+        options,
+        language,
+        truncatedBytes
+      });
+    } catch (error) {
+      throw wrapError(error, { filePath, stage: "stream" });
+    }
+  }
+
+  private resolveLanguage(filePath: string, content: string, options: ResolvedProcessingOptions): string {
+    if (!options.detectLanguage) {
+      return options.languageOverride ?? "plaintext";
+    }
+    if (options.languageOverride) {
+      return options.languageOverride;
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    const mapped = LANGUAGE_BY_EXTENSION.get(ext);
+    if (mapped) {
+      return mapped;
+    }
+
+    const trimmed = content.trim();
+    if (!trimmed) {
+      return "plaintext";
+    }
+
+    if (/^\s*</.test(trimmed) && /<html[\s>]/i.test(trimmed)) {
+      return "html";
+    }
+    if (/^\s*</.test(trimmed) && /<svg[\s>]/i.test(trimmed)) {
+      return "xml";
+    }
+    if (/import\s+\w+\s+from\s+['"].+['"];?/.test(trimmed) || /module\.exports\s*=/.test(trimmed)) {
+      return "javascript";
+    }
+    if (/^\s*#include\s+[<"].+[>"]/.test(trimmed) || /int\s+main\s*\(/.test(trimmed)) {
+      return "c";
+    }
+    if (/^\s*def\s+\w+\(/m.test(trimmed) || /^\s*class\s+\w+\(/m.test(trimmed)) {
+      return "python";
+    }
+    if (/^\s*SELECT\s+/i.test(trimmed)) {
+      return "sql";
+    }
+
+    const apiLanguage = this.detectWithVSCodeAPI(filePath);
+    if (apiLanguage) {
+      return apiLanguage;
+    }
+
+    return "plaintext";
+  }
+
+  private detectWithVSCodeAPI(filePath: string): string | undefined {
+    try {
+      const ext = path.extname(filePath).toLowerCase();
+      const basename = path.basename(filePath).toLowerCase();
+      for (const extension of vscode.extensions?.all ?? []) {
+        const languages = extension.packageJSON?.contributes?.languages as
+          | Array<{ id: string; extensions?: string[]; filenames?: string[] }>
+          | undefined;
+        if (!Array.isArray(languages)) {
+          continue;
+        }
+        for (const language of languages) {
+          const extensions = language.extensions ?? [];
+          const filenames = language.filenames ?? [];
+          if (extensions.some((candidate) => candidate.toLowerCase() === ext)) {
+            return language.id;
+          }
+          if (filenames.some((candidate) => candidate.toLowerCase() === basename)) {
+            return language.id;
+          }
+        }
+      }
+    } catch (error) {
+      this.logger?.("contentProcessor.languageDetection.error", {
+        filePath,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+    return undefined;
+  }
+
+  private buildResult(input: {
+    encoding: ProcessedContent["encoding"];
+    content: string;
+    size: number;
+    isTruncated: boolean;
+    startedAt: number;
+    options: ResolvedProcessingOptions;
+    language: string;
+    truncatedBytes?: number;
+    metadata?: Record<string, unknown>;
+  }): ProcessedContent {
+    const processingTime = Math.max(0, this.now() - input.startedAt);
+    const lines = this.estimateLines(input.content);
+  const checksum = this.calculateChecksum(input.content);
+    const baseMetadata: ProcessedContentMetadata = {
+      lines,
+      truncatedBytes: input.truncatedBytes ?? 0,
+      ...(input.metadata ?? {})
+    };
+    if (checksum !== undefined) {
+      (baseMetadata as Record<string, unknown>).checksum = checksum;
+    }
+
+    return {
+      content: input.content,
+      language: input.language,
+      encoding: input.encoding,
+      size: input.size,
+      isTruncated: input.isTruncated,
+      processingTime,
+      metadata: baseMetadata
+    };
+  }
+
+  private calculateChecksum(content: string): string | undefined {
+    if (!content) {
+      return undefined;
+    }
+    const slice = content.slice(0, CHECKSUM_SAMPLE_BYTES);
+    let hash = 0;
+    for (let index = 0; index < slice.length; index += 1) {
+      hash = (hash << 5) - hash + slice.charCodeAt(index);
+      hash |= 0;
+    }
+    return Math.abs(hash).toString(16);
   }
 }

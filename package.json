@@ -4,7 +4,7 @@
   "description": "Generate LLM-ready codebase digests.",
   "version": "0.0.1",
   "engines": {
-    "vscode": "^1.103.0"
+    "vscode": "^1.74.0"
   },
   "categories": [
     "Other"
@@ -13,36 +13,127 @@
     "onStartupFinished"
   ],
   "main": "./dist/extension.js",
-  "contributes": {},
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codeIngest",
+          "title": "Code Ingest",
+          "icon": "resources/icons/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "codeIngest": [
+        {
+          "id": "codeIngestDashboard",
+          "name": "Code Ingest Dashboard",
+          "type": "webview",
+          "icon": "resources/icons/icon.svg"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "codeIngestDashboard",
+        "contents": "No digests yet.\n[Open the dashboard](command:codeIngest.openDashboardPanel) to get started."
+      }
+    ],
+    "commands": [
+      {
+        "command": "codeIngest.generateDigest",
+        "title": "Generate Digest",
+        "category": "Code Ingest"
+      },
+      {
+        "command": "codeIngest.refreshTree",
+        "title": "Refresh Workspace Tree",
+        "category": "Code Ingest"
+      },
+      {
+        "command": "codeIngest.selectAll",
+        "title": "Select All Entries",
+        "category": "Code Ingest"
+      },
+      {
+        "command": "codeIngest.selectNone",
+        "title": "Clear Selections",
+        "category": "Code Ingest"
+      },
+      {
+        "command": "codeIngest.invertSelection",
+        "title": "Invert Selection",
+        "category": "Code Ingest"
+      },
+      {
+        "command": "codeIngest.loadRemoteRepo",
+        "title": "Load Remote Repository",
+        "category": "Code Ingest"
+      },
+      {
+        "command": "codeIngest.openDashboardPanel",
+        "title": "Open Dashboard Panel",
+        "category": "Code Ingest"
+      },
+      {
+        "command": "codeIngest.flushErrorReports",
+        "title": "Flush Error Reports",
+        "category": "Code Ingest"
+      },
+      {
+        "command": "codeIngest.viewMetrics",
+        "title": "View Metrics",
+        "category": "Code Ingest"
+      },
+      {
+        "command": "codeIngest.toggleRedactionOverride",
+        "title": "Toggle Redaction Override",
+        "category": "Code Ingest"
+      }
+    ]
+  },
   "scripts": {
-    "compile": "webpack --mode production",
-    "watch": "webpack --watch --mode none",
-    "test": "jest"
+    "build": "webpack --mode production",
+    "build:dev": "webpack --mode development",
+    "build:webview": "node scripts/copyWebviewResources.js",
+    "copy-webview": "node scripts/copyWebviewResources.js",
+    "watch": "webpack --mode development --watch",
+    "test": "npm run test:unit",
+    "test:unit": "jest --testPathPattern=unit",
+    "test:integration": "jest --testPathPattern=integration",
+    "test:e2e": "jest --testPathPattern=e2e",
+    "pretest": "npm run build:webview"
   },
   "dependencies": {
     "minimatch": "^9.0.4",
     "zustand": "^4.5.2"
   },
   "devDependencies": {
-    "@types/jest": "29.5.12",
+    "@types/jest": "^29.2.0",
     "@types/jsdom": "21.1.7",
     "@types/mocha": "10.0.6",
-    "@types/node": "20.14.2",
-    "@types/vscode": "1.103.0",
+    "@types/node": "18.x",
+    "@types/vscode": "^1.74.0",
     "@typescript-eslint/eslint-plugin": "8.42.0",
     "@typescript-eslint/parser": "8.42.0",
     "@vscode/test-cli": "0.0.11",
-    "@vscode/test-electron": "2.5.2",
+    "@vscode/test-electron": "^2.3.0",
     "chai": "4.4.1",
+    "copy-webpack-plugin": "^11.0.0",
     "esbuild": "0.21.5",
     "eslint": "9.12.0",
     "eslint-config-prettier": "9.1.0",
-    "jest": "29.7.0",
+    "jest": "^29.3.0",
     "jsdom": "24.1.1",
     "mocha": "10.4.0",
     "rimraf": "5.0.5",
-    "ts-jest": "29.2.3",
+    "simple-git": "^3.15.0",
+    "ts-jest": "^29.0.0",
+    "ts-loader": "^9.4.0",
     "ts-node": "10.9.2",
-    "typescript": "5.5.4"
+    "typescript": "^4.9.0",
+    "webpack": "^5.75.0",
+    "webpack-bundle-analyzer": "^4.7.0",
+    "webpack-cli": "^5.0.0"
   }
 }

@@ -37,7 +37,7 @@ function createError(
   stderr: string
 ): SpawnGitError {
   const error = new Error(message) as SpawnGitError;
-  error.code = code ?? undefined;
+  error.code = code ?? null;
   error.stdout = stdout;
   error.stderr = stderr;
   return error;
@@ -86,7 +86,7 @@ export async function spawnGitPromise(
       const command = redact(args.join(" "), secretsToRedact);
       const reason = code !== null ? `exit code ${code}` : `signal ${signal}`;
       const message = `git ${command} failed with ${reason}: ${redactedStderr || redactedStdout}`;
-      reject(createError(message, code ?? signal ?? undefined, redactedStdout, redactedStderr));
+      reject(createError(message, code ?? signal ?? null, redactedStdout, redactedStderr));
     });
   });
 }
