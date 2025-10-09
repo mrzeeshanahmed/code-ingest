@@ -20,6 +20,7 @@ export interface WebviewHarnessResult {
 
 export interface WebviewHarnessOptions {
   htmlPath?: string;
+  initialState?: Record<string, unknown>;
 }
 
 const DEFAULT_HTML_PATH = path.resolve(__dirname, "../../../resources/webview/index.html");
@@ -29,6 +30,8 @@ export async function setupTestLifecycle(
 ): Promise<WebviewHarnessResult> {
   const htmlFilePath = options.htmlPath ?? DEFAULT_HTML_PATH;
   const htmlContent = await readFile(htmlFilePath, "utf8");
+
+  const bootState = options.initialState ?? { sessionToken: "test-session-token" };
 
   const postMessage = jest.fn();
   const vscodeApi = { postMessage };
@@ -41,6 +44,25 @@ export async function setupTestLifecycle(
     pretendToBeVisual: true,
     beforeParse(window) {
       (window as typeof window & { acquireVsCodeApi: typeof acquireVsCodeApi }).acquireVsCodeApi = acquireVsCodeApi;
+      (window as typeof window & { __INITIAL_STATE__?: Record<string, unknown> }).__INITIAL_STATE__ = bootState;
+      const rafTimers = new Map<number, NodeJS.Timeout>();
+      let rafId = 0;
+      (window as typeof window & { requestAnimationFrame: typeof window.requestAnimationFrame }).requestAnimationFrame = (callback: FrameRequestCallback) => {
+        const id = ++rafId;
+        const handle = setTimeout(() => {
+          rafTimers.delete(id);
+          callback(Date.now());
+        }, 0);
+        rafTimers.set(id, handle);
+        return id;
+      };
+      (window as typeof window & { cancelAnimationFrame: typeof window.cancelAnimationFrame }).cancelAnimationFrame = (handle: number) => {
+        const timer = rafTimers.get(handle);
+        if (timer) {
+          clearTimeout(timer);
+          rafTimers.delete(handle);
+        }
+      };
     }
   });
 

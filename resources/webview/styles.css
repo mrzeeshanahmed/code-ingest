@@ -216,6 +216,172 @@ body {
   background-color: var(--vscode-editor-background);
 }
 
+.preview__tokens {
+  font-size: 0.85rem;
+  color: var(--vscode-descriptionForeground);
+  justify-self: end;
+}
+
+.preview__summary {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border-radius: 6px;
+  background-color: rgba(255, 255, 255, 0.03);
+  color: var(--vscode-descriptionForeground);
+}
+
+.preview__stats {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--vscode-editorWidget-border);
+}
+
+.preview__stat {
+  font-size: 0.85rem;
+  color: var(--vscode-descriptionForeground);
+}
+
+.tree-item__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.tree-item__checkbox {
+  margin-right: 0.5rem;
+}
+
+.tree-item__toggle {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.95rem;
+}
+
+.tree-item--placeholder {
+  opacity: 0.6;
+  font-style: italic;
+}
+
+.status-bar {
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  background-color: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  border: 1px solid var(--vscode-editorWidget-border);
+}
+
+.status-bar__progress {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.status-bar__track {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  background-color: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.status-bar__indicator {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--vscode-progressBar-background), var(--vscode-button-background));
+  transition: width 160ms ease;
+}
+
+.status-bar__message {
+  font-size: 0.85rem;
+  color: var(--vscode-descriptionForeground);
+}
+
+.status-bar__cancel {
+  justify-self: start;
+  padding: 0.35rem 0.75rem;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-button-border, transparent);
+  background-color: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  cursor: pointer;
+}
+
+.status-bar__toast {
+  font-size: 0.85rem;
+  color: var(--vscode-inputValidation-infoForeground);
+}
+
+.status-bar__error {
+  padding: 0.65rem 0.75rem;
+  border-radius: 6px;
+  background-color: rgba(255, 0, 0, 0.08);
+  color: var(--vscode-inputValidation-errorForeground);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.status-bar__copy {
+  padding: 0.25rem 0.5rem;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+.status-bar__config,
+.status-bar__repo {
+  font-size: 0.85rem;
+  color: var(--vscode-descriptionForeground);
+}
+
+.loading-overlay {
+  position: fixed;
+  inset: 1.5rem;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background-color: rgba(0, 0, 0, 0.6);
+  color: var(--vscode-foreground);
+  font-size: 1rem;
+  z-index: 5;
+}
+
+.loading-overlay__spinner {
+  width: 2.5rem;
+  height: 2.5rem;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  border-top-color: var(--vscode-progressBar-background);
+  border-radius: 50%;
+  animation: rotate 1s linear infinite;
+}
+
+.loading-overlay__label {
+  margin-top: 1rem;
+  font-size: 1rem;
+  text-align: center;
+}
+
+@keyframes rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 @media (max-width: 768px) {
   .dashboard {
     padding: 1rem;

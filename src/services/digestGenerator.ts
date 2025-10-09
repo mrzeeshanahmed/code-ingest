@@ -23,7 +23,6 @@ import type { FileNode as ScannerFileNode } from "./fileScanner";
 import type { TokenBudgetOptions } from "./tokenAnalyzer";
 import type { NotebookProcessingOptions, ProcessedNotebook } from "./notebookProcessor";
 import type { FilterResult } from "./filterService";
-import type { ErrorReportContext } from "./errorReporter";
 import { FileScanner } from "./fileScanner";
 import { FilterService } from "./filterService";
 import { ContentProcessor } from "./contentProcessor";
@@ -31,6 +30,7 @@ import { NotebookProcessor } from "./notebookProcessor";
 import { TokenAnalyzer } from "./tokenAnalyzer";
 import { ConfigurationService } from "./configurationService";
 import { ErrorReporter } from "./errorReporter";
+import { ErrorClassifier, type ErrorContext } from "../utils/errorHandler";
 
 const DEFAULT_TOTAL_TOKEN_BUDGET = 16_000;
 const DEFAULT_PROGRESS_SAMPLE_INTERVAL = 250;
@@ -163,6 +163,8 @@ interface ScannerResult {
 }
 
 export class DigestGenerator {
+  private readonly errorClassifier = new ErrorClassifier();
+
   public constructor(
     private readonly fileScanner: FileScanner,
     private readonly filterService: FilterService,
@@ -481,9 +483,15 @@ export class DigestGenerator {
         warnings.push(...notebookDetails.warnings.map((message) => `${candidate.relativePath}: ${message}`));
       }
     } catch (error) {
-      const message = this.stringifyError(error);
+      const normalizedError = error instanceof Error ? error : new Error(this.stringifyError(error));
+      const message = normalizedError.message;
       errors.push(`${candidate.relativePath}: failed to process content (${message}).`);
-      this.reportError(error, { source: "digest-generator", metadata: { file: candidate.absolutePath, stage: "process" } });
+      this.reportError(normalizedError, {
+        operation: "processFile",
+        component: "digestGenerator",
+        metadata: { file: candidate.absolutePath, stage: "process" },
+        userFacing: false
+      });
       return {
         warnings,
         errors,
@@ -613,9 +621,15 @@ export class DigestGenerator {
 
       return this.truncateToBudget(content, candidate, context, remainingBudget, warnings);
     } catch (error) {
-      const message = this.stringifyError(error);
+      const normalizedError = error instanceof Error ? error : new Error(this.stringifyError(error));
+      const message = normalizedError.message;
       errors.push(`${candidate.relativePath}: token analysis failed (${message}).`);
-      this.reportError(error, { source: "digest-generator", metadata: { file: candidate.absolutePath, stage: "analyze" } });
+      this.reportError(normalizedError, {
+        operation: "tokenAnalyze",
+        component: "digestGenerator",
+        metadata: { file: candidate.absolutePath, stage: "analyze" },
+        userFacing: false
+      });
       return {
         content: this.buildTruncationNotice(content, candidate.relativePath, 0),
         tokens: 0,
@@ -694,9 +708,17 @@ export class DigestGenerator {
     return typeof error === "string" ? error : JSON.stringify(error);
   }
 
-  private reportError(error: unknown, context: ErrorReportContext): void {
+  private reportError(error: Error, context: ErrorContext): void {
     try {
-      this.errorReporter.report(error, context);
+      const classification = this.errorClassifier.classifyError(error, context);
+      const errorId = `DIGEST-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+      void this.errorReporter
+        .reportError(error, {
+          ...context,
+          errorId,
+          classification
+        })
+        .catch(() => undefined);
     } catch {
       // Swallow reporter errors to keep pipeline resilient.
     }

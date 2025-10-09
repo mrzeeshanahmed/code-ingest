@@ -104,7 +104,9 @@ export function registerIngestRemoteRepoCommand(
   context: vscode.ExtensionContext,
   services: CommandServices
 ): void {
-  const disposable = vscode.commands.registerCommand(COMMAND_MAP.ingestRemoteRepo, async () => {
+  const disposable = vscode.commands.registerCommand(
+    COMMAND_MAP.EXTENSION_ONLY.INGEST_REMOTE_REPO,
+    async () => {
     const repoUrl = await vscode.window.showInputBox({
       title: "Ingest Remote Repository",
       prompt: "Enter the full GitHub repository URL (e.g. https://github.com/owner/repo).",
@@ -378,7 +380,8 @@ export function registerIngestRemoteRepoCommand(
     void vscode.window.showInformationMessage(
       `Code Ingest: Generated digest for ${outcome.repoSlug} @ ${outcome.sha} (${formattedTokens}).`
     );
-  });
+    }
+  );
 
   context.subscriptions.push(disposable);
 }

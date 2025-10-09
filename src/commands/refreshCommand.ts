@@ -7,7 +7,7 @@ export function registerRefreshCommand(
   context: vscode.ExtensionContext,
   services: CommandServices
 ): void {
-  const disposable = vscode.commands.registerCommand(COMMAND_MAP.refreshTree, () => {
+  const disposable = vscode.commands.registerCommand(COMMAND_MAP.EXTENSION_ONLY.REFRESH_TREE, () => {
     const provider = getActiveProvider(services.treeProviders);
 
     if (!provider) {

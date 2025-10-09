@@ -1,0 +1,79 @@
+{
+  "file-scan": {
+    "baseline": 1000,
+    "threshold": 5000,
+    "percentiles": {
+      "p50": 0,
+      "p90": 0,
+      "p95": 0,
+      "p99": 0
+    },
+    "trend": "stable"
+  },
+  "content-process": {
+    "baseline": 500,
+    "threshold": 2000,
+    "percentiles": {
+      "p50": 0,
+      "p90": 0,
+      "p95": 0,
+      "p99": 0
+    },
+    "trend": "stable"
+  },
+  "digest-generate": {
+    "baseline": 2000,
+    "threshold": 10000,
+    "percentiles": {
+      "p50": 0,
+      "p90": 0,
+      "p95": 0,
+      "p99": 0
+    },
+    "trend": "stable"
+  },
+  "remote-clone": {
+    "baseline": 10000,
+    "threshold": 60000,
+    "percentiles": {
+      "p50": 0,
+      "p90": 0,
+      "p95": 0,
+      "p99": 0
+    },
+    "trend": "stable"
+  },
+  "git-operation": {
+    "baseline": 1000,
+    "threshold": 5000,
+    "percentiles": {
+      "p50": 0,
+      "p90": 0,
+      "p95": 0,
+      "p99": 0
+    },
+    "trend": "stable"
+  },
+  "remote-clone-integration": {
+    "baseline": 13.845699999999852,
+    "threshold": 41.537099999999555,
+    "percentiles": {
+      "p50": 13.078899999999976,
+      "p90": 13.078899999999976,
+      "p95": 13.078899999999976,
+      "p99": 13.078899999999976
+    },
+    "trend": "stable"
+  },
+  "full-remote-ingest-flow": {
+    "baseline": 12.172599999999875,
+    "threshold": 36.517799999999625,
+    "percentiles": {
+      "p50": 12.768499999999676,
+      "p90": 12.768499999999676,
+      "p95": 12.768499999999676,
+      "p99": 12.768499999999676
+    },
+    "trend": "stable"
+  }
+}

@@ -1,4 +1,3 @@
-type Mocked<T extends object> = jest.Mocked<T>;
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, jest } from "@jest/globals";
 import * as vscode from "vscode";
@@ -31,6 +30,7 @@ describe("DigestGenerator", () => {
   }
   interface ErrorReporterLike {
     report(error: unknown, context?: unknown): void;
+    reportError(error: Error, context: unknown): Promise<void>;
   }
 
   let fileScanner: jest.Mocked<FileScannerLike>;
@@ -51,7 +51,10 @@ describe("DigestGenerator", () => {
     notebookProcessor = { processNotebook: jest.fn() } as unknown as jest.Mocked<NotebookProcessorLike>;
     tokenAnalyzer = new MockTokenAnalyzer();
     configurationService = { loadConfig: jest.fn() } as unknown as jest.Mocked<ConfigurationServiceLike>;
-    errorReporter = { report: jest.fn() } as unknown as jest.Mocked<ErrorReporterLike>;
+    errorReporter = {
+      report: jest.fn(),
+      reportError: jest.fn().mockImplementation(async () => undefined)
+    } as unknown as jest.Mocked<ErrorReporterLike>;
 
     (vscode.workspace.getConfiguration as jest.Mock).mockReturnValue({ get: () => undefined });
 
@@ -203,7 +206,7 @@ describe("DigestGenerator", () => {
     });
 
     expect(result.statistics.errors).toHaveLength(1);
-    expect(errorReporter.report).toHaveBeenCalled();
+  expect(errorReporter.reportError).toHaveBeenCalled();
   });
 
   it("honours token budget and truncates when exceeded", async () => {

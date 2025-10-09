@@ -7,7 +7,7 @@ export function registerGenerateDigestCommand(
   context: vscode.ExtensionContext,
   services: CommandServices
 ): void {
-  const disposable = vscode.commands.registerCommand(COMMAND_MAP.generateDigest, async () => {
+  const disposable = vscode.commands.registerCommand(COMMAND_MAP.WEBVIEW_TO_HOST.GENERATE_DIGEST, async () => {
     const provider = getActiveProvider(services.treeProviders);
 
     if (!provider) {

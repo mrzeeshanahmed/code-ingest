@@ -171,7 +171,7 @@ export class GitignoreService {
   public async isIgnoredBatch(filePaths: string[]): Promise<Map<string, boolean>> {
     const results = new Map<string, boolean>();
     for (const filePath of filePaths) {
-      // eslint-disable-next-line no-await-in-loop
+       
       results.set(filePath, await this.isIgnored(filePath));
     }
     return results;

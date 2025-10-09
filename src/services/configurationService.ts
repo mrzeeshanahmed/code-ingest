@@ -1,4 +1,5 @@
-import * as vscode from 'vscode';
+import * as path from "node:path";
+import * as vscode from "vscode";
 import { DigestConfig, Diagnostics, validateConfig } from "../utils/validateConfig";
 import { DEFAULT_CONFIG } from "../config/constants";
 
@@ -49,5 +50,27 @@ export class ConfigurationService {
     validateConfig(snapshot, diagnostics);
 
     return snapshot;
+  }
+
+  getExtensionPath(): string {
+    const extensionIdCandidates = [
+      "code-ingest.code-ingest",
+      "mrzeeshanahmed.code-ingest",
+      "publisher.code-ingest"
+    ];
+
+    for (const id of extensionIdCandidates) {
+      const extension = id ? vscode.extensions.getExtension(id) : undefined;
+      if (extension?.extensionPath) {
+        return extension.extensionPath;
+      }
+    }
+
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (workspaceFolder) {
+      return workspaceFolder;
+    }
+
+    return path.resolve(process.cwd());
   }
 }

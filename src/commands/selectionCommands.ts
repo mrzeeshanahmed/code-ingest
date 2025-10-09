@@ -7,7 +7,7 @@ export function registerSelectionCommands(
   context: vscode.ExtensionContext,
   services: CommandServices
 ): void {
-  const selectAll = vscode.commands.registerCommand(COMMAND_MAP.selectAll, () => {
+  const selectAll = vscode.commands.registerCommand(COMMAND_MAP.EXTENSION_ONLY.SELECT_ALL, () => {
     const provider = getActiveProvider(services.treeProviders);
 
     if (!provider) {
@@ -21,7 +21,7 @@ export function registerSelectionCommands(
     provider.refresh();
   });
 
-  const deselectAll = vscode.commands.registerCommand(COMMAND_MAP.deselectAll, () => {
+  const deselectAll = vscode.commands.registerCommand(COMMAND_MAP.EXTENSION_ONLY.DESELECT_ALL, () => {
     const provider = getActiveProvider(services.treeProviders);
 
     if (!provider) {
