@@ -1,71 +1,178 @@
-# code-ingest README
+# Code Ingest – VS Code Extension
 
-This is the README for your extension "code-ingest". After writing up a brief description, we recommend including the following sections.
+A professional-grade VS Code extension for generating comprehensive codebase digests with advanced filtering, remote repository support, and intelligent content processing.
 
-## Features
+## ✨ Features
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+### 🎯 Core Functionality
 
-For example if there is an image subfolder under your extension project workspace:
+- **Smart File Scanning**: Hierarchical scanning with `.gitignore` support and intelligent filtering
+- **Multiple Output Formats**: Generate digests in Markdown, JSON, or plain text formats
+- **Remote Repository Ingestion**: Clone and process remote repositories with partial clone optimization
+- **Jupyter Notebook Support**: Comprehensive notebook processing with configurable cell inclusion
+- **Secret Redaction**: Automatic detection and redaction of sensitive information
+- **Performance Optimized**: Efficient processing of large codebases with progress tracking
 
-\!\[feature X\]\(images/feature-x.png\)
+### 🔧 Advanced Features
 
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+- **Interactive Sidebar**: Persistent dashboard with real-time file tree and preview
+- **Selective Processing**: Checkbox-based file selection with pattern matching
+- **Token Analysis**: Accurate token counting with multiple tokenizer support
+- **Caching System**: Intelligent caching for improved performance
+- **Error Recovery**: Robust error handling with detailed diagnostics
+- **Telemetry & Diagnostics**: Privacy-compliant analytics and system health monitoring
 
-## Requirements
+## 🚀 Quick Start
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+### Installation
 
-## Extension Settings
+- Install from VS Code Marketplace: [`code-ingest`](https://marketplace.visualstudio.com/items?itemName=your-publisher.code-ingest)
+- Or install from VSIX: Download the latest release from the [Releases](https://github.com/your-org/code-ingest/releases) page
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+### Basic Usage
 
-For example:
+1. Open your project in VS Code.
+2. Click the **Code Ingest** icon in the Activity Bar.
+3. Select files using the interactive tree.
+4. Click **Generate Digest** to create your codebase summary.
 
-This extension contributes the following settings:
+### Remote Repository Processing
 
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
+1. Open the Command Palette and run **Code Ingest: Load Remote Repository**.
+2. Enter the repository URL (supports GitHub, GitLab, Bitbucket, and any Git-compatible host).
+3. Select branch/tag and configure sparse checkout options.
+4. Generate a digest from the loaded repository.
 
-## Known Issues
+## 📖 Documentation
 
-Calling out known issues can help limit users opening duplicate issues against your extension.
+- [User Guide](docs/USER_GUIDE.md) – Complete usage instructions
+- [Configuration Reference](docs/CONFIGURATION.md) – All settings explained
+- [API Documentation](docs/API.md) – Programmatic usage
+- [Troubleshooting Guide](docs/TROUBLESHOOTING.md) – Common issues and solutions
+- [Developer Guide](docs/DEVELOPER_GUIDE.md) – Contributing and development setup
 
-## Release Notes
+## ⚙️ Configuration
 
-Users appreciate release notes as you update your extension.
+### Key Settings
 
-### 1.0.0
+```json
+{
+	"codeIngest.maxFiles": 1000,
+	"codeIngest.outputFormat": "markdown",
+	"codeIngest.binaryFilePolicy": "skip",
+	"codeIngest.redactionPatterns": ["api[_-]?key", "password"],
+	"codeIngest.notebookIncludeOutputs": true
+}
+```
 
-Initial release of ...
+### Remote Repository Settings
 
-### 1.0.1
+```json
+{
+	"codeIngest.remoteRepo.usePartialClone": true,
+	"codeIngest.remoteRepo.maxTimeout": 300000,
+	"codeIngest.remoteRepo.keepTempDirs": false
+}
+```
 
-Fixed issue #.
+## 🎨 Output Formats
 
-### 1.1.0
+### Markdown Format
 
-Added features X, Y, and Z.
+```
+# Codebase Digest
+
+## Summary
+- Files processed: 150
+- Total tokens: ~25,000
+- Languages: TypeScript (75%), JavaScript (20%), JSON (5%)
+
+## File Structure
+src/
+├── services/
+│   ├── fileScanner.ts
+│   └── digestGenerator.ts
+└── utils/
+		└── formatters.ts
+```
+
+### JSON Format
+
+```json
+{
+	"metadata": {
+		"generatedAt": "2025-10-10T20:00:00.000Z",
+		"totalFiles": 150,
+		"tokenEstimate": 25000
+	},
+	"files": [
+		{
+			"path": "src/services/fileScanner.ts",
+			"language": "typescript",
+			"content": "// File content..."
+		}
+	]
+}
+```
+
+## 🔐 Privacy & Security
+
+- **No Data Collection**: Your code never leaves your machine unless explicitly exported.
+- **Secret Redaction**: Automatic detection and redaction of API keys, tokens, and passwords.
+- **Configurable Privacy**: Full control over what data is included in outputs.
+- **Telemetry**: Optional, anonymous usage analytics (opt-in only).
+
+## 📊 Performance
+
+- **Large Repositories**: Efficiently handles repositories with 10,000+ files.
+- **Memory Efficient**: Streaming processing for large files.
+- **Parallel Processing**: Multi-threaded file scanning and processing.
+- **Caching**: Intelligent caching reduces repeated work.
+
+## 🤝 Contributing
+
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+
+### Development Setup
+
+```bash
+git clone https://github.com/your-org/code-ingest
+cd code-ingest
+npm install
+npm run build
+code .
+```
+
+### Running Tests
+
+```bash
+npm run test:unit       # Unit tests
+npm run test:integration # Integration tests
+npm run test:e2e         # End-to-end tests
+```
+
+## 📝 Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for a complete history of changes.
+
+## 📄 License
+
+This project is licensed under the MIT License – see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- Built with the VS Code Extension API
+- Uses Chart.js for performance dashboards
+- Powered by Zustand for state management
+- Thanks to all contributors and users
+
+## 📞 Support
+
+- [Documentation](docs/)
+- [Issues](https://github.com/your-org/code-ingest/issues)
+- [Discussions](https://github.com/your-org/code-ingest/discussions)
+- [Email Support](mailto:support@code-ingest.com)
 
 ---
 
-## Following extension guidelines
-
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
-
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
-
-## Working with Markdown
-
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
-
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
-
-## For more information
-
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
-
-**Enjoy!**
+Made with ❤️ by the Code Ingest team

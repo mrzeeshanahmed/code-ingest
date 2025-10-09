@@ -136,4 +136,60 @@ describe("PerformanceMonitor", () => {
     await monitor.dispose();
     await advanceAllTimers();
   });
+
+  it("provides aggregated session summary", async () => {
+    let memoryUsage = createMemoryUsage(90 * 1024 * 1024);
+    jest.spyOn(process, "memoryUsage").mockImplementation(() => ({ ...memoryUsage }));
+    jest.spyOn(process, "cpuUsage").mockImplementation(() => ({ user: 150_000, system: 75_000 }));
+
+    const logger = createLogger();
+    const configService = { getExtensionPath: jest.fn().mockReturnValue("C:/ext") } as unknown as ConfigurationService;
+    const monitor = new PerformanceMonitor(logger, configService);
+
+    await monitor.measureAsync("file-scan", async () => {
+      memoryUsage = createMemoryUsage(140 * 1024 * 1024);
+      jest.advanceTimersByTime(1_200);
+      return "done";
+    });
+
+    jest.advanceTimersByTime(800);
+
+    const summary = monitor.getSessionSummary();
+
+    expect(summary.sessionId).toMatch(/session-/);
+    expect(summary.operationsCompleted).toBe(1);
+    expect(summary.averageOperationTime).toBeGreaterThan(0);
+    expect(summary.memoryPeak).toBe(140 * 1024 * 1024);
+    expect(summary.errorsEncountered).toBe(0);
+    expect(summary.duration).toBeGreaterThan(0);
+
+    await monitor.dispose();
+    await advanceAllTimers();
+  });
+
+  it("captures active operation snapshots", async () => {
+    jest.spyOn(process, "memoryUsage").mockImplementation(() => createMemoryUsage(64 * 1024 * 1024));
+    jest.spyOn(process, "cpuUsage").mockImplementation(() => ({ user: 120_000, system: 60_000 }));
+
+    const logger = createLogger();
+    const configService = { getExtensionPath: jest.fn().mockReturnValue("C:/ext") } as unknown as ConfigurationService;
+    const monitor = new PerformanceMonitor(logger, configService);
+
+    const operationId = monitor.startOperation("content-process", { source: "unit-test" });
+    monitor.recordResourceUsage(operationId, { fileOperations: 3, networkRequests: 1 });
+
+    const snapshots = monitor.getActiveOperationsSnapshot();
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0].operationId).toBe(operationId);
+    expect(snapshots[0].metadata.source).toBe("unit-test");
+    expect(snapshots[0].resourceUsage.fileOperations).toBe(3);
+
+    monitor.endOperation(operationId);
+
+    const emptySnapshots = monitor.getActiveOperationsSnapshot();
+    expect(emptySnapshots).toHaveLength(0);
+
+    await monitor.dispose();
+    await advanceAllTimers();
+  });
 });

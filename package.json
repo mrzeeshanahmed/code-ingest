@@ -1,14 +1,39 @@
 {
   "name": "code-ingest",
   "displayName": "Code Ingest",
-  "description": "Generate LLM-ready codebase digests.",
-  "version": "0.0.1",
+  "description": "Professional codebase digest generation with advanced filtering and remote repository support",
+  "version": "1.0.0",
+  "publisher": "your-publisher",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/code-ingest.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-org/code-ingest/issues"
+  },
+  "homepage": "https://github.com/your-org/code-ingest#readme",
+  "license": "MIT",
+  "keywords": [
+    "codebase",
+    "digest",
+    "documentation",
+    "analysis",
+    "remote-repository",
+    "jupyter",
+    "markdown"
+  ],
   "engines": {
     "vscode": "^1.74.0"
   },
   "categories": [
-    "Other"
+    "Other",
+    "Snippets",
+    "Notebooks"
   ],
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
   "activationEvents": [
     "onStartupFinished"
   ],
@@ -93,17 +118,30 @@
     ]
   },
   "scripts": {
+    "clean": "rimraf out dist",
+  "lint": "eslint \"./src/**/*.{ts,tsx}\"",
+    "type-check": "tsc --noEmit",
     "build": "webpack --mode production",
     "build:dev": "webpack --mode development",
+    "build:watch": "webpack --mode development --watch",
     "build:webview": "node scripts/copyWebviewResources.js",
     "copy-webview": "node scripts/copyWebviewResources.js",
-    "watch": "webpack --mode development --watch",
+    "watch": "npm run build:watch",
     "test": "npm run test:unit",
-    "test:unit": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --testPathPattern=unit",
-    "test:integration": "jest --testPathPattern=integration",
+    "test:unit": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --testPathPattern=unit --coverage",
+    "test:integration": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --testPathPattern=integration",
     "test:e2e": "jest --testPathPattern=e2e",
     "test:webview": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js -c resources/webview/jest.config.js --runInBand",
-    "pretest": "npm run build:webview"
+    "test:all": "npm run test:unit && npm run test:integration && npm run test:e2e",
+    "check-bundle-size": "node scripts/check-bundle-size.js",
+    "check-webview-assets": "node scripts/check-webview-assets.js",
+    "check-handlers-coverage": "node scripts/check-handlers-coverage.js",
+    "security-audit": "npm audit --audit-level=moderate",
+    "pretest": "npm run build:webview",
+    "package": "vsce package --out dist/",
+    "publish": "vsce publish",
+    "prepare-release": "node scripts/prepare-release.js",
+    "ci": "npm run lint && npm run type-check && npm run test:unit && npm run test:integration && npm run check-bundle-size && npm run check-webview-assets && npm run check-handlers-coverage && npm run build"
   },
   "dependencies": {
     "minimatch": "^9.0.4",
@@ -136,6 +174,7 @@
     "ts-jest": "^29.0.0",
     "ts-loader": "^9.4.0",
     "ts-node": "10.9.2",
+  "vsce": "^2.23.0",
     "typescript": "^4.9.0",
     "webpack": "^5.75.0",
     "webpack-bundle-analyzer": "^4.7.0",

@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { DigestConfig, Diagnostics, validateConfig } from "../utils/validateConfig";
@@ -10,6 +11,8 @@ import { DEFAULT_CONFIG } from "../config/constants";
 export class ConfigurationService {
   private config: DigestConfig;
   private diagnostics: Diagnostics;
+  private cachedConfig?: DigestConfig;
+  private cachedRequiredVSCodeVersion?: string;
 
   constructor(initialConfig?: Partial<DigestConfig>, diagnostics?: Diagnostics) {
     this.diagnostics = diagnostics ?? { addError: (m: string) => console.error(m), addWarning: (m: string) => console.warn(m) };
@@ -23,7 +26,16 @@ export class ConfigurationService {
    */
   loadConfig(): DigestConfig {
     validateConfig(this.config, this.diagnostics);
-    return this.config;
+    this.cachedConfig = { ...this.config };
+    return { ...this.cachedConfig };
+  }
+
+  getConfig(): DigestConfig {
+    if (!this.cachedConfig) {
+      return this.loadConfig();
+    }
+
+    return { ...this.cachedConfig };
   }
 
   /**
@@ -72,5 +84,37 @@ export class ConfigurationService {
     }
 
     return path.resolve(process.cwd());
+  }
+
+  getGlobalValue<T>(key: string): T | undefined {
+    const config = vscode.workspace.getConfiguration();
+    return config.get<T>(key);
+  }
+
+  async updateGlobalValue(key: string, value: unknown): Promise<void> {
+    const config = vscode.workspace.getConfiguration();
+    await config.update(key, value, vscode.ConfigurationTarget.Global);
+  }
+
+  getRequiredVSCodeVersion(): string {
+    if (this.cachedRequiredVSCodeVersion) {
+      return this.cachedRequiredVSCodeVersion;
+    }
+
+    try {
+      const manifestPath = path.join(this.getExtensionPath(), "package.json");
+      const raw = fs.readFileSync(manifestPath, "utf8");
+      const manifest = JSON.parse(raw) as { engines?: { vscode?: string } };
+      const value = manifest.engines?.vscode;
+      if (typeof value === "string" && value.trim().length > 0) {
+        this.cachedRequiredVSCodeVersion = value.replace(/^[^0-9]*/, "");
+        return this.cachedRequiredVSCodeVersion;
+      }
+    } catch (error) {
+      this.diagnostics.addWarning?.(`Unable to read VS Code version requirement: ${(error as Error).message}`);
+    }
+
+    this.cachedRequiredVSCodeVersion = "1.74.0";
+    return this.cachedRequiredVSCodeVersion;
   }
 }

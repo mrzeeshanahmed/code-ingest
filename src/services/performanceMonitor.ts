@@ -8,6 +8,28 @@ import { ConfigurationService } from "./configurationService";
 
 export type PerformanceMetadata = Record<string, unknown>;
 
+export interface ActiveOperationSnapshot {
+  operationId: string;
+  operationType: string;
+  startedAt: number;
+  duration: number;
+  metadata: PerformanceMetadata;
+  resourceUsage: {
+    fileOperations: number;
+    networkRequests: number;
+  };
+}
+
+export interface PerformanceSessionSummary {
+  sessionId: string;
+  startTime: number;
+  duration: number;
+  operationsCompleted: number;
+  averageOperationTime: number;
+  memoryPeak: number;
+  errorsEncountered: number;
+}
+
 export interface PerformanceMetrics {
   operationId: string;
   operationType: string;
@@ -91,6 +113,7 @@ export interface OptimizationRecommendation {
 interface ActiveOperation {
   operationType: string;
   startTime: number;
+  startedAt: number;
   startMemory: NodeJS.MemoryUsage;
   metadata: PerformanceMetadata;
   peakMemory: NodeJS.MemoryUsage;
@@ -125,10 +148,12 @@ export class PerformanceMonitor {
   private readonly recommendationEngine = new OptimizationRecommendationEngine();
   private readonly maxHistorySize: number;
   private readonly sessionId: string;
+  private sessionStart: number;
   private memoryMonitorInterval?: NodeJS.Timeout;
 
   constructor(private readonly logger: Logger, private readonly configService: ConfigurationService) {
     this.sessionId = this.generateSessionId();
+    this.sessionStart = Date.now();
     this.benchmarkManager = new BenchmarkManager(this.configService);
     this.maxHistorySize = MAX_OPERATION_HISTORY;
     void this.initializeBenchmarks();
@@ -138,11 +163,13 @@ export class PerformanceMonitor {
   startOperation(operationType: string, metadata: PerformanceMetadata = {}): string {
     const operationId = this.generateOperationId(operationType);
     const startTime = performance.now();
+    const startedAt = Date.now();
     const startMemory = process.memoryUsage();
 
     const operation: ActiveOperation = {
       operationType,
       startTime,
+      startedAt,
       startMemory,
       metadata: { ...metadata },
       peakMemory: startMemory,
@@ -205,6 +232,9 @@ export class PerformanceMonitor {
       },
       metadata: { ...operation.metadata }
     };
+
+    metrics.metadata.startedAt ??= operation.startedAt;
+    metrics.metadata.completedAt = new Date().toISOString();
 
     this.activeOperations.delete(operationId);
     this.recordMetrics(metrics);
@@ -352,6 +382,49 @@ export class PerformanceMonitor {
     return [...this.completedMetrics];
   }
 
+  getActiveOperationsSnapshot(): ActiveOperationSnapshot[] {
+    if (this.activeOperations.size === 0) {
+      return [];
+    }
+
+    const now = Date.now();
+    return Array.from(this.activeOperations.entries()).map(([operationId, operation]) => ({
+      operationId,
+      operationType: operation.operationType,
+      startedAt: operation.startedAt,
+      duration: Math.max(now - operation.startedAt, 0),
+      metadata: { ...operation.metadata },
+      resourceUsage: {
+        fileOperations: operation.resourceUsage.fileOperations,
+        networkRequests: operation.resourceUsage.networkRequests
+      }
+    }));
+  }
+
+  getSessionSummary(): PerformanceSessionSummary {
+    const operationsCompleted = this.completedMetrics.length;
+    const totalDuration = this.completedMetrics.reduce((sum, metric) => sum + metric.duration, 0);
+    const averageOperationTime = operationsCompleted === 0 ? 0 : totalDuration / operationsCompleted;
+    const memoryPeak = this.completedMetrics.reduce((peak, metric) => {
+      const metricPeak = metric.memoryUsage.peak.heapUsed;
+      return metricPeak > peak ? metricPeak : peak;
+    }, 0);
+
+    const errorsEncountered = this.completedMetrics.reduce((count, metric) => {
+      return typeof metric.metadata.error === "string" ? count + 1 : count;
+    }, 0);
+
+    return {
+      sessionId: this.sessionId,
+      startTime: this.sessionStart,
+      duration: Date.now() - this.sessionStart,
+      operationsCompleted,
+      averageOperationTime,
+      memoryPeak,
+      errorsEncountered
+    };
+  }
+
   getBenchmarks(): PerformanceBenchmark[] {
     return this.benchmarkManager.getAllBenchmarks();
   }
@@ -369,6 +442,7 @@ export class PerformanceMonitor {
     this.activeOperations.clear();
     this.completedMetrics = [];
     this.operationStats.clear();
+    this.sessionStart = Date.now();
   }
 
   async dispose(): Promise<void> {
