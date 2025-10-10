@@ -75,8 +75,38 @@ function createCommandWrapper(
       outputChannel?.appendLine(`[command] ${commandId} completed in ${Math.round(performance.now() - start)}ms`);
       return result;
     } catch (error) {
-      errorChannel.report(error, { command: commandId });
-      void vscode.window.showErrorMessage(`Code Ingest: Command failed (${commandId}). See error output for details.`);
+      const err = error as Error;
+      errorChannel.report(err, { command: commandId });
+
+      const actions = ["Details", "Report"] as const;
+      const selection = await vscode.window.showErrorMessage(
+        `Code Ingest: Command failed (${commandId}). ${err.message}`,
+        ...actions
+      );
+
+      if (selection === "Details") {
+        outputChannel?.show(true);
+      } else if (selection === "Report") {
+        const payload = {
+          command: commandId,
+          message: err.message,
+          stack: err.stack,
+          time: new Date().toISOString()
+        };
+        try {
+          await vscode.env.clipboard.writeText(JSON.stringify(payload, null, 2));
+          const openIssue = await vscode.window.showInformationMessage(
+            "Error report copied to clipboard. Open issue page?",
+            "Open Issue",
+            "Cancel"
+          );
+          if (openIssue === "Open Issue") {
+            void vscode.env.openExternal(vscode.Uri.parse("https://github.com/mrzeeshanahmed/code-ingest/issues/new"));
+          }
+        } catch (e) {
+          outputChannel?.appendLine(`[report-failed] Failed to copy report: ${(e as Error).message}`);
+        }
+      }
       throw error;
     }
   };
@@ -250,6 +280,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const reloadWatcher = vscode.workspace.onDidSaveTextDocument((document) => {
       if (document.fileName.startsWith(context.extensionPath)) {
         outputChannel?.appendLine(`[reload] Detected change to ${document.fileName}`);
+        void vscode.window.showInformationMessage(`Code Ingest: Detected change to ${document.fileName}`, "Reload Window").then((choice) => {
+          if (choice === "Reload Window") {
+            void vscode.commands.executeCommand("workbench.action.reloadWindow");
+          }
+        });
       }
     });
     context.subscriptions.push(reloadWatcher);

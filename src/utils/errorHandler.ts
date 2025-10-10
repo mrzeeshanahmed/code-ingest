@@ -215,16 +215,25 @@ class NetworkRecoveryStrategy implements RecoveryStrategy {
     const maxRetries = 3;
     let attempt = 0;
 
+    const config = vscode.workspace.getConfiguration("codeIngest.network");
+    const hosts = (config.get<string[]>("connectivityHosts") ?? ["api.github.com", "www.google.com"]).filter(Boolean);
+
     while (attempt < maxRetries) {
       await this.delay(2 ** attempt * 1000);
-      try {
-        await this.testConnectivity();
-        return;
-      } catch (connectivityError) {
-        attempt += 1;
-        if (attempt >= maxRetries) {
-          throw new Error(`Network recovery failed after ${maxRetries} attempts: ${(connectivityError as Error).message}`);
+      let lastErr: Error | null = null;
+      for (const host of hosts) {
+        try {
+          await this.testConnectivity(host);
+          return;
+        } catch (connectivityError) {
+          lastErr = connectivityError as Error;
+          // try next host
         }
+      }
+
+      attempt += 1;
+      if (attempt >= maxRetries) {
+        throw new Error(`Network recovery failed after ${maxRetries} attempts: ${lastErr?.message ?? "unknown"}`);
       }
     }
   }
@@ -238,12 +247,12 @@ class NetworkRecoveryStrategy implements RecoveryStrategy {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  private async testConnectivity(): Promise<void> {
+  private async testConnectivity(hostname: string): Promise<void> {
     await new Promise<void>((resolve, reject) => {
       const request = https.request(
         {
           method: "HEAD",
-          hostname: "api.github.com",
+          hostname,
           path: "/",
           headers: {
             "User-Agent": "CodeIngest-ErrorHandler",
@@ -255,7 +264,7 @@ class NetworkRecoveryStrategy implements RecoveryStrategy {
           if (response.statusCode && response.statusCode >= 200 && response.statusCode < 500) {
             resolve();
           } else {
-            reject(new Error(`Connectivity test failed with status ${response.statusCode ?? "unknown"}`));
+            reject(new Error(`Connectivity test to ${hostname} failed with status ${response.statusCode ?? "unknown"}`));
           }
           response.resume();
         }
@@ -299,7 +308,11 @@ class AuthenticationRecoveryStrategy implements RecoveryStrategy {
 
 class FileSystemRecoveryStrategy implements RecoveryStrategy {
   async recover(error: Error, context: ErrorContext): Promise<void> {
-    const filePath = this.extractFilePathFromError(error.message);
+    // Prefer an explicit filePath provided in the context metadata. This is more robust
+    // than parsing error messages which can vary across platforms and Node versions.
+    const metadata = (context.metadata as Record<string, unknown> | undefined) ?? {};
+    const filePath = typeof metadata.filePath === "string" ? metadata.filePath : this.extractFilePathFromError(error.message);
+
     if (!filePath) {
       throw new Error("Unable to determine file path for recovery");
     }
@@ -307,8 +320,11 @@ class FileSystemRecoveryStrategy implements RecoveryStrategy {
     const directory = path.dirname(filePath);
     await fs.mkdir(directory, { recursive: true });
 
+    metadata.recoveredPath = directory;
+    metadata.filePath = filePath;
+
     if (context.metadata && typeof context.metadata === "object") {
-      (context.metadata as Record<string, unknown>).recoveredPath = directory;
+      Object.assign(context.metadata as Record<string, unknown>, metadata);
     }
   }
 
@@ -317,8 +333,14 @@ class FileSystemRecoveryStrategy implements RecoveryStrategy {
   }
 
   private extractFilePathFromError(message: string): string | null {
-    const match = message.match(/ENOENT: no such file or directory, open '([^']+)'/i);
-    return match?.[1] ?? null;
+    // Try a couple of common Node error message formats. Keep this as a fallback only.
+    let match = message.match(/ENOENT: no such file or directory, open '([^']+)'/i);
+    if (match?.[1]) return match[1];
+
+    match = message.match(/no such file or directory - ([^\n\r]+)/i);
+    if (match?.[1]) return match[1].trim();
+
+    return null;
   }
 }
 
@@ -484,12 +506,38 @@ export class ErrorHandler {
     const actions = [...classification.suggestedActions];
     if (this.isSeverityAtLeast(classification.severity, ErrorSeverity.HIGH)) {
       actions.push("Show Details");
+      actions.push("Report");
     }
 
     const selected = await vscode.window.showErrorMessage(classification.userFriendlyMessage, ...actions);
     if (selected === "Show Details") {
       this.outputChannel.show(true);
       this.outputChannel.appendLine(`Focused error: ${errorId}`);
+    } else if (selected === "Report") {
+      // Prepare a short report payload and copy to clipboard, then open an issue URL.
+      const report = {
+        id: errorId,
+        time: new Date().toISOString(),
+        message: classification.userFriendlyMessage,
+        suggestedActions: classification.suggestedActions
+      };
+
+      try {
+        await vscode.env.clipboard.writeText(JSON.stringify(report, null, 2));
+        const openIssue = await vscode.window.showInformationMessage(
+          "Error report copied to clipboard. Would you like to open the repository issue page to file a report?",
+          "Open Issue",
+          "Cancel"
+        );
+
+        if (openIssue === "Open Issue") {
+          void vscode.env.openExternal(vscode.Uri.parse("https://github.com/mrzeeshanahmed/code-ingest/issues/new"));
+        }
+      } catch (e) {
+        // fallback: show where details are available
+        this.outputChannel.show(true);
+        this.outputChannel.appendLine(`Failed to copy report for ${errorId}: ${(e as Error).message}`);
+      }
     }
   }
 
