@@ -17,8 +17,22 @@ import { ConfigurationService } from "../services/configurationService";
 import { ErrorReporter } from "../services/errorReporter";
 import { DEFAULT_CONFIG } from "../config/constants";
 import { formatDigest } from "../utils/digestFormatters";
+import type { Logger } from "../utils/gitProcessManager";
 
 const EXCLUDED_DIRECTORIES = new Set([".git", "node_modules"]);
+
+function formatLogContext(context?: Record<string, unknown>): string {
+  if (!context) {
+    return "";
+  }
+
+  try {
+    const serialized = JSON.stringify(context);
+    return serialized && serialized !== "{}" ? ` ${serialized}` : "";
+  } catch {
+    return "";
+  }
+}
 
 function parseRepoSlug(input: string): string {
   try {
@@ -277,7 +291,13 @@ export function registerIngestRemoteRepoCommand(
           const processor = new ContentProcessor();
           const analyzer = new TokenAnalyzer({ includeDefaultAdapters: true, enableCaching: true });
           const outputChannel = vscode.window.createOutputChannel("Code Ingest: Remote Repo");
-          const errorReporter = new ErrorReporter(outputChannel);
+          const logger: Logger = {
+            debug: (message, context) => outputChannel.appendLine(`[debug] ${message}${formatLogContext(context)}`),
+            info: (message, context) => outputChannel.appendLine(`[info] ${message}${formatLogContext(context)}`),
+            warn: (message, context) => outputChannel.appendLine(`[warn] ${message}${formatLogContext(context)}`),
+            error: (message, context) => outputChannel.appendLine(`[error] ${message}${formatLogContext(context)}`)
+          };
+          const errorReporter = new ErrorReporter(configurationService, logger);
 
           try {
             throwIfCancelled(cancellationToken);

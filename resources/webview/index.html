@@ -4,12 +4,20 @@
     <meta charset="UTF-8" />
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src https: data: vscode-resource:; style-src 'unsafe-inline' https:; script-src 'self' 'unsafe-inline'; font-src https: data:; connect-src https: vscode-resource:;"
+    />
     <title>Code Ingest Dashboard</title>
     <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="store.js" defer></script>
+    <script type="module" src="commandRegistry.js" defer></script>
+    <script src="commandMap.generated.js" defer></script>
     <script type="module" src="main.js" defer></script>
   </head>
   <body>
-  <svg aria-hidden="true" focusable="false" class="sprite-sheet">
+    <!-- INITIAL_STATE -->
+    <svg aria-hidden="true" focusable="false" class="sprite-sheet">
       <defs>
         <symbol id="icon-folder" viewBox="0 0 16 16" fill="currentColor">
           <path d="M1.75 3a.75.75 0 0 0-.75.75v8.5c0 .414.336.75.75.75h12.5a.75.75 0 0 0 .75-.75V5.5a.75.75 0 0 0-.75-.75h-5.69l-1.22-1.464A1.25 1.25 0 0 0 6.324 3H1.75Z" />
@@ -24,14 +32,14 @@
     </svg>
 
     <div class="dashboard">
-      <header class="dashboard__header">
+      <header class="dashboard__header" role="banner">
         <div class="dashboard__title-group">
           <svg class="dashboard__title-icon" aria-hidden="true">
             <use href="#icon-folder"></use>
           </svg>
-          <h1 class="dashboard__title">Code Ingest Dashboard</h1>
+          <h1 class="dashboard__title" data-glitch="Code Ingest Dashboard">Code Ingest Dashboard</h1>
         </div>
-        <div class="dashboard__actions" role="group" aria-label="Dashboard actions">
+        <nav class="dashboard__actions" role="group" aria-label="Dashboard actions">
           <button class="button" type="button" data-action="refresh">
             <svg class="button__icon" aria-hidden="true">
               <use href="#icon-refresh"></use>
@@ -44,13 +52,15 @@
             </svg>
             <span>Generate Digest</span>
           </button>
-        </div>
+        </nav>
       </header>
 
-      <main class="dashboard__main">
+      <div class="neon-divider" aria-hidden="true"></div>
+
+      <main class="dashboard__main" role="main">
         <section class="panel panel--tree" aria-labelledby="tree-heading">
           <header class="panel__header">
-            <h2 id="tree-heading">Workspace Files</h2>
+            <h2 id="tree-heading" class="panel__title" data-glitch="Workspace Files">Workspace Files</h2>
             <div class="panel__controls">
               <button class="icon-button" type="button" data-action="expand-all" title="Expand all">
                 <svg aria-hidden="true">
@@ -65,7 +75,7 @@
             </div>
           </header>
           <div class="panel__body" aria-label="Workspace files">
-            <ul class="tree" role="tree">
+            <ul id="file-tree-container" class="tree" role="tree">
               <li class="empty-state" role="treeitem" aria-disabled="true">No files selected yet.</li>
             </ul>
           </div>
@@ -73,7 +83,7 @@
 
         <section class="panel panel--preview" aria-labelledby="preview-heading">
           <header class="panel__header">
-            <h2 id="preview-heading">Digest Preview</h2>
+            <h2 id="preview-heading" class="panel__title" data-glitch="Digest Preview">Digest Preview</h2>
             <div class="panel__controls">
               <button class="icon-button" type="button" data-action="refresh-preview" title="Refresh preview">
                 <svg aria-hidden="true">
@@ -88,11 +98,31 @@
                 <h3 class="preview__title">Awaiting Selection</h3>
                 <p class="preview__subtitle">Select files from the tree to generate a live digest preview.</p>
               </header>
-              <section class="preview__content" aria-live="polite"></section>
+              <section id="preview-container" class="preview__content" aria-live="polite"></section>
             </article>
           </div>
         </section>
+
+        <section class="panel panel--status" aria-labelledby="status-heading">
+          <header class="panel__header">
+            <h2 id="status-heading" class="panel__title" data-glitch="Pipeline Status">Pipeline Status</h2>
+          </header>
+          <div class="panel__body">
+            <div id="progress-container" class="status" aria-live="polite" hidden>
+              <div class="status__track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <div class="status__indicator"></div>
+              </div>
+              <p class="status__message"></p>
+            </div>
+            <div class="status__log" data-element="status-log"></div>
+          </div>
+        </section>
       </main>
+
+      <footer class="dashboard__footer" role="contentinfo">
+        <span>Code Ingest · Cybernetic Digest Engine</span>
+        <span class="footer__pulse" aria-hidden="true"></span>
+      </footer>
     </div>
   </body>
 </html>

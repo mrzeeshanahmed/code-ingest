@@ -10,10 +10,25 @@ import { ErrorReporter } from "./services/errorReporter";
 import { GitignoreService } from "./services/gitignoreService";
 import { WorkspaceManager } from "./services/workspaceManager";
 import { WebviewPanelManager } from "./webview/webviewPanelManager";
+import { DEFAULT_CONFIG } from "./config/constants";
+import type { Logger } from "./utils/gitProcessManager";
 
 let errorReporter: ErrorReporter | undefined;
 let outputChannel: vscode.OutputChannel | undefined;
 let activationTelemetry: Telemetry | undefined;
+
+function formatLogContext(context?: Record<string, unknown>): string {
+  if (!context) {
+    return "";
+  }
+
+  try {
+    const serialized = JSON.stringify(context);
+    return serialized && serialized !== "{}" ? ` ${serialized}` : "";
+  } catch {
+    return "";
+  }
+}
 
 class Telemetry {
   private readonly timings = new Map<string, number>();
@@ -80,13 +95,44 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(outputChannel, errorChannel);
   outputChannel.appendLine("[activation] Starting Code Ingest activation sequence...");
 
-  errorReporter = new ErrorReporter(errorChannel);
+  const diagnostics = new Diagnostics();
+
+  const diagnosticsAdapter = {
+    addError: (message: string) => {
+      errorReporter?.report(new Error(message), { source: "configuration" });
+      errorChannel.appendLine(`[config-error] ${message}`);
+    },
+    addWarning: (message: string) => {
+      errorChannel.appendLine(`[config-warning] ${message}`);
+    }
+  } satisfies Parameters<typeof ConfigurationService.getWorkspaceConfig>[1];
+
+  const workspaceConfig = (() => {
+    try {
+      return ConfigurationService.getWorkspaceConfig(undefined, diagnosticsAdapter);
+    } catch (error) {
+      errorChannel.appendLine(
+        `[config-error] Failed to read workspace configuration: ${(error as Error).message}`
+      );
+      return DEFAULT_CONFIG;
+    }
+  })();
+
+  const configurationService = new ConfigurationService({ ...DEFAULT_CONFIG, ...workspaceConfig }, diagnosticsAdapter);
+
+  const logger: Logger = {
+    debug: (message, context) => outputChannel?.appendLine(`[debug] ${message}${formatLogContext(context)}`),
+    info: (message, context) => outputChannel?.appendLine(`[info] ${message}${formatLogContext(context)}`),
+    warn: (message, context) => errorChannel.appendLine(`[warn] ${message}${formatLogContext(context)}`),
+    error: (message, context) => errorChannel.appendLine(`[error] ${message}${formatLogContext(context)}`)
+  };
+
+  errorReporter = new ErrorReporter(configurationService, logger);
   context.subscriptions.push(errorReporter);
 
   activationTelemetry = new Telemetry(outputChannel, !isDevelopment);
   activationTelemetry.start("activation");
 
-  const diagnostics = new Diagnostics();
   const gitignoreService = new GitignoreService();
   const workspaceManager = new WorkspaceManager(diagnostics, gitignoreService);
 
@@ -102,17 +148,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   processHandlers.push(() => process.off("uncaughtException", uncaughtExceptionHandler));
   processHandlers.push(() => process.off("unhandledRejection", unhandledRejectionHandler));
   context.subscriptions.push({ dispose: () => processHandlers.forEach((dispose) => dispose()) });
-
-  const configurationDiagnostics = {
-    addError: (message: string) => errorReporter?.report(new Error(message), { source: "configuration" }),
-    addWarning: (message: string) => outputChannel?.appendLine(`[config-warning] ${message}`)
-  };
-
-  try {
-    ConfigurationService.getWorkspaceConfig(undefined, configurationDiagnostics);
-  } catch (error) {
-    errorReporter.report(error, { source: "configuration" });
-  }
 
   const treeProviders = new Map<string, CodeIngestTreeProvider>();
   const treeViews = new Map<string, vscode.TreeView<vscode.TreeItem>>();
@@ -168,7 +203,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const manualCommands: Array<[string, (...args: unknown[]) => Promise<unknown> | unknown]> = [
     ["codeIngest.openDashboardPanel", () => webviewPanelManager.createAndShowPanel()],
     ["codeIngest.flushErrorReports", async () => {
-      errorReporter?.flush();
+      await errorReporter?.flushErrors();
       await vscode.window.showInformationMessage("Code Ingest: Error reports flushed to output channel.");
     }],
     ["codeIngest.viewMetrics", async () => {
@@ -208,7 +243,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   outputChannel.appendLine(`[activation] Code Ingest activated in ${activationDuration}ms`);
 
   context.subscriptions.push({ dispose: () => diagnostics.clear() });
-  context.subscriptions.push({ dispose: () => errorReporter?.flush() });
+  context.subscriptions.push({ dispose: () => void errorReporter?.flushErrors() });
 
   if (isDevelopment) {
     outputChannel.appendLine("[activation] Development mode detected; telemetry disabled.");
@@ -223,7 +258,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
 export function deactivate(): void {
   outputChannel?.appendLine("[deactivation] Shutting down Code Ingest extension...");
-  errorReporter?.flush();
+  void errorReporter?.flushErrors();
   activationTelemetry?.dispose();
   // Resources registered with context.subscriptions are disposed automatically.
 }
