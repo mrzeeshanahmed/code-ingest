@@ -13,7 +13,7 @@ import { RestoredStateHandler } from "./handlers/restoredStateHandler.js";
 import { StateHandler } from "./handlers/stateHandler.js";
 import { PreviewDeltaHandler } from "./handlers/previewDeltaHandler.js";
 import { MessageEnvelope } from "./messageEnvelope.js";
-import { COMMAND_MAP } from "./commandMap.generated.js";
+import { COMMAND_MAP } from "./commandMap.js";
 import { WebviewLogger } from "./logger.js";
 import { WebviewErrorReporter } from "./errorReporter.js";
 import { WebviewPerformanceMonitor } from "./performanceMonitor.js";
@@ -173,22 +173,30 @@ export class WebviewApplication {
     }
 
     const outboundRegistrations = [
-      { commandId: COMMAND_MAP.WEBVIEW_TO_HOST.GENERATE_DIGEST, options: { requiresAck: true } },
-      { commandId: COMMAND_MAP.WEBVIEW_TO_HOST.LOAD_REMOTE_REPO, options: { requiresAck: true } },
-      { commandId: COMMAND_MAP.WEBVIEW_TO_HOST.SELECT_ALL_FILES },
-      { commandId: COMMAND_MAP.WEBVIEW_TO_HOST.TOGGLE_REDACTION },
-      { commandId: COMMAND_MAP.WEBVIEW_TO_HOST.APPLY_PRESET },
-      { commandId: COMMAND_MAP.WEBVIEW_TO_HOST.UPDATE_SELECTION },
-      { commandId: COMMAND_MAP.WEBVIEW_TO_HOST.REFRESH_TREE },
-      { commandId: COMMAND_MAP.WEBVIEW_TO_HOST.EXPAND_ALL },
-      { commandId: COMMAND_MAP.WEBVIEW_TO_HOST.COLLAPSE_ALL },
-      { commandId: COMMAND_MAP.WEBVIEW_TO_HOST.REFRESH_PREVIEW },
-      { commandId: COMMAND_MAP.WEBVIEW_TO_HOST.SELECT_ALL },
-      { commandId: COMMAND_MAP.WEBVIEW_TO_HOST.DESELECT_ALL },
-      { commandId: COMMAND_MAP.WEBVIEW_TO_HOST.WEBVIEW_READY, options: { rateLimitMs: 0 } }
+      { key: "GENERATE_DIGEST", options: { requiresAck: true } },
+      { key: "LOAD_REMOTE_REPO", options: { requiresAck: true } },
+      { key: "SELECT_ALL_FILES" },
+      { key: "TOGGLE_REDACTION" },
+      { key: "APPLY_PRESET" },
+      { key: "UPDATE_SELECTION" },
+      { key: "REFRESH_TREE" },
+      { key: "EXPAND_ALL" },
+      { key: "COLLAPSE_ALL" },
+      { key: "REFRESH_PREVIEW" },
+      { key: "SELECT_ALL" },
+      { key: "DESELECT_ALL" },
+      { key: "WEBVIEW_READY", options: { rateLimitMs: 0 } },
+      { key: "FLUSH_ERROR_REPORTS" },
+      { key: "VIEW_METRICS" },
+      { key: "OPEN_DASHBOARD_PANEL" }
     ];
 
-    for (const { commandId, options } of outboundRegistrations) {
+    for (const { key, options } of outboundRegistrations) {
+      const commandId = COMMAND_MAP.WEBVIEW_TO_HOST?.[key];
+      if (!commandId) {
+        this.logger.warn("Skipping outbound command registration. Unknown key", { key });
+        continue;
+      }
       const registrationOptions = this.isTestEnvironment
         ? { ...options, requiresAck: false }
         : options;
@@ -220,30 +228,49 @@ export class WebviewApplication {
   }
 
   setupActionButtons() {
-    const refreshButton = document.querySelector('[data-action="refresh"]');
-    refreshButton?.addEventListener("click", () => {
-      void this.executeOutbound(COMMAND_MAP.WEBVIEW_TO_HOST.REFRESH_TREE);
-    });
+    const clickBindings = [
+      { action: "refresh", key: "REFRESH_TREE" },
+      { action: "refresh-tree", key: "REFRESH_TREE" },
+      { action: "generate", key: "GENERATE_DIGEST", payload: () => this.getGenerateDigestPayload() },
+      { action: "expand-all", key: "EXPAND_ALL" },
+      { action: "collapse-all", key: "COLLAPSE_ALL" },
+      { action: "refresh-preview", key: "REFRESH_PREVIEW" },
+      { action: "load-remote", key: "LOAD_REMOTE_REPO" },
+      { action: "toggle-redaction", key: "TOGGLE_REDACTION" },
+      { action: "select-all", key: "SELECT_ALL" },
+      { action: "select-none", key: "DESELECT_ALL" },
+      { action: "view-metrics", key: "VIEW_METRICS" },
+      { action: "flush-errors", key: "FLUSH_ERROR_REPORTS" },
+      { action: "open-dashboard", key: "OPEN_DASHBOARD_PANEL" }
+    ];
 
-    const generateButton = document.querySelector('[data-action="generate"]');
-    generateButton?.addEventListener("click", () => {
-      void this.executeOutbound(COMMAND_MAP.WEBVIEW_TO_HOST.GENERATE_DIGEST, this.getGenerateDigestPayload());
-    });
+    for (const binding of clickBindings) {
+      const commandId = COMMAND_MAP.WEBVIEW_TO_HOST?.[binding.key];
+      if (!commandId) {
+        this.logger.warn("No command mapping for action", binding);
+        continue;
+      }
+      const elements = document.querySelectorAll(`[data-action="${binding.action}"]`);
+      elements.forEach((element) => {
+        element.addEventListener("click", () => {
+          const payload = typeof binding.payload === "function" ? binding.payload() : binding.payload;
+          void this.executeOutbound(commandId, payload);
+        });
+      });
+    }
 
-    const expandAllButton = document.querySelector('[data-action="expand-all"]');
-    expandAllButton?.addEventListener("click", () => {
-      void this.executeOutbound(COMMAND_MAP.WEBVIEW_TO_HOST.EXPAND_ALL);
-    });
-
-    const collapseAllButton = document.querySelector('[data-action="collapse-all"]');
-    collapseAllButton?.addEventListener("click", () => {
-      void this.executeOutbound(COMMAND_MAP.WEBVIEW_TO_HOST.COLLAPSE_ALL);
-    });
-
-    const refreshPreviewButton = document.querySelector('[data-action="refresh-preview"]');
-    refreshPreviewButton?.addEventListener("click", () => {
-      void this.executeOutbound(COMMAND_MAP.WEBVIEW_TO_HOST.REFRESH_PREVIEW);
-    });
+    const presetSelect = document.querySelector('[data-action="apply-preset"]');
+    if (presetSelect instanceof HTMLSelectElement) {
+      presetSelect.addEventListener("change", () => {
+        const commandId = COMMAND_MAP.WEBVIEW_TO_HOST?.APPLY_PRESET;
+        if (!commandId) {
+          this.logger.warn("Preset command unavailable");
+          return;
+        }
+        const presetId = presetSelect.value ?? "default";
+        void this.executeOutbound(commandId, { presetId });
+      });
+    }
   }
 
   setupLifecycleEvents() {
@@ -266,6 +293,10 @@ export class WebviewApplication {
   }
 
   executeOutbound(commandId, payload) {
+    if (typeof commandId !== "string" || commandId.length === 0) {
+      this.logger.warn("Attempted to execute unknown command", { commandId });
+      return Promise.resolve({ ok: false, reason: "unknown_command" });
+    }
     return this.performanceMonitor
       .measureOperation("messageProcessing", () => this.commandRegistry.execute(commandId, payload))
       .catch((error) => {

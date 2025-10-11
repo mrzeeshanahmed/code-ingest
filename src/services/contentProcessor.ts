@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import * as path from "node:path";
 import { performance } from "node:perf_hooks";
+import * as os from "node:os";
 import * as vscode from "vscode";
 
 import { asyncPool } from "../utils/asyncPool";
@@ -65,6 +66,7 @@ interface BinaryDetectionResult {
 interface ContentProcessorDependencies {
   readonly logger?: (message: string, metadata?: Record<string, unknown>) => void;
   readonly now?: () => number;
+  readonly languageDetector?: (filePath: string, content: string) => Promise<string | undefined>;
 }
 
 const DEFAULT_MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
@@ -190,10 +192,12 @@ function bufferMatchesSignature(sample: Buffer, signature: Buffer, offset: numbe
 export class ContentProcessor {
   private readonly logger: ContentProcessorDependencies["logger"];
   private readonly now: () => number;
+  private readonly externalLanguageDetector: ((filePath: string, content: string) => Promise<string | undefined>) | undefined;
 
   constructor(dependencies: ContentProcessorDependencies = {}) {
     this.logger = dependencies.logger;
     this.now = dependencies.now ?? (() => performance.now());
+    this.externalLanguageDetector = dependencies.languageDetector ?? undefined;
   }
 
   public async processFile(filePath: string, options: ProcessingOptions = {}): Promise<ProcessedContent> {
@@ -240,7 +244,7 @@ export class ContentProcessor {
       }
 
       const content = normalizeLineEndings(buffer.toString(resolvedOptions.encoding));
-      const language = this.resolveLanguage(resolvedPath, content, resolvedOptions);
+      const language = await this.resolveLanguage(resolvedPath, content, resolvedOptions);
       return this.buildResult({
         encoding: "utf8",
         content,
@@ -276,8 +280,18 @@ export class ContentProcessor {
       return this.handleBinary(resolvedPath, fileStats.size, detection, startedAt, resolvedOptions);
     }
 
-    const result = await this.consumeStream(resolvedPath, fileStats, resolvedOptions, startedAt);
-    return result;
+  const streamResult = await this.consumeStream(resolvedPath, fileStats, resolvedOptions);
+    const language = await this.resolveLanguage(resolvedPath, streamResult.content, resolvedOptions);
+    return this.buildResult({
+      encoding: "utf8",
+      content: streamResult.content,
+      size: fileStats.size,
+      isTruncated: streamResult.truncated,
+      startedAt,
+      options: resolvedOptions,
+      language,
+      truncatedBytes: streamResult.truncatedBytes
+    });
   }
 
   public async detectBinaryFile(filePath: string): Promise<boolean> {
@@ -289,7 +303,7 @@ export class ContentProcessor {
     return detection.isBinary;
   }
 
-  public detectLanguage(filePath: string, content?: string): string {
+  public async detectLanguage(filePath: string, content?: string): Promise<string> {
     return this.resolveLanguage(filePath, content ?? "", this.resolveOptions({ detectLanguage: true }));
   }
 
@@ -313,15 +327,45 @@ export class ContentProcessor {
   private resolveOptions(options: ProcessingOptions): ResolvedProcessingOptions {
     const configuration = vscode.workspace.getConfiguration("codeIngest");
     const binaryPolicy = (options.binaryFilePolicy ?? configuration.get<BinaryFilePolicy>("binaryFilePolicy") ?? DEFAULT_BINARY_POLICY) as BinaryFilePolicy;
-    const maxFileSize = options.maxFileSize ?? configuration.get<number>("maxFileSize") ?? DEFAULT_MAX_FILE_SIZE;
-    const streamingThreshold = options.streamingThreshold ?? configuration.get<number>("streamingThreshold") ?? DEFAULT_STREAMING_THRESHOLD;
+    let maxFileSize = options.maxFileSize ?? configuration.get<number>("maxFileSize") ?? DEFAULT_MAX_FILE_SIZE;
+    if (maxFileSize <= 0) {
+      this.logger?.("contentProcessor.options.adjusted", { reason: "maxFileSize", provided: maxFileSize });
+      maxFileSize = DEFAULT_MAX_FILE_SIZE;
+    }
+
+    let streamingThreshold = options.streamingThreshold ?? configuration.get<number>("streamingThreshold") ?? DEFAULT_STREAMING_THRESHOLD;
+    if (streamingThreshold <= 0) {
+      streamingThreshold = Math.min(DEFAULT_STREAMING_THRESHOLD, maxFileSize);
+    }
+    if (streamingThreshold > maxFileSize) {
+      this.logger?.("contentProcessor.options.adjusted", {
+        reason: "streamingThreshold",
+        streamingThreshold,
+        maxFileSize
+      });
+      streamingThreshold = maxFileSize;
+    }
+
     const detectLanguage = options.detectLanguage ?? configuration.get<boolean>("detectLanguage") ?? true;
     const encoding = options.encoding ?? (configuration.get<BufferEncoding>("encoding") ?? DEFAULT_ENCODING);
     const timeoutMs = options.timeoutMs ?? configuration.get<number>("processingTimeout") ?? DEFAULT_TIMEOUT_MS;
-    const concurrency = Math.max(1, options.concurrency ?? configuration.get<number>("processingConcurrency") ?? DEFAULT_CONCURRENCY);
+
+    const requestedConcurrency = Math.max(1, options.concurrency ?? configuration.get<number>("processingConcurrency") ?? DEFAULT_CONCURRENCY);
+    const concurrency = this.computeAdaptiveConcurrency(requestedConcurrency);
+    if (concurrency !== requestedConcurrency) {
+      this.logger?.("contentProcessor.options.concurrency", {
+        requested: requestedConcurrency,
+        effective: concurrency
+      });
+    }
 
     const whitelist = new Set((options.whitelistExtensions ?? configuration.get<string[]>("binaryWhitelist") ?? []).map((ext) => ext.toLowerCase()));
     const blacklist = new Set((options.blacklistExtensions ?? configuration.get<string[]>("binaryBlacklist") ?? []).map((ext) => ext.toLowerCase()));
+    for (const extension of whitelist) {
+      if (blacklist.has(extension)) {
+        blacklist.delete(extension);
+      }
+    }
 
     return {
       binaryFilePolicy: binaryPolicy,
@@ -543,11 +587,12 @@ export class ContentProcessor {
   private async consumeStream(
     filePath: string,
     stats: fs.Stats,
-    options: ResolvedProcessingOptions,
-    startedAt: number
-  ): Promise<ProcessedContent> {
-    const stream = fs.createReadStream(filePath, { highWaterMark: 64 * 1024 });
-    const chunks: Buffer[] = [];
+    options: ResolvedProcessingOptions
+  ): Promise<{ content: string; truncated: boolean; truncatedBytes: number }> {
+  const stream = fs.createReadStream(filePath, { highWaterMark: 64 * 1024 });
+    const targetSize = Math.max(0, Math.min(stats.size, options.maxFileSize));
+    const bufferStore = Buffer.alloc(targetSize);
+    let offset = 0;
     let bytesRead = 0;
     let truncated = false;
     let truncatedBytes = 0;
@@ -563,25 +608,30 @@ export class ContentProcessor {
       }
     };
 
-    const dataPromise = new Promise<Buffer[]>((resolve, reject) => {
+    const dataPromise = new Promise<void>((resolve, reject) => {
       const timeout = options.timeoutMs > 0 ? setTimeout(() => {
         stream.destroy(new Error("Processing timed out"));
       }, options.timeoutMs) : undefined;
 
       stream.on("data", (chunk: Buffer) => {
         bytesRead += chunk.length;
-        if (bytesRead > options.maxFileSize) {
-          const allowed = options.maxFileSize - (bytesRead - chunk.length);
-          if (allowed > 0) {
-            chunks.push(chunk.slice(0, allowed));
+
+        if (targetSize > 0 && offset < targetSize) {
+          const writable = Math.min(chunk.length, targetSize - offset);
+          if (writable > 0) {
+            chunk.copy(bufferStore, offset, 0, writable);
+            offset += writable;
           }
+        }
+
+        if (bytesRead > options.maxFileSize) {
           truncated = true;
-          truncatedBytes = stats.size - options.maxFileSize;
+          truncatedBytes = Math.max(0, stats.size - options.maxFileSize);
           handleProgress(false);
           stream.destroy();
           return;
         }
-        chunks.push(chunk);
+
         handleProgress(false);
       });
 
@@ -596,32 +646,26 @@ export class ContentProcessor {
         if (timeout) {
           clearTimeout(timeout);
         }
-        resolve(chunks);
+        resolve();
       });
     });
 
     try {
-      const collected = await dataPromise;
+      await dataPromise;
       handleProgress(true);
-      const buffer = concatChunks(collected);
+      const buffer = targetSize > 0 ? bufferStore.subarray(0, offset) : Buffer.alloc(0);
       const content = normalizeLineEndings(buffer.toString(options.encoding));
-      const language = this.resolveLanguage(filePath, content, options);
-      return this.buildResult({
-        encoding: "utf8",
+      return {
         content,
-        size: stats.size,
-        isTruncated: truncated,
-        startedAt,
-        options,
-        language,
+        truncated,
         truncatedBytes
-      });
+      };
     } catch (error) {
       throw wrapError(error, { filePath, stage: "stream" });
     }
   }
 
-  private resolveLanguage(filePath: string, content: string, options: ResolvedProcessingOptions): string {
+  private async resolveLanguage(filePath: string, content: string, options: ResolvedProcessingOptions): Promise<string> {
     if (!options.detectLanguage) {
       return options.languageOverride ?? "plaintext";
     }
@@ -629,6 +673,34 @@ export class ContentProcessor {
       return options.languageOverride;
     }
 
+    const heuristic = this.heuristicLanguage(filePath, content);
+    if (heuristic && heuristic !== "plaintext") {
+      return heuristic;
+    }
+
+    if (this.externalLanguageDetector) {
+      try {
+        const detected = await this.externalLanguageDetector(filePath, content);
+        if (detected) {
+          return detected;
+        }
+      } catch (error) {
+        this.logger?.("contentProcessor.languageDetection.external.error", {
+          filePath,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    const apiLanguage = this.detectWithVSCodeAPI(filePath);
+    if (apiLanguage) {
+      return apiLanguage;
+    }
+
+    return heuristic || "plaintext";
+  }
+
+  private heuristicLanguage(filePath: string, content: string): string {
     const ext = path.extname(filePath).toLowerCase();
     const mapped = LANGUAGE_BY_EXTENSION.get(ext);
     if (mapped) {
@@ -657,11 +729,6 @@ export class ContentProcessor {
     }
     if (/^\s*SELECT\s+/i.test(trimmed)) {
       return "sql";
-    }
-
-    const apiLanguage = this.detectWithVSCodeAPI(filePath);
-    if (apiLanguage) {
-      return apiLanguage;
     }
 
     return "plaintext";
@@ -743,5 +810,23 @@ export class ContentProcessor {
       hash |= 0;
     }
     return Math.abs(hash).toString(16);
+  }
+
+  private computeAdaptiveConcurrency(requested: number): number {
+    let cpuCount = DEFAULT_CONCURRENCY;
+    try {
+      if (typeof (os as unknown as { availableParallelism?: () => number }).availableParallelism === "function") {
+        cpuCount = Math.max(1, (os as unknown as { availableParallelism?: () => number }).availableParallelism!());
+      } else if (os.cpus) {
+        cpuCount = Math.max(1, os.cpus().length);
+      }
+    } catch (error) {
+      this.logger?.("contentProcessor.options.concurrencyDetect.error", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    const upperBound = Math.max(1, Math.floor(cpuCount * 0.75));
+    return Math.max(1, Math.min(requested, upperBound));
   }
 }

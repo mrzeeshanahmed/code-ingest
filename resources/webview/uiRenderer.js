@@ -6,9 +6,16 @@ import { sanitizeRecord, sanitizeText } from "./utils/sanitizers.js";
 import { FileTreeComponent } from "./components/fileTree.js";
 import { PreviewComponent } from "./components/preview.js";
 import { ProgressComponent } from "./components/progress.js";
-import { COMMAND_MAP } from "./commandMap.generated.js";
+import { COMMAND_MAP } from "./commandMap.js";
 
 const COMPLETION_TOAST_TIMEOUT = 3000;
+const PROGRESS_LABELS = Object.freeze({
+  scan: "Scanning files",
+  filter: "Filtering selections",
+  tokenize: "Tokenizing content",
+  ingest: "Ingesting",
+  write: "Writing output"
+});
 
 export class UIRenderer {
   constructor(doc) {
@@ -21,6 +28,13 @@ export class UIRenderer {
     this.dashboard = doc.querySelector(".dashboard") ?? doc.body;
     this.treeMount = doc.querySelector(".panel--tree .panel__body");
     this.previewMount = doc.querySelector(".panel--preview .panel__body");
+  this.statusPrimaryChip = this.dashboard.querySelector('[data-element="status-primary"]');
+  this.statusRepoChip = this.dashboard.querySelector('[data-element="status-repo"]');
+  this.statusConfigChip = this.dashboard.querySelector('[data-element="status-config"]');
+  this.previewMetaElement = this.dashboard.querySelector('[data-element="preview-meta"]');
+  this.insightConfigElement = this.dashboard.querySelector('[data-element="insight-config"]');
+  this.insightRepoElement = this.dashboard.querySelector('[data-element="insight-repo"]');
+  this.insightPerformanceElement = this.dashboard.querySelector('[data-element="insight-performance"]');
 
     this.selectionSet = new Set();
     this.expandedPaths = new Set();
@@ -63,7 +77,7 @@ export class UIRenderer {
     this.statusArea.appendChild(this.progressComponent.element);
 
     this.errorBanner = null;
-  this.errorMessageNode = null;
+    this.errorMessageNode = null;
     this.repoBanner = null;
     this.configSummary = null;
     this.tokenCountElement = null;
@@ -136,10 +150,23 @@ export class UIRenderer {
   updateProgress(progress) {
     if (!progress) {
       this.progressComponent.hide();
+      if (this.statusPrimaryChip) {
+        this.statusPrimaryChip.textContent = "Idle";
+      }
       return;
     }
 
     this.progressComponent.update(progress);
+
+    const label = PROGRESS_LABELS[progress.phase] ?? "Processing";
+    const statusMessage = sanitizeText(progress.message ?? label);
+    if (this.statusPrimaryChip) {
+      this.statusPrimaryChip.textContent = statusMessage;
+    }
+    if (this.insightPerformanceElement) {
+      const percentText = typeof progress.percent === "number" ? `${Math.round(progress.percent)}%` : "…";
+      this.insightPerformanceElement.textContent = `${label}: ${percentText}`;
+    }
 
     if (progress.overlayMessage) {
       this.toggleLoadingOverlay(true, progress.overlayMessage);
@@ -177,6 +204,9 @@ export class UIRenderer {
     const label = this.loadingOverlay.querySelector(".loading-overlay__label");
     if (label) {
       label.textContent = sanitizeText(message ?? "Working…");
+    }
+    if (this.statusPrimaryChip && message) {
+      this.statusPrimaryChip.textContent = sanitizeText(message);
     }
   }
 
@@ -235,10 +265,16 @@ export class UIRenderer {
     const shortSha = sha.slice(0, 7);
     const message = subpath ? `${url} (${subpath}) @ ${shortSha}` : `${url} @ ${shortSha}`;
     this.repoBanner.textContent = `Remote repo loaded: ${message}`;
+    if (this.statusRepoChip) {
+      this.statusRepoChip.textContent = message;
+    }
+    if (this.insightRepoElement) {
+      this.insightRepoElement.textContent = `Remote repo loaded: ${message}`;
+    }
   }
 
   enableIngestActions(enabled) {
-    const buttons = this.document.querySelectorAll('[data-action="generate"], [data-action="refresh"]');
+    const buttons = this.document.querySelectorAll('[data-action="generate"], [data-action="refresh"], [data-action="refresh-tree"]');
     buttons.forEach((button) => {
       button.disabled = !enabled;
     });
@@ -256,7 +292,14 @@ export class UIRenderer {
     const entries = Object.entries(safeConfig)
       .filter(([, value]) => value !== undefined)
       .map(([key, value]) => `${key}: ${value}`);
-    this.configSummary.textContent = entries.length === 0 ? "Using default configuration" : entries.join(" · ");
+    const summary = entries.length === 0 ? "Using default configuration" : entries.join(" · ");
+    this.configSummary.textContent = summary;
+    if (this.statusConfigChip) {
+      this.statusConfigChip.textContent = summary;
+    }
+    if (this.insightConfigElement) {
+      this.insightConfigElement.textContent = summary;
+    }
   }
 
   showGenerationResult(result) {
@@ -279,6 +322,35 @@ export class UIRenderer {
         item.textContent = `${sanitizeText(key)}: ${sanitizeText(value)}`;
         container.appendChild(item);
       }
+      if (this.insightPerformanceElement) {
+        const primaryStat = Object.entries(result.stats)[0];
+        if (primaryStat) {
+          const [statKey, statValue] = primaryStat;
+          this.insightPerformanceElement.textContent = `${sanitizeText(statKey)}: ${sanitizeText(statValue)}`;
+        }
+      }
+    }
+
+    if (this.previewMetaElement) {
+      const tokenSummary = result?.tokenCount?.total ?? result?.tokenCount?.approx;
+      if (tokenSummary !== undefined && tokenSummary !== null) {
+        this.previewMetaElement.textContent = `Estimated tokens: ${sanitizeText(String(tokenSummary))}`;
+      } else if (result?.stats) {
+        const [firstStatKey, firstStatValue] = Object.entries(result.stats)[0] ?? [];
+        if (firstStatKey) {
+          const safeKey = sanitizeText(firstStatKey);
+          const safeValue = sanitizeText(String(firstStatValue ?? ""));
+          this.previewMetaElement.textContent = `${safeKey}: ${safeValue}`;
+        } else {
+          this.previewMetaElement.textContent = "Preview updated.";
+        }
+      } else {
+        this.previewMetaElement.textContent = "Preview updated.";
+      }
+    }
+
+    if (this.statusPrimaryChip) {
+      this.statusPrimaryChip.textContent = "Digest ready";
     }
   }
 

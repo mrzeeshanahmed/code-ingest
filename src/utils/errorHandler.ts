@@ -219,7 +219,7 @@ class NetworkRecoveryStrategy implements RecoveryStrategy {
     const hosts = (config.get<string[]>("connectivityHosts") ?? ["api.github.com", "www.google.com"]).filter(Boolean);
 
     while (attempt < maxRetries) {
-      await this.delay(2 ** attempt * 1000);
+      await this.delay(this.getBackoffDelay(attempt));
       let lastErr: Error | null = null;
       for (const host of hosts) {
         try {
@@ -245,6 +245,12 @@ class NetworkRecoveryStrategy implements RecoveryStrategy {
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private getBackoffDelay(attempt: number): number {
+    const base = 1000 * 2 ** attempt;
+    const jitter = Math.random() * 300;
+    return Math.min(base + jitter, 30_000);
   }
 
   private async testConnectivity(hostname: string): Promise<void> {

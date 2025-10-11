@@ -3,7 +3,7 @@
  */
 
 const { WebviewApplication } = require("../../main.js");
-const { COMMAND_MAP } = require("../../commandMap.generated.js");
+const { COMMAND_MAP } = require("../../commandMap.js");
 const { TestUtils, mockVSCodeAPI } = require("../setup.js");
 
 describe("Webview integration", () => {

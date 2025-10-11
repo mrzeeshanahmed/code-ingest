@@ -1,16 +1,25 @@
 import * as crypto from "node:crypto";
-import * as os from "node:os";
 import * as vscode from "vscode";
 
 import { ConfigurationService } from "./configurationService";
-import { ErrorReporter } from "./errorReporter";
-import {
-  PerformanceMonitor,
-  type PerformanceMetrics as OperationMetrics,
-  type PerformanceReport
-} from "./performanceMonitor";
-import { ErrorSeverity, type ErrorContext, type ErrorClassification } from "../utils/errorHandler";
-import type { Logger } from "../utils/gitProcessManager";
+import { PrivacyManager } from "./telemetry/privacyManager";
+import { ConsentManager, type TelemetryConsent } from "./telemetry/consentManager";
+import { TelemetryStorage } from "./telemetry/telemetryStorage";
+
+export type TelemetryLevel = "off" | "error" | "usage" | "all";
+
+export interface TelemetryConfiguration {
+  enabled: boolean;
+  level: TelemetryLevel;
+  enabledInDevelopment: boolean;
+  collectionInterval: number;
+  maxEventsPerSession: number;
+  endpoint?: string;
+  consentShown: boolean;
+  userId: string;
+  enabledInTests: boolean;
+  maxEventsPerFlush: number;
+}
 
 export interface TelemetryEvent {
   name: string;
@@ -21,296 +30,151 @@ export interface TelemetryEvent {
   userId: string;
 }
 
-export interface TelemetryConfiguration {
-  enabled: boolean;
-  enabledInDevelopment: boolean;
-  enabledInTests: boolean;
-  collectionInterval: number;
-  maxEventsPerSession: number;
-  maxEventAge: number;
-  endpoint?: string;
-}
-
-export interface PerformanceProfile {
-  totalOperations: number;
-  averageOperationDuration: number;
-  slowestOperation: string;
-  memoryUsageAverage: number;
-  operationDistribution: Record<string, number>;
-  performanceGrade: "excellent" | "good" | "fair" | "poor";
-}
-
 export interface AggregatedMetrics {
   sessionCount: number;
-  totalOperations: number;
+  operationCounts: Record<string, number>;
   averageOperationDuration: number;
   errorRate: number;
-  featureUsage: Record<string, number>;
-  performanceProfile: PerformanceProfile;
+  featureUsageFrequency: Record<string, number>;
+  performanceProfile: {
+    averageMemoryUsage: number;
+    averageCpuUsage: number;
+    largestFileProcessed: number;
+    mostFilesProcessedInSession: number;
+  };
 }
 
-interface ValidationResult {
-  isValid: boolean;
-  issues: string[];
+interface PendingTelemetryEvent extends TelemetryEvent {
+  classification: "error" | "usage" | "performance";
 }
 
-interface SessionMetrics {
-  sessionDuration: number;
-  extensionVersion: string;
-  vscodeVersion: string;
-  platform: string;
-  nodeVersion: string;
-  totalMemoryGB: number;
-  cpuCores: number;
-}
-
-interface PerformanceAggregation {
-  totalOperations: number;
-  averageOperationTime: number;
-  slowestOperation: string;
-  memoryUsageAverage: number;
-  operationDistribution: Record<string, number>;
-  performanceGrade: PerformanceProfile["performanceGrade"];
-}
-
-interface UsageMetrics {
-  featuresUsed: Record<string, number>;
-  outputFormatsUsed: Record<string, number>;
-  averageFileCount: number;
-  remoteRepoUsage: number;
-  configurationComplexity: number;
-}
-
-interface ErrorMetrics {
-  totalErrors: number;
-  errorsByCategory: Record<string, number>;
-  recoveryRate: number;
-  criticalErrorCount: number;
-}
-
-interface TelemetryOperationSnapshot {
-  totalOperations: number;
-  totalDuration: number;
-  successfulOperations: number;
-  failedOperations: number;
-  durations: number[];
-  operationsByName: Map<string, { count: number; totalDuration: number }>;
-}
-
-const TELEMETRY_STORAGE_KEY = "codeIngest.telemetry.events";
-const TELEMETRY_ENABLED_OVERRIDE_KEY = "codeIngest.telemetry.override";
-
-const DEFAULT_CONFIG: TelemetryConfiguration = {
+const DEFAULT_CONFIGURATION: TelemetryConfiguration = {
   enabled: false,
+  level: "usage",
   enabledInDevelopment: false,
-  enabledInTests: false,
   collectionInterval: 60_000,
   maxEventsPerSession: 500,
-  maxEventAge: 7 * 24 * 60 * 60 * 1000
+  consentShown: false,
+  userId: "",
+  enabledInTests: false,
+  maxEventsPerFlush: 100
 };
 
+const USER_ID_STORAGE_KEY = "codeIngest.telemetry.userId";
+const LAST_CONSENT_KEY = "codeIngest.telemetry.lastConsent";
+
 export class TelemetryService implements vscode.Disposable {
-  private config: TelemetryConfiguration;
-  private readonly eventBuffer: TelemetryEvent[] = [];
-  private readonly sessionId: string;
-  private readonly userId: string;
-  private isEnabled: boolean;
-  private flushTimer: NodeJS.Timeout | null = null;
   private readonly privacyManager = new PrivacyManager();
+  private readonly consentManager: ConsentManager;
   private readonly storage: TelemetryStorage;
-  private readonly consentManager: TelemetryConsentManager;
-  private readonly validator = new TelemetryValidator();
-  private readonly metricsCollector: AggregatedMetricsCollector;
-  private readonly sessionStartTime = Date.now();
-  private readonly featureUsage = new Map<string, number>();
-  private readonly outputFormatUsage = new Map<string, number>();
-  private operationSnapshot: TelemetryOperationSnapshot = {
-    totalOperations: 0,
-    totalDuration: 0,
-    successfulOperations: 0,
-    failedOperations: 0,
-    durations: [],
-    operationsByName: new Map()
-  };
+  private readonly sessionId: string;
+  private config: TelemetryConfiguration = { ...DEFAULT_CONFIGURATION };
+  private userId = "";
+  private enabled = false;
+  private initialized = false;
+  private flushTimer: NodeJS.Timeout | undefined;
+  private readonly eventBuffer: PendingTelemetryEvent[] = [];
+  private isFlushing = false;
+  private configurationListener: vscode.Disposable | undefined;
 
-  constructor(
-    private readonly configService: ConfigurationService,
-    private readonly logger: Logger,
-    private readonly performanceMonitor: PerformanceMonitor,
-    private readonly errorReporter: ErrorReporter
-  ) {
-    this.storage = new TelemetryStorage(this.configService);
-    this.consentManager = new TelemetryConsentManager(this.configService);
-    this.sessionId = this.generateSessionId();
-    this.userId = this.privacyManager.generateStableUserId();
-    this.config = this.loadTelemetryConfiguration();
-    this.isEnabled = this.shouldEnableTelemetry();
-    this.metricsCollector = new AggregatedMetricsCollector(
-      this.performanceMonitor,
-      this.errorReporter,
-      () => new Map(this.featureUsage),
-      () => new Map(this.outputFormatUsage),
-      () => ({ ...this.operationSnapshot }),
-      this.sessionStartTime
-    );
+  constructor(private readonly configService: ConfigurationService, private readonly context: vscode.ExtensionContext) {
+    this.consentManager = new ConsentManager(configService, context);
+    this.storage = new TelemetryStorage(context);
+    this.sessionId = this.createSessionId();
+  }
 
-    if (this.isEnabled) {
+  async initialize(): Promise<void> {
+    if (this.initialized) {
+      return;
+    }
+
+    this.config = this.loadConfigurationSnapshot();
+    this.userId = await this.resolveUserId();
+    this.config.userId = this.userId;
+
+    const consentGranted = await this.ensureConsent();
+    this.config.consentShown = consentGranted;
+    this.enabled = this.computeTelemetryEnabled(consentGranted);
+
+    this.registerConfigurationListener();
+    if (this.enabled) {
       this.startFlushTimer();
     }
 
-    void this.setupUserConsent();
+    this.initialized = true;
   }
 
-  trackEvent(
-    name: string,
-    properties?: Record<string, unknown>,
-    measurements?: Record<string, number>
-  ): void {
-    if (!this.isTelemetryEnabled()) {
+  trackEvent(name: string, properties?: Record<string, unknown>, measurements?: Record<string, number>): void {
+    if (!this.initialized || !this.enabled) {
       return;
     }
 
-    const sanitizedProps = this.privacyManager.sanitizeProperties(properties ?? {});
-    const sanitizedMeasurements: Record<string, number> = {};
-    if (measurements) {
-      Object.entries(measurements).forEach(([key, value]) => {
-        if (Number.isFinite(value)) {
-          sanitizedMeasurements[key] = value;
-        }
-      });
+    const classification = this.classifyEvent(name);
+    if (!this.shouldRecord(classification)) {
+      return;
     }
 
-    const event: TelemetryEvent = {
+    const sanitizedProperties = this.buildPropertySnapshot(properties ?? {});
+    const sanitizedMeasurements = this.buildMeasurementSnapshot(measurements ?? {});
+
+    const event: PendingTelemetryEvent = {
       name,
-      properties: sanitizedProps,
+      properties: sanitizedProperties,
       measurements: sanitizedMeasurements,
       timestamp: new Date(),
       sessionId: this.sessionId,
-      userId: this.userId
+      userId: this.userId,
+      classification
     };
 
-    const validation = this.validator.validateEvent(event);
-    if (!validation.isValid) {
-      this.logger.warn("telemetry.event.rejected", { name, issues: validation.issues });
+    const sanitized = this.privacyManager.sanitizeEventData(event);
+    if (!this.privacyManager.validateDataPrivacy(sanitized)) {
       return;
     }
 
-    this.appendEvent(event);
+    this.eventBuffer.push({ ...sanitized, classification });
+    if (this.eventBuffer.length >= this.config.maxEventsPerFlush || this.eventBuffer.length >= this.config.maxEventsPerSession) {
+      void this.flush();
+    }
   }
 
-  trackOperation(
-    operationName: string,
-    duration: number,
-    success: boolean,
-    metadata?: Record<string, unknown>
-  ): void {
-    if (!this.isTelemetryEnabled()) {
+  trackFeatureUsage(featureName: string, context?: Record<string, unknown>): void {
+    this.trackEvent(`feature.${featureName}`, {
+      ...context,
+      feature: featureName
+    });
+  }
+
+  trackOperationDuration(operationName: string, duration: number, success: boolean): void {
+    if (!Number.isFinite(duration) || duration < 0) {
       return;
     }
-
-    const sanitizedMetadata = this.privacyManager.sanitizeProperties(metadata ?? {});
     this.trackEvent(
       `operation.${operationName}`,
       {
-        outcome: success ? "success" : "failure",
-        ...sanitizedMetadata
+        success
       },
       {
         duration
       }
     );
-
-    this.operationSnapshot.totalOperations += 1;
-    this.operationSnapshot.totalDuration += duration;
-    if (success) {
-      this.operationSnapshot.successfulOperations += 1;
-    } else {
-      this.operationSnapshot.failedOperations += 1;
-    }
-    this.operationSnapshot.durations.push(duration);
-
-    const existing = this.operationSnapshot.operationsByName.get(operationName) ?? { count: 0, totalDuration: 0 };
-    existing.count += 1;
-    existing.totalDuration += duration;
-    this.operationSnapshot.operationsByName.set(operationName, existing);
   }
 
-  trackFeatureUsage(featureName: string, context?: Record<string, unknown>): void {
-    if (!this.isTelemetryEnabled()) {
-      return;
-    }
-
-    const current = this.featureUsage.get(featureName) ?? 0;
-    this.featureUsage.set(featureName, current + 1);
-
-    const sanitized = this.privacyManager.sanitizeProperties(context ?? {});
-    this.trackEvent(`feature.${featureName}`, sanitized);
+  trackError(error: Error, context: Record<string, unknown>): void {
+    const baseProperties: Record<string, unknown> = {
+      name: error.name,
+      message: error.message,
+      ...context
+    };
+    this.trackEvent("error.runtime", baseProperties);
   }
 
-  trackPerformanceMetric(metricName: string, value: number, unit: string): void {
-    if (!this.isTelemetryEnabled()) {
-      return;
-    }
-
-    this.trackEvent(
-      `performance.${metricName}`,
-      {
-        unit
-      },
-      {
-        value
-      }
-    );
-  }
-
-  recordOutputFormatUsage(format: string): void {
-    if (!this.isTelemetryEnabled()) {
-      return;
-    }
-
-    const normalized = format.toLowerCase();
-    const current = this.outputFormatUsage.get(normalized) ?? 0;
-    this.outputFormatUsage.set(normalized, current + 1);
-
-    this.trackEvent("output.format", { format: normalized });
-  }
-
-  trackError(error: Error, context: ErrorContext, recovered: boolean): void {
-    if (!this.isTelemetryEnabled()) {
-      return;
-    }
-
-    const sanitized = this.privacyManager.sanitizeProperties({
-      component: context.component,
-      operation: context.operation,
-      recoverable: context.recoverable ?? false,
-      retryable: context.retryable ?? false,
-      recovered
-    });
-
-    this.trackEvent(
-      "error",
-      {
-        ...sanitized,
-        userFacing: context.userFacing ?? false
-      },
-      {
-        recovered: recovered ? 1 : 0
-      }
-    );
-
-    this.operationSnapshot.failedOperations += 1;
-  }
-
-  setTelemetryEnabled(enabled: boolean): void {
+  async setTelemetryEnabled(enabled: boolean): Promise<void> {
     this.config.enabled = enabled;
-    this.isEnabled = this.shouldEnableTelemetry(enabled);
+    await this.configService.updateGlobalValue("codeIngest.telemetry.enabled", enabled);
+    this.enabled = this.computeTelemetryEnabled(this.config.consentShown);
 
-    void this.configService.updateGlobalValue(TELEMETRY_ENABLED_OVERRIDE_KEY, enabled).catch((error) => {
-      this.logger.warn("telemetry.config.updateFailed", { message: (error as Error).message });
-    });
-
-    if (this.isEnabled) {
+    if (this.enabled) {
       this.startFlushTimer();
     } else {
       this.stopFlushTimer();
@@ -318,109 +182,239 @@ export class TelemetryService implements vscode.Disposable {
     }
   }
 
-  isTelemetryEnabled(): boolean {
-    return this.isEnabled;
+  async flush(): Promise<void> {
+    if (!this.initialized || !this.enabled) {
+      this.eventBuffer.length = 0;
+      return;
+    }
+
+    if (this.isFlushing || this.eventBuffer.length === 0) {
+      return;
+    }
+
+    this.isFlushing = true;
+    try {
+      const eventsToFlush = this.eventBuffer.splice(0, this.config.maxEventsPerFlush).map((event) => ({
+        name: event.name,
+        properties: event.properties,
+        measurements: event.measurements,
+        timestamp: event.timestamp,
+        sessionId: event.sessionId,
+        userId: event.userId
+      }));
+
+      if (eventsToFlush.length > 0) {
+        await this.storage.storeEvents(eventsToFlush);
+      }
+    } finally {
+      this.isFlushing = false;
+    }
   }
 
-  async exportUserData(): Promise<AggregatedMetrics> {
-    const metrics = await this.metricsCollector.collectAggregatedMetrics(await this.storage.loadEvents());
-    return metrics;
-  }
-
-  async deleteUserData(): Promise<void> {
-    await this.storage.clearEvents();
-    this.featureUsage.clear();
-    this.outputFormatUsage.clear();
-    this.operationSnapshot = {
-      totalOperations: 0,
-      totalDuration: 0,
-      successfulOperations: 0,
-      failedOperations: 0,
-      durations: [],
-      operationsByName: new Map()
-    };
-    this.eventBuffer.length = 0;
+  async getAggregatedMetrics(): Promise<AggregatedMetrics> {
+    await this.flush();
+    const storedEvents = await this.storage.loadEvents();
+    const pendingEvents = this.eventBuffer.map((event) => ({
+      name: event.name,
+      properties: event.properties,
+      measurements: event.measurements,
+      timestamp: event.timestamp,
+      sessionId: event.sessionId,
+      userId: event.userId
+    }));
+    return this.privacyManager.aggregateMetrics([...storedEvents, ...pendingEvents]);
   }
 
   dispose(): void {
     this.stopFlushTimer();
+    this.configurationListener?.dispose();
+    void this.flush();
   }
 
-  private appendEvent(event: TelemetryEvent): void {
-    if (this.eventBuffer.length >= this.config.maxEventsPerSession) {
-      this.eventBuffer.shift();
+  private loadConfigurationSnapshot(): TelemetryConfiguration {
+    const configuration = vscode.workspace.getConfiguration("codeIngest.telemetry");
+    const enabled = configuration.get<boolean>("enabled", DEFAULT_CONFIGURATION.enabled);
+    const level = configuration.get<TelemetryLevel>("level", DEFAULT_CONFIGURATION.level);
+    const enabledInDevelopment = configuration.get<boolean>("enabledInDevelopment", DEFAULT_CONFIGURATION.enabledInDevelopment);
+    const collectionInterval = configuration.get<number>("collectionInterval", DEFAULT_CONFIGURATION.collectionInterval);
+    const maxEventsPerSession = configuration.get<number>("maxEventsPerSession", DEFAULT_CONFIGURATION.maxEventsPerSession);
+    const maxEventsPerFlush = configuration.get<number>("maxEventsPerFlush", DEFAULT_CONFIGURATION.maxEventsPerFlush);
+    const endpoint = configuration.get<string | undefined>("endpoint", DEFAULT_CONFIGURATION.endpoint);
+    const enabledInTests = configuration.get<boolean>("enabledInTests", DEFAULT_CONFIGURATION.enabledInTests);
+
+    const snapshot: TelemetryConfiguration = {
+      enabled,
+      level,
+      enabledInDevelopment,
+      collectionInterval: Math.max(15_000, collectionInterval),
+      maxEventsPerSession: Math.max(10, maxEventsPerSession),
+      consentShown: false,
+      userId: "",
+      enabledInTests,
+      maxEventsPerFlush: Math.max(10, Math.min(maxEventsPerFlush, Math.max(10, maxEventsPerSession)))
+    };
+
+    const trimmedEndpoint = endpoint?.trim();
+    if (trimmedEndpoint) {
+      snapshot.endpoint = trimmedEndpoint;
     }
 
-    this.eventBuffer.push(event);
-
-    if (this.eventBuffer.length >= Math.max(1, this.config.maxEventsPerSession / 2)) {
-      void this.flushBufferedEvents();
-    }
+    return snapshot;
   }
 
-  private async flushBufferedEvents(): Promise<void> {
-    if (!this.isTelemetryEnabled() || this.eventBuffer.length === 0) {
-      return;
+  private async resolveUserId(): Promise<string> {
+    const existing = this.context.globalState.get<string>(USER_ID_STORAGE_KEY);
+    if (existing && existing.length >= 8) {
+      return existing;
     }
 
-    const now = Date.now();
-    const freshEvents = this.eventBuffer.filter((event) => now - event.timestamp.getTime() <= this.config.maxEventAge);
+    const generated = this.privacyManager.generateAnonymousUserId();
+    await this.context.globalState.update(USER_ID_STORAGE_KEY, generated);
+    return generated;
+  }
 
-    if (freshEvents.length === 0) {
-      this.eventBuffer.length = 0;
-      return;
-    }
-
-    try {
-      await this.storage.storeEvents(freshEvents);
-      this.eventBuffer.length = 0;
-      if (this.config.endpoint) {
-        await this.postEventsToEndpoint(freshEvents);
+  private async ensureConsent(): Promise<boolean> {
+    const storedConsent = this.context.globalState.get<string>(LAST_CONSENT_KEY);
+    if (storedConsent) {
+      try {
+        const parsed = JSON.parse(storedConsent) as TelemetryConsent & { timestamp: string };
+        if (parsed.version === "1.0") {
+          return parsed.granted;
+        }
+      } catch {
+        // Ignore corrupted consent payloads and request consent again.
       }
-    } catch (error) {
-      this.logger.warn("telemetry.flush.failed", { message: (error as Error).message });
+    }
+
+    const granted = await this.consentManager.checkAndRequestConsent();
+    const consentSnapshot: TelemetryConsent = {
+      granted,
+      version: "1.0",
+      timestamp: new Date(),
+      level: granted ? this.config.level : "off"
+    };
+    await this.context.globalState.update(LAST_CONSENT_KEY, JSON.stringify(consentSnapshot));
+    return granted;
+  }
+
+  private computeTelemetryEnabled(consentGranted: boolean): boolean {
+    if (!consentGranted) {
+      return false;
+    }
+
+    if (!this.config.enabled || this.config.level === "off") {
+      return false;
+    }
+
+    const isDevelopment = this.context.extensionMode === vscode.ExtensionMode.Development;
+    if (isDevelopment && !this.config.enabledInDevelopment) {
+      return false;
+    }
+
+    const isTestEnvironment = process.env.NODE_ENV === "test";
+    if (isTestEnvironment && !this.config.enabledInTests) {
+      return false;
+    }
+
+    return true;
+  }
+
+  private registerConfigurationListener(): void {
+    this.configurationListener?.dispose();
+    this.configurationListener = vscode.workspace.onDidChangeConfiguration((event) => {
+      if (!event.affectsConfiguration("codeIngest.telemetry")) {
+        return;
+      }
+
+      this.config = this.loadConfigurationSnapshot();
+      this.config.userId = this.userId;
+      const consentGranted = this.config.consentShown || this.enabled;
+      this.config.consentShown = consentGranted;
+      this.enabled = this.computeTelemetryEnabled(consentGranted);
+
+      if (this.enabled) {
+        this.startFlushTimer();
+      } else {
+        this.stopFlushTimer();
+      }
+    });
+
+    if (this.configurationListener) {
+      this.context.subscriptions.push(this.configurationListener);
     }
   }
 
-  private async postEventsToEndpoint(events: TelemetryEvent[]): Promise<void> {
-    if (!this.config.endpoint || typeof fetch !== "function") {
-      return;
+  private buildPropertySnapshot(properties: Record<string, unknown>): Record<string, string | number | boolean> {
+    const sanitized: Record<string, string | number | boolean> = {};
+    for (const [key, value] of Object.entries(properties)) {
+      if (value === undefined || value === null) {
+        continue;
+      }
+
+      if (typeof value === "number" && Number.isFinite(value)) {
+        sanitized[key] = value;
+        continue;
+      }
+
+      if (typeof value === "boolean") {
+        sanitized[key] = value;
+        continue;
+      }
+
+      if (typeof value === "string") {
+        sanitized[key] = value;
+        continue;
+      }
+
+      sanitized[key] = Array.isArray(value) ? value.length : 1;
+    }
+    return sanitized;
+  }
+
+  private buildMeasurementSnapshot(measurements: Record<string, number>): Record<string, number> {
+    const sanitized: Record<string, number> = {};
+    for (const [key, value] of Object.entries(measurements)) {
+      if (Number.isFinite(value)) {
+        sanitized[key] = value;
+      }
+    }
+    return sanitized;
+  }
+
+  private classifyEvent(name: string): "error" | "usage" | "performance" {
+    if (name.startsWith("error")) {
+      return "error";
     }
 
-    try {
-      const payload = {
-        sessionId: this.sessionId,
-        userId: this.userId,
-        events: events.map((event) => ({
-          ...event,
-          timestamp: event.timestamp.toISOString()
-        }))
-      };
+    if (name.startsWith("performance")) {
+      return "performance";
+    }
 
-  const url = new URL(this.config.endpoint);
-      const response = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload)
-      });
+    return "usage";
+  }
 
-      if (!response.ok) {
-        this.logger.warn("telemetry.endpoint.failed", { status: response.status, statusText: response.statusText });
-      }
-    } catch (error) {
-      this.logger.warn("telemetry.endpoint.error", { message: (error as Error).message });
+  private shouldRecord(classification: "error" | "usage" | "performance"): boolean {
+    switch (this.config.level) {
+      case "off":
+        return false;
+      case "error":
+        return classification === "error";
+      case "usage":
+        return classification === "error" || classification === "usage";
+      case "all":
+        return true;
+      default:
+        return false;
     }
   }
 
   private startFlushTimer(): void {
-    if (this.flushTimer !== null || this.config.collectionInterval <= 0) {
+    if (this.flushTimer || this.config.collectionInterval <= 0) {
       return;
     }
 
     this.flushTimer = setInterval(() => {
-      void this.flushBufferedEvents();
+      void this.flush();
     }, this.config.collectionInterval);
 
     if (typeof this.flushTimer.unref === "function") {
@@ -429,506 +423,16 @@ export class TelemetryService implements vscode.Disposable {
   }
 
   private stopFlushTimer(): void {
-    if (this.flushTimer === null) {
+    if (!this.flushTimer) {
       return;
     }
 
     clearInterval(this.flushTimer);
-    this.flushTimer = null;
+    this.flushTimer = undefined;
   }
 
-  private loadTelemetryConfiguration(): TelemetryConfiguration {
-    const config = vscode.workspace.getConfiguration("codeIngest.telemetry");
-
-    const endpoint = config.get<string | null>("endpoint", null);
-
-    const merged: TelemetryConfiguration = {
-      enabled: config.get<boolean>("enabled", DEFAULT_CONFIG.enabled),
-      enabledInDevelopment: config.get<boolean>("enabledInDevelopment", DEFAULT_CONFIG.enabledInDevelopment),
-      enabledInTests: config.get<boolean>("enabledInTests", DEFAULT_CONFIG.enabledInTests),
-      collectionInterval: config.get<number>("collectionInterval", DEFAULT_CONFIG.collectionInterval),
-      maxEventsPerSession: config.get<number>("maxEventsPerSession", DEFAULT_CONFIG.maxEventsPerSession),
-      maxEventAge: config.get<number>("maxEventAge", DEFAULT_CONFIG.maxEventAge)
-    };
-
-    if (endpoint && endpoint.trim().length > 0) {
-      merged.endpoint = endpoint;
-    }
-
-    const override = this.configService.getGlobalValue<boolean>(TELEMETRY_ENABLED_OVERRIDE_KEY);
-    if (typeof override === "boolean") {
-      merged.enabled = override;
-    }
-
-    return merged;
-  }
-
-  private shouldEnableTelemetry(explicit?: boolean): boolean {
-    const effectiveEnabled = typeof explicit === "boolean" ? explicit : this.config.enabled;
-    if (!effectiveEnabled) {
-      return false;
-    }
-
-    const isTestEnv = process.env.NODE_ENV === "test" || vscode.env.sessionId === "someValue.sessionId";
-    if (isTestEnv && !this.config.enabledInTests) {
-      return false;
-    }
-
-    const isDevEnv = this.detectDevelopmentEnvironment();
-    if (isDevEnv && !this.config.enabledInDevelopment) {
-      return false;
-    }
-
-    return true;
-  }
-
-  private detectDevelopmentEnvironment(): boolean {
-    if (process.env.NODE_ENV === "development" || process.env.CODE_INGEST_DEV === "1") {
-      return true;
-    }
-
-    const extension =
-      vscode.extensions.getExtension("code-ingest.code-ingest") ??
-      vscode.extensions.getExtension("mrzeeshanahmed.code-ingest") ??
-      vscode.extensions.getExtension("publisher.code-ingest");
-
-    if (!extension) {
-      return false;
-    }
-
-    return /out|dist/.test(extension.extensionPath ?? "");
-  }
-
-  private generateSessionId(): string {
-    return `telemetry-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  }
-
-  private async setupUserConsent(): Promise<void> {
-    if (!this.config.enabled) {
-      return;
-    }
-
-    try {
-      const consented = await this.consentManager.checkAndRequestConsent();
-      if (!consented) {
-        this.isEnabled = false;
-        this.stopFlushTimer();
-      } else if (this.flushTimer === null) {
-        this.startFlushTimer();
-      }
-    } catch (error) {
-      this.logger.warn("telemetry.consent.failed", { message: (error as Error).message });
-    }
-  }
-}
-
-class PrivacyManager {
-  private readonly sensitiveDataPatterns = [
-    /[a-zA-Z0-9.%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g,
-    /\b[A-Za-z0-9]{20,}\b/g,
-    /password|secret|key|token/i
-  ];
-
-  sanitizeProperties(properties: Record<string, unknown>): Record<string, string | number | boolean> {
-    const sanitized: Record<string, string | number | boolean> = {};
-
-    Object.entries(properties).forEach(([key, value]) => {
-      if (this.isSensitiveKey(key)) {
-        sanitized[key] = "[REDACTED]";
-        return;
-      }
-
-      if (typeof value === "string") {
-        sanitized[key] = this.sanitizeString(value);
-        return;
-      }
-
-      if (typeof value === "number" || typeof value === "boolean") {
-        sanitized[key] = value;
-        return;
-      }
-
-      sanitized[key] = "[OBJECT]";
-    });
-
-    return sanitized;
-  }
-
-  generateStableUserId(): string {
-    const machineInfo = [
-      os.platform(),
-      os.arch(),
-      process.version,
-      vscode.env.machineId
-    ].join("|");
-
-    return crypto.createHash("sha256").update(`${machineInfo}|code-ingest-salt`).digest("hex").substring(0, 16);
-  }
-
-  private isSensitiveKey(key: string): boolean {
-    const sensitiveKeys = [
-      "path",
-      "filepath",
-      "url",
-      "username",
-      "email",
-      "password",
-      "token",
-      "key",
-      "secret",
-      "credential"
-    ];
-
-    return sensitiveKeys.some((sensitive) => key.toLowerCase().includes(sensitive));
-  }
-
-  private sanitizeString(value: string): string {
-    let sanitized = value;
-    this.sensitiveDataPatterns.forEach((pattern) => {
-      sanitized = sanitized.replace(pattern, "[REDACTED]");
-    });
-
-    if (sanitized.length > 100) {
-      sanitized = `${sanitized.substring(0, 100)}...`;
-    }
-
-    return sanitized;
-  }
-}
-
-class AggregatedMetricsCollector {
-  constructor(
-    private readonly performanceMonitor: PerformanceMonitor,
-    private readonly errorReporter: ErrorReporter,
-    private readonly featureUsageAccessor: () => Map<string, number>,
-    private readonly formatUsageAccessor: () => Map<string, number>,
-    private readonly operationSnapshotAccessor: () => TelemetryOperationSnapshot,
-    private readonly sessionStartTime: number
-  ) {}
-
-  async collectAggregatedMetrics(storedEvents: TelemetryEvent[]): Promise<AggregatedMetrics> {
-  this.collectSessionMetrics();
-  const performanceMetrics = this.collectPerformanceMetrics();
-    const usageMetrics = this.collectUsageMetrics();
-    const errorMetrics = this.collectErrorMetrics();
-    const uniqueSessions = new Set(storedEvents.map((event) => event.sessionId));
-
-    const totalOperations = performanceMetrics.totalOperations || usageMetrics.remoteRepoUsage || storedEvents.length;
-    const averageOperationDuration = performanceMetrics.averageOperationTime;
-    const errorRate = totalOperations === 0 ? 0 : errorMetrics.totalErrors / totalOperations;
-
-    const aggregated: AggregatedMetrics = {
-      sessionCount: Math.max(uniqueSessions.size, 1),
-      totalOperations,
-      averageOperationDuration,
-      errorRate,
-      featureUsage: usageMetrics.featuresUsed,
-      performanceProfile: {
-        totalOperations: performanceMetrics.totalOperations,
-        averageOperationDuration: performanceMetrics.averageOperationTime,
-        slowestOperation: performanceMetrics.slowestOperation,
-        memoryUsageAverage: performanceMetrics.memoryUsageAverage,
-        operationDistribution: performanceMetrics.operationDistribution,
-        performanceGrade: performanceMetrics.performanceGrade
-      }
-    };
-
-    return aggregated;
-  }
-
-  collectSessionMetrics(): SessionMetrics {
-    const duration = Date.now() - this.sessionStartTime;
-    const extension = this.getExtension();
-    return {
-      sessionDuration: duration,
-      extensionVersion: extension?.packageJSON.version ?? "unknown",
-      vscodeVersion: vscode.version,
-      platform: os.platform(),
-      nodeVersion: process.version,
-      totalMemoryGB: Math.round(os.totalmem() / 1024 ** 3),
-      cpuCores: os.cpus().length
-    };
-  }
-
-  collectPerformanceMetrics(): PerformanceAggregation {
-    const metrics = this.performanceMonitor.getMetricsHistory();
-    const snapshot = this.operationSnapshotAccessor();
-    const operationReport: PerformanceReport = this.performanceMonitor.generateReport();
-
-    const totalOperations = metrics.length;
-    const averageOperationTime = totalOperations === 0 ? 0 : snapshot.totalDuration / totalOperations;
-    const slowestOperation = operationReport.overall.slowestOperation.operationType ?? "unknown";
-    const memoryUsageAverage = metrics.length === 0
-      ? 0
-      : metrics.reduce((sum, metric) => sum + metric.memoryUsage.peak.heapUsed, 0) / metrics.length;
-
-    const distribution: Record<string, number> = {};
-    snapshot.operationsByName.forEach((value, key) => {
-      distribution[key] = value.count;
-    });
-
-    const performanceGrade = this.calculatePerformanceGrade(metrics, snapshot);
-
-    return {
-      totalOperations,
-      averageOperationTime,
-      slowestOperation,
-      memoryUsageAverage,
-      operationDistribution: distribution,
-      performanceGrade
-    };
-  }
-
-  collectUsageMetrics(): UsageMetrics {
-    const features = this.featureUsageAccessor();
-    const formats = this.formatUsageAccessor();
-
-    const aggregateFeatureUsage: Record<string, number> = {};
-    features.forEach((value, key) => {
-      aggregateFeatureUsage[key] = value;
-    });
-
-    const outputFormats: Record<string, number> = {};
-    formats.forEach((value, key) => {
-      outputFormats[key] = value;
-    });
-
-    return {
-      featuresUsed: aggregateFeatureUsage,
-      outputFormatsUsed: outputFormats,
-      averageFileCount: 0,
-      remoteRepoUsage: aggregateFeatureUsage["remote-ingestion"] ?? 0,
-      configurationComplexity: Object.keys(aggregateFeatureUsage).length
-    };
-  }
-
-  collectErrorMetrics(): ErrorMetrics {
-    const errors = this.errorReporter.getErrorBuffer();
-
-    const errorsByCategory = errors.reduce<Record<string, number>>((accumulator, report) => {
-      const category = this.getErrorCategory(report.context.classification);
-      accumulator[category] = (accumulator[category] ?? 0) + 1;
-      return accumulator;
-    }, {});
-
-    const recovered = errors.filter((report) => report.context.recoverable ?? false).length;
-    const criticalErrorCount = errors.filter((report) => report.classification.severity === ErrorSeverity.CRITICAL).length;
-
-    return {
-      totalErrors: errors.length,
-      errorsByCategory,
-      recoveryRate: errors.length === 0 ? 0 : recovered / errors.length,
-      criticalErrorCount
-    };
-  }
-
-  private calculatePerformanceGrade(
-    metrics: OperationMetrics[],
-    snapshot: TelemetryOperationSnapshot
-  ): PerformanceProfile["performanceGrade"] {
-    if (metrics.length === 0) {
-      return "excellent";
-    }
-
-    const avgDuration = snapshot.totalDuration / Math.max(metrics.length, 1);
-    if (avgDuration < 500) {
-      return "excellent";
-    }
-
-    if (avgDuration < 1_000) {
-      return "good";
-    }
-
-    if (avgDuration < 2_000) {
-      return "fair";
-    }
-
-    return "poor";
-  }
-
-  private getExtension() {
-    return (
-      vscode.extensions.getExtension("code-ingest.code-ingest") ??
-      vscode.extensions.getExtension("mrzeeshanahmed.code-ingest") ??
-      vscode.extensions.getExtension("publisher.code-ingest") ??
-      undefined
-    );
-  }
-
-  private getErrorCategory(classification: ErrorClassification): string {
-    return classification.category ?? "unknown";
-  }
-}
-
-class TelemetryConsentManager {
-  private readonly CONSENT_KEY = "codeIngest.telemetryConsent";
-  private readonly SHOWN_CONSENT_KEY = "codeIngest.telemetryConsentShown";
-
-  constructor(private readonly configService: ConfigurationService) {}
-
-  async checkAndRequestConsent(): Promise<boolean> {
-    const stored = this.getStoredConsent();
-    if (stored !== null) {
-      return stored;
-    }
-
-    if (this.hasShownConsentBefore()) {
-      return false;
-    }
-
-    return this.showConsentDialog();
-  }
-
-  private async showConsentDialog(): Promise<boolean> {
-    const message = [
-      "Code Ingest would like to collect anonymous usage analytics to improve the extension.",
-      "",
-      "What we collect:",
-      "- Performance metrics (operation times, memory usage)",
-      "- Feature usage statistics (which features are used)",
-      "- Error rates and recovery information",
-      "- System information (VS Code version, platform)",
-      "",
-      "What we DON'T collect:",
-      "- File contents or code",
-      "- File paths or names",
-      "- Personal information",
-      "- Repository URLs or names",
-      "",
-      "You can change this setting anytime in VS Code preferences."
-    ].join("\n");
-
-    const choice = await vscode.window.showInformationMessage(
-      "Help improve Code Ingest",
-      {
-        modal: true,
-        detail: message
-      },
-      "Allow Analytics",
-      "No Thanks",
-      "Learn More"
-    );
-
-    this.markConsentShown();
-
-    if (choice === "Learn More") {
-      void vscode.env.openExternal(vscode.Uri.parse("https://github.com/your-org/code-ingest/blob/main/PRIVACY.md"));
-      return false;
-    }
-
-    const consented = choice === "Allow Analytics";
-    await this.storeConsent(consented);
-    return consented;
-  }
-
-  private getStoredConsent(): boolean | null {
-    const stored = this.configService.getGlobalValue<boolean>(this.CONSENT_KEY);
-    if (typeof stored === "boolean") {
-      return stored;
-    }
-    return null;
-  }
-
-  private async storeConsent(consented: boolean): Promise<void> {
-    await this.configService.updateGlobalValue(this.CONSENT_KEY, consented);
-  }
-
-  private hasShownConsentBefore(): boolean {
-    return Boolean(this.configService.getGlobalValue<boolean>(this.SHOWN_CONSENT_KEY));
-  }
-
-  private markConsentShown(): void {
-    void this.configService.updateGlobalValue(this.SHOWN_CONSENT_KEY, true);
-  }
-}
-
-class TelemetryStorage {
-  private readonly STORAGE_KEY = TELEMETRY_STORAGE_KEY;
-  private readonly MAX_STORED_EVENTS = 1_000;
-
-  constructor(private readonly configService: ConfigurationService) {}
-
-  async storeEvents(events: TelemetryEvent[]): Promise<void> {
-    const existingEvents = await this.loadEvents();
-    const allEvents = [...existingEvents, ...events];
-
-    const sorted = allEvents
-      .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
-      .slice(0, this.MAX_STORED_EVENTS)
-      .map((event) => ({
-        ...event,
-        timestamp: new Date(event.timestamp)
-      }));
-
-    await this.configService.updateGlobalValue(this.STORAGE_KEY, JSON.stringify(sorted));
-  }
-
-  async loadEvents(): Promise<TelemetryEvent[]> {
-    const stored = this.configService.getGlobalValue<string>(this.STORAGE_KEY);
-    if (!stored) {
-      return [];
-    }
-
-    try {
-      const parsed = JSON.parse(stored) as Array<Omit<TelemetryEvent, "timestamp"> & { timestamp: string | number | Date }>;
-      return parsed.map((event) => ({
-        ...event,
-        timestamp: new Date(event.timestamp)
-      }));
-    } catch {
-      return [];
-    }
-  }
-
-  async clearEvents(): Promise<void> {
-    await this.configService.updateGlobalValue(this.STORAGE_KEY, null);
-  }
-
-  async getStorageSize(): Promise<number> {
-    const events = await this.loadEvents();
-    return JSON.stringify(events).length;
-  }
-}
-
-class TelemetryValidator {
-  validateEvent(event: TelemetryEvent): ValidationResult {
-    const issues: string[] = [];
-
-    if (!event.name || typeof event.name !== "string") {
-      issues.push("Event name is required and must be a string");
-    }
-
-    if (!event.sessionId || typeof event.sessionId !== "string") {
-      issues.push("Session ID is required");
-    }
-
-    const serialized = JSON.stringify({
-      ...event,
-      timestamp: event.timestamp.toISOString()
-    });
-
-    if (this.containsSensitiveData(serialized)) {
-      issues.push("Event contains potentially sensitive data");
-    }
-
-    if (serialized.length > 10_000) {
-      issues.push("Event exceeds maximum size limit");
-    }
-
-    return {
-      isValid: issues.length === 0,
-      issues
-    };
-  }
-
-  private containsSensitiveData(data: string): boolean {
-    const sensitivePatterns = [
-      /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/,
-      /\/Users\/[^/]+/,
-      /\/home\/[^/]+/,
-      /[A-Za-z0-9]{20,}/
-    ];
-
-    return sensitivePatterns.some((pattern) => pattern.test(data));
+  private createSessionId(): string {
+    const random = crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    return `session-${random}`;
   }
 }

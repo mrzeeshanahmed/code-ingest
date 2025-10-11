@@ -106,16 +106,16 @@ describe("ContentProcessor", () => {
       await fs.writeFile(scriptPath, "def main():\n    return 42\n", "utf8");
 
       const processor = new ContentProcessor();
-      const detected = processor.detectLanguage(scriptPath, "def foo():\n    pass\n");
+      const detected = await processor.detectLanguage(scriptPath, "def foo():\n    pass\n");
       expect(detected).toBe("python");
 
       const htmlPath = path.join(root, "page.txt");
       await fs.writeFile(htmlPath, "<html><body>Hello</body></html>", "utf8");
-  const htmlLanguage = processor.detectLanguage(htmlPath, "<html><body></body></html>");
-  expect(htmlLanguage).toBe("html");
+      const htmlLanguage = await processor.detectLanguage(htmlPath, "<html><body></body></html>");
+      expect(htmlLanguage).toBe("html");
 
-  const overridden = await processor.processFile(htmlPath, { detectLanguage: false, maxFileSize: 1024 });
-  expect(overridden.language).toBe("plaintext");
+      const overridden = await processor.processFile(htmlPath, { detectLanguage: false, maxFileSize: 1024 });
+      expect(overridden.language).toBe("plaintext");
     });
   });
 

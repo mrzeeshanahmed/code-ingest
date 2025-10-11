@@ -2,7 +2,7 @@
  * Follow instructions in copilot-instructions.md exactly.
  */
 
-import { COMMAND_MAP } from "./commandMap.generated.js";
+import { COMMAND_MAP } from "./commandMap.js";
 
 const ALLOWED_TYPES = new Set(["command", "response", "event"]);
 

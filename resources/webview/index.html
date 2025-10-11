@@ -8,14 +8,13 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'none'; img-src https: data: vscode-resource:; style-src 'unsafe-inline' https:; script-src 'self' 'unsafe-inline'; font-src https: data:; connect-src https: vscode-resource:;"
     />
-    <title>Code Ingest Dashboard</title>
+    <title>Code Ingest Control Center</title>
     <link rel="stylesheet" href="styles.css" />
     <script type="module" src="store.js" defer></script>
     <script type="module" src="commandRegistry.js" defer></script>
-    <script src="commandMap.generated.js" defer></script>
     <script type="module" src="main.js" defer></script>
   </head>
-  <body>
+  <body data-app-theme="dark">
     <!-- INITIAL_STATE -->
     <svg aria-hidden="true" focusable="false" class="sprite-sheet">
       <defs>
@@ -28,63 +27,141 @@
         <symbol id="icon-refresh" viewBox="0 0 16 16" fill="currentColor">
           <path d="M7.75 2a5.75 5.75 0 1 0 4.06 9.81.75.75 0 1 0-1.08-1.04 4.25 4.25 0 1 1 0-6.04l-.18.19a.75.75 0 1 0 1.08 1.04l1.06-1.06a.75.75 0 0 0 0-1.06L11.63 2.7a.75.75 0 1 0-1.06 1.06l.18.18A5.72 5.72 0 0 0 7.75 2Z" />
         </symbol>
+        <symbol id="icon-link" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M6.25 3.5h1.5v1.75h-1.5a1.75 1.75 0 0 0 0 3.5h1.5v1.75h-1.5a3.5 3.5 0 0 1 0-7Z" />
+          <path d="M8.25 11.75v-1.75h1.5a1.75 1.75 0 1 0 0-3.5h-1.5V4.75h1.5a3.5 3.5 0 0 1 0 7Z" />
+        </symbol>
+        <symbol id="icon-shield" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8 1.25 2.5 3.25v4c0 3.6 2.52 6.92 5.5 8.5 2.98-1.58 5.5-4.9 5.5-8.5v-4Z" />
+        </symbol>
+        <symbol id="icon-stats" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M2.75 12.5a.75.75 0 0 0 .75.75h1.5a.75.75 0 0 0 .75-.75V7a.75.75 0 0 0-.75-.75H3.5A.75.75 0 0 0 2.75 7Zm4 0a.75.75 0 0 0 .75.75h1.5a.75.75 0 0 0 .75-.75V3a.75.75 0 0 0-.75-.75H7.5A.75.75 0 0 0 6.75 3Zm4 0a.75.75 0 0 0 .75.75h1.5a.75.75 0 0 0 .75-.75V9a.75.75 0 0 0-.75-.75h-1.5A.75.75 0 0 0 10.75 9Z" />
+        </symbol>
+        <symbol id="icon-warning" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M7.13 2.08 1.4 12.83A1 1 0 0 0 2.27 14h11.46a1 1 0 0 0 .87-1.17L8.87 2.08a1 1 0 0 0-1.74 0ZM8.75 11.5a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm-.25-5.75v3.5h-1v-3.5Z" />
+        </symbol>
       </defs>
     </svg>
-
-    <div class="dashboard">
+    <div class="dashboard" data-app-root>
       <header class="dashboard__header" role="banner">
-        <div class="dashboard__title-group">
-          <svg class="dashboard__title-icon" aria-hidden="true">
-            <use href="#icon-folder"></use>
-          </svg>
-          <h1 class="dashboard__title" data-glitch="Code Ingest Dashboard">Code Ingest Dashboard</h1>
+        <div class="dashboard__heading">
+          <div class="dashboard__title-group">
+            <svg class="dashboard__title-icon" aria-hidden="true">
+              <use href="#icon-folder"></use>
+            </svg>
+            <div class="dashboard__headline">
+              <h1 class="dashboard__title">Code Ingest Control Center</h1>
+              <p class="dashboard__subtitle">Operational console for curation-focused engineering teams.</p>
+            </div>
+          </div>
+          <nav class="dashboard__actions" role="toolbar" aria-label="Primary actions">
+            <button class="button" type="button" data-action="refresh">
+              <svg class="button__icon" aria-hidden="true">
+                <use href="#icon-refresh"></use>
+              </svg>
+              <span>Refresh Tree</span>
+            </button>
+            <button class="button button--primary" type="button" data-action="generate">
+              <svg class="button__icon" aria-hidden="true">
+                <use href="#icon-file"></use>
+              </svg>
+              <span>Generate Digest</span>
+            </button>
+            <button class="button" type="button" data-action="load-remote">
+              <svg class="button__icon" aria-hidden="true">
+                <use href="#icon-link"></use>
+              </svg>
+              <span>Load Remote Repo</span>
+            </button>
+            <button class="button" type="button" data-action="toggle-redaction">
+              <svg class="button__icon" aria-hidden="true">
+                <use href="#icon-shield"></use>
+              </svg>
+              <span>Toggle Redaction</span>
+            </button>
+            <button class="button" type="button" data-action="view-metrics">
+              <svg class="button__icon" aria-hidden="true">
+                <use href="#icon-stats"></use>
+              </svg>
+              <span>View Metrics</span>
+            </button>
+          </nav>
         </div>
-        <nav class="dashboard__actions" role="group" aria-label="Dashboard actions">
-          <button class="button" type="button" data-action="refresh">
-            <svg class="button__icon" aria-hidden="true">
-              <use href="#icon-refresh"></use>
-            </svg>
-            <span>Refresh</span>
-          </button>
-          <button class="button" type="button" data-action="generate">
-            <svg class="button__icon" aria-hidden="true">
-              <use href="#icon-file"></use>
-            </svg>
-            <span>Generate Digest</span>
-          </button>
-        </nav>
+        <section class="status-bar" role="status" aria-live="polite">
+          <div class="status-bar__row">
+            <span class="status-bar__chip" data-element="status-primary">Ready for selection.</span>
+            <span class="status-bar__chip status-bar__chip--muted" data-element="status-repo">No remote repository.</span>
+            <span class="status-bar__chip status-bar__chip--muted" data-element="status-config">Using default configuration.</span>
+          </div>
+          <div class="status-bar__actions" role="group" aria-label="Quick actions">
+            <button class="icon-button" type="button" data-action="flush-errors" title="Flush error reports">
+              <svg aria-hidden="true">
+                <use href="#icon-warning"></use>
+              </svg>
+            </button>
+            <button class="icon-button" type="button" data-action="open-dashboard" title="Open dashboard panel">
+              <svg aria-hidden="true">
+                <use href="#icon-stats"></use>
+              </svg>
+            </button>
+          </div>
+        </section>
       </header>
 
-      <div class="neon-divider" aria-hidden="true"></div>
+      <div class="dashboard__divider" aria-hidden="true"></div>
 
-      <main class="dashboard__main" role="main">
+      <main class="dashboard__grid" role="main">
         <section class="panel panel--tree" aria-labelledby="tree-heading">
           <header class="panel__header">
-            <h2 id="tree-heading" class="panel__title" data-glitch="Workspace Files">Workspace Files</h2>
+            <div class="panel__heading">
+              <h2 id="tree-heading" class="panel__title">Workspace Files</h2>
+              <p class="panel__subtitle">Select the sources that should inform the digest pipeline.</p>
+            </div>
             <div class="panel__controls">
-              <button class="icon-button" type="button" data-action="expand-all" title="Expand all">
-                <svg aria-hidden="true">
-                  <use href="#icon-folder"></use>
-                </svg>
-              </button>
-              <button class="icon-button" type="button" data-action="collapse-all" title="Collapse all">
-                <svg aria-hidden="true">
-                  <use href="#icon-folder"></use>
-                </svg>
-              </button>
+              <div class="panel__control-group panel__control-group--tight" role="group" aria-label="Tree structure">
+                <button class="icon-button" type="button" data-action="expand-all" title="Expand all">
+                  <svg aria-hidden="true">
+                    <use href="#icon-folder"></use>
+                  </svg>
+                </button>
+                <button class="icon-button" type="button" data-action="collapse-all" title="Collapse all">
+                  <svg aria-hidden="true">
+                    <use href="#icon-folder"></use>
+                  </svg>
+                </button>
+              </div>
+              <div class="panel__control-group" role="group" aria-label="Selection shortcuts">
+                <button class="button" type="button" data-action="select-all">Select All</button>
+                <button class="button" type="button" data-action="select-none">Clear</button>
+              </div>
+              <div class="panel__control-group" role="group" aria-label="Preset filters">
+                <label class="panel__label" for="preset-select">Preset</label>
+                <select id="preset-select" class="panel__select" data-action="apply-preset">
+                  <option value="default">Default</option>
+                  <option value="docs">Documentation</option>
+                  <option value="api">API Surface</option>
+                  <option value="tests">Test Coverage</option>
+                </select>
+              </div>
             </div>
           </header>
           <div class="panel__body" aria-label="Workspace files">
-            <ul id="file-tree-container" class="tree" role="tree">
-              <li class="empty-state" role="treeitem" aria-disabled="true">No files selected yet.</li>
-            </ul>
+            <div class="panel__placeholder" data-element="tree-placeholder">
+              <p>Run a scan to populate the interactive file tree.</p>
+            </div>
           </div>
+          <footer class="panel__footer">
+            <button class="button" type="button" data-action="refresh-tree">Rescan Workspace</button>
+          </footer>
         </section>
 
         <section class="panel panel--preview" aria-labelledby="preview-heading">
           <header class="panel__header">
-            <h2 id="preview-heading" class="panel__title" data-glitch="Digest Preview">Digest Preview</h2>
-            <div class="panel__controls">
+            <div class="panel__heading">
+              <h2 id="preview-heading" class="panel__title">Digest Preview</h2>
+              <p class="panel__subtitle">See the synthesized narrative before committing output.</p>
+            </div>
+            <div class="panel__controls" role="group" aria-label="Preview commands">
               <button class="icon-button" type="button" data-action="refresh-preview" title="Refresh preview">
                 <svg aria-hidden="true">
                   <use href="#icon-refresh"></use>
@@ -96,31 +173,66 @@
             <article class="preview" data-state="empty">
               <header class="preview__header">
                 <h3 class="preview__title">Awaiting Selection</h3>
-                <p class="preview__subtitle">Select files from the tree to generate a live digest preview.</p>
+                <p class="preview__subtitle">Choose files from the tree to stream a live digest.</p>
               </header>
-              <section id="preview-container" class="preview__content" aria-live="polite"></section>
+              <section class="preview__content" aria-live="polite"></section>
             </article>
           </div>
+          <footer class="panel__footer panel__footer--compact">
+            <div class="panel__meta" data-element="preview-meta">Token usage and summary stats will appear here.</div>
+          </footer>
         </section>
 
         <section class="panel panel--status" aria-labelledby="status-heading">
           <header class="panel__header">
-            <h2 id="status-heading" class="panel__title" data-glitch="Pipeline Status">Pipeline Status</h2>
+            <div class="panel__heading">
+              <h2 id="status-heading" class="panel__title">Pipeline Status</h2>
+              <p class="panel__subtitle">Monitor scanning, filtering, and generation progress.</p>
+            </div>
           </header>
-          <div class="panel__body">
-            <div id="progress-container" class="status" aria-live="polite" hidden>
+          <div class="panel__body panel__body--scrollable">
+            <div class="status" aria-live="polite">
               <div class="status__track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
                 <div class="status__indicator"></div>
               </div>
-              <p class="status__message"></p>
+              <p class="status__message">Waiting for the next operation.</p>
+              <div class="status__log" data-element="status-log"></div>
             </div>
-            <div class="status__log" data-element="status-log"></div>
+          </div>
+        </section>
+
+        <section class="panel panel--insights" aria-labelledby="insights-heading">
+          <header class="panel__header">
+            <div class="panel__heading">
+              <h2 id="insights-heading" class="panel__title">Insights</h2>
+              <p class="panel__subtitle">Configuration, remote repository state, and performance notes.</p>
+            </div>
+          </header>
+          <div class="panel__body panel__body--scrollable">
+            <dl class="insights-list">
+              <div class="insights-list__item">
+                <dt>Configuration</dt>
+                <dd data-element="insight-config">Awaiting configuration data.</dd>
+              </div>
+              <div class="insights-list__item">
+                <dt>Remote Repository</dt>
+                <dd data-element="insight-repo">No remote repository connected.</dd>
+              </div>
+              <div class="insights-list__item">
+                <dt>Performance</dt>
+                <dd data-element="insight-performance">Metrics appear as generation runs.</dd>
+              </div>
+            </dl>
           </div>
         </section>
       </main>
 
       <footer class="dashboard__footer" role="contentinfo">
-        <span>Code Ingest · Cybernetic Digest Engine</span>
+        <span>Code Ingest • Developer Knowledge Accelerator</span>
+        <div class="dashboard__footer-actions">
+          <button class="button" type="button" data-action="flush-errors">Flush Errors</button>
+          <button class="button button--primary" type="button" data-action="view-metrics">Metrics</button>
+        </div>
         <span class="footer__pulse" aria-hidden="true"></span>
       </footer>
     </div>

@@ -12,6 +12,7 @@ import type { DigestConfig } from "../../utils/validateConfig";
 import * as redactionModule from "../../utils/redactSecrets";
 import packageJson from "../../../package.json";
 import { MockContentProcessor, MockTokenAnalyzer } from "./utils/mocks";
+import type { TelemetryService } from "../../services/telemetryService";
 
 const PACKAGE_VERSION = packageJson.version;
 
@@ -32,6 +33,11 @@ describe("DigestGenerator", () => {
     report(error: unknown, context?: unknown): void;
     reportError(error: Error, context: unknown): Promise<void>;
   }
+
+  type TelemetryLike = Pick<
+    TelemetryService,
+    "trackFeatureUsage" | "trackOperationDuration" | "trackEvent" | "trackError"
+  >;
 
   let fileScanner: jest.Mocked<FileScannerLike>;
   let filterService: jest.Mocked<FilterServiceLike>;
@@ -90,7 +96,7 @@ describe("DigestGenerator", () => {
     jest.restoreAllMocks();
   });
 
-  function createGenerator(): DigestGenerator {
+  function createGenerator(telemetryInstance?: TelemetryLike): DigestGenerator {
     return new DigestGenerator(
       fileScanner as unknown as import("../../services/fileScanner").FileScanner,
       filterService as unknown as import("../../services/filterService").FilterService,
@@ -98,7 +104,8 @@ describe("DigestGenerator", () => {
       notebookProcessor as unknown as typeof import("../../services/notebookProcessor").NotebookProcessor,
       tokenAnalyzer as unknown as import("../../services/tokenAnalyzer").TokenAnalyzer,
       configurationService as unknown as import("../../services/configurationService").ConfigurationService,
-      errorReporter as unknown as import("../../services/errorReporter").ErrorReporter
+      errorReporter as unknown as import("../../services/errorReporter").ErrorReporter,
+      telemetryInstance as unknown as TelemetryService
     );
   }
 
@@ -269,5 +276,64 @@ describe("DigestGenerator", () => {
     expect(result.content.metadata.generatedAt).toBeInstanceOf(Date);
     expect(result.statistics.processingTime).toBeGreaterThanOrEqual(0);
     expect(result.content.metadata.tokenEstimate).toBeGreaterThan(0);
+  });
+
+  it("records telemetry metrics on successful completion", async () => {
+    setupHappyPath();
+    const telemetry: jest.Mocked<TelemetryLike> = {
+      trackFeatureUsage: jest.fn(),
+      trackOperationDuration: jest.fn(),
+      trackEvent: jest.fn(),
+      trackError: jest.fn()
+    };
+
+    const generator = createGenerator(telemetry);
+    await generator.generateDigest({
+      selectedFiles: [absoluteFilePath],
+      outputFormat: "markdown"
+    });
+
+    expect(telemetry.trackFeatureUsage).toHaveBeenCalledWith("digest.pipeline", { format: "markdown" });
+    expect(telemetry.trackOperationDuration).toHaveBeenCalledWith("digest.generate", expect.any(Number), true);
+
+    const performanceCall = telemetry.trackEvent.mock.calls.find(([name]) => name === "performance.digest");
+    expect(performanceCall?.[1]).toMatchObject({ stage: "completed", format: "markdown", redacted: true });
+    expect(performanceCall?.[2]).toEqual(expect.objectContaining({ filesProcessed: 1, tokensProcessed: 20 }));
+
+    const summaryCall = telemetry.trackEvent.mock.calls.find(([name]) => name === "digest.summary");
+    expect(summaryCall?.[1]).toMatchObject({ truncated: false, binaryFiles: 0, format: "markdown" });
+    expect(summaryCall?.[2]).toEqual(expect.objectContaining({ filesProcessed: 1, totalTokens: 20 }));
+    expect(telemetry.trackError).not.toHaveBeenCalled();
+  });
+
+  it("records telemetry diagnostics when pipeline fails", async () => {
+    const telemetry: jest.Mocked<TelemetryLike> = {
+      trackFeatureUsage: jest.fn(),
+      trackOperationDuration: jest.fn(),
+      trackEvent: jest.fn(),
+      trackError: jest.fn()
+    };
+
+    fileScanner.scan.mockRejectedValueOnce(new Error("scan failed"));
+    const generator = createGenerator(telemetry);
+
+    await expect(
+      generator.generateDigest({
+        selectedFiles: [absoluteFilePath],
+        outputFormat: "markdown"
+      })
+    ).rejects.toThrow("scan failed");
+
+    expect(telemetry.trackFeatureUsage).toHaveBeenCalledWith("digest.pipeline", { format: "markdown" });
+    expect(telemetry.trackOperationDuration).toHaveBeenCalledWith("digest.generate", expect.any(Number), false);
+
+    const failureCall = telemetry.trackEvent.mock.calls.find(([name]) => name === "performance.digest");
+    expect(failureCall?.[1]).toMatchObject({ stage: "failed", format: "markdown" });
+    expect(failureCall?.[2]).toEqual(expect.objectContaining({ cpuTimeMs: expect.any(Number) }));
+
+    expect(telemetry.trackError).toHaveBeenCalledWith(expect.any(Error), {
+      component: "digestGenerator",
+      operation: "generateDigest"
+    });
   });
 });

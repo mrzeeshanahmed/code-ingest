@@ -150,6 +150,8 @@ export class PerformanceMonitor {
   private readonly sessionId: string;
   private sessionStart: number;
   private memoryMonitorInterval?: NodeJS.Timeout;
+  private readonly metricsEmitter = new vscode.EventEmitter<PerformanceMetrics>();
+  private readonly operationEmitter = new vscode.EventEmitter<void>();
 
   constructor(private readonly logger: Logger, private readonly configService: ConfigurationService) {
     this.sessionId = this.generateSessionId();
@@ -192,6 +194,7 @@ export class PerformanceMonitor {
 
     operation.memoryCheckInterval = interval;
     this.activeOperations.set(operationId, operation);
+    this.operationEmitter.fire();
 
     this.logger.debug("performance.operation.start", { operationType, operationId });
     return operationId;
@@ -238,6 +241,7 @@ export class PerformanceMonitor {
 
     this.activeOperations.delete(operationId);
     this.recordMetrics(metrics);
+  this.operationEmitter.fire();
     this.updateBenchmarks(metrics);
 
     this.logger.debug("performance.operation.end", {
@@ -433,6 +437,14 @@ export class PerformanceMonitor {
     return this.sessionId;
   }
 
+  onDidRecordMetrics(listener: (metrics: PerformanceMetrics) => void): vscode.Disposable {
+    return this.metricsEmitter.event(listener);
+  }
+
+  onDidChangeActiveOperations(listener: () => void): vscode.Disposable {
+    return this.operationEmitter.event(listener);
+  }
+
   reset(): void {
     this.activeOperations.forEach((operation) => {
       if (operation.memoryCheckInterval) {
@@ -450,6 +462,8 @@ export class PerformanceMonitor {
     if (this.memoryMonitorInterval) {
       clearInterval(this.memoryMonitorInterval);
     }
+    this.metricsEmitter.dispose();
+    this.operationEmitter.dispose();
     await this.benchmarkManager.saveBaselines();
   }
 
@@ -461,6 +475,7 @@ export class PerformanceMonitor {
 
     this.updateOperationStats(metrics);
     this.checkPerformanceThresholds(metrics);
+    this.metricsEmitter.fire(metrics);
   }
 
   private updateOperationStats(metrics: PerformanceMetrics): void {

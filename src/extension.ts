@@ -3,15 +3,19 @@ import * as vscode from "vscode";
 import { registerAllCommands } from "./commands";
 import type { CommandServices } from "./commands/types";
 import { DashboardViewProvider } from "./providers/dashboardViewProvider";
+import { PerformanceDashboardProvider } from "./providers/performanceDashboardProvider";
 import { CodeIngestTreeProvider } from "./tree/codeIngestTreeProvider";
 import { ConfigurationService } from "./services/configurationService";
 import { Diagnostics } from "./services/diagnostics";
 import { ErrorReporter } from "./services/errorReporter";
 import { GitignoreService } from "./services/gitignoreService";
 import { WorkspaceManager } from "./services/workspaceManager";
+import { DiagnosticService } from "./services/diagnosticService";
+import { PerformanceMonitor } from "./services/performanceMonitor";
 import { WebviewPanelManager } from "./webview/webviewPanelManager";
 import { DEFAULT_CONFIG } from "./config/constants";
 import type { Logger } from "./utils/gitProcessManager";
+import { GitProcessManager } from "./utils/gitProcessManager";
 
 let errorReporter: ErrorReporter | undefined;
 let outputChannel: vscode.OutputChannel | undefined;
@@ -166,6 +170,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const gitignoreService = new GitignoreService();
   const workspaceManager = new WorkspaceManager(diagnostics, gitignoreService);
 
+  const performanceMonitor = new PerformanceMonitor(logger, configurationService);
+  const gitProcessManager = new GitProcessManager(logger, errorReporter);
+  const diagnosticService = new DiagnosticService(configurationService, performanceMonitor, errorReporter, gitProcessManager, logger);
+  context.subscriptions.push({ dispose: () => void performanceMonitor.dispose() });
+
   const processHandlers: Array<() => void> = [];
   const uncaughtExceptionHandler = (error: unknown) => {
     errorReporter?.report(error, { source: "uncaughtException" });
@@ -220,18 +229,39 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   context.subscriptions.push(webviewViewDisposable);
 
+  const performanceDashboardProvider = new PerformanceDashboardProvider(context, performanceMonitor, diagnosticService);
+  const performanceDashboardDisposable = vscode.window.registerWebviewViewProvider(
+    PerformanceDashboardProvider.viewType,
+    performanceDashboardProvider,
+    {
+      webviewOptions: {
+        retainContextWhenHidden: true
+      }
+    }
+  );
+  context.subscriptions.push(performanceDashboardDisposable, { dispose: () => performanceDashboardProvider.dispose() });
+
   const services: CommandServices = {
     diagnostics,
     gitignoreService,
     workspaceManager,
     webviewPanelManager,
-    treeProviders
+    treeProviders,
+    performanceMonitor,
+    diagnosticService
   };
 
   registerAllCommands(context, services);
 
   const manualCommands: Array<[string, (...args: unknown[]) => Promise<unknown> | unknown]> = [
     ["codeIngest.openDashboardPanel", () => webviewPanelManager.createAndShowPanel()],
+    [
+      "codeIngest.showPerformanceDashboard",
+      async () => {
+        await vscode.commands.executeCommand("workbench.view.extension.codeIngest");
+        await vscode.commands.executeCommand(`${PerformanceDashboardProvider.viewType}.focus`);
+      }
+    ],
     ["codeIngest.flushErrorReports", async () => {
       await errorReporter?.flushErrors();
       await vscode.window.showInformationMessage("Code Ingest: Error reports flushed to output channel.");

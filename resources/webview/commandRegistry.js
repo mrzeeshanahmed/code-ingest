@@ -2,7 +2,7 @@
  * Follow instructions in copilot-instructions.md exactly.
  */
 
-import { COMMAND_MAP } from "./commandMap.generated.js";
+import { COMMAND_MAP } from "./commandMap.js";
 import { MessageEnvelope } from "./messageEnvelope.js";
 import { RateLimiter } from "./rateLimiter.js";
 import { AcknowledgmentSystem } from "./acknowledgmentSystem.js";

@@ -50,15 +50,27 @@
     },
     "views": {
       "codeIngest": [
+      
         {
           "id": "codeIngestDashboard",
           "name": "Code Ingest Dashboard",
           "type": "webview",
           "icon": "resources/icons/icon.svg"
+        },
+        {
+          "type": "webview",
+          "id": "codeIngest.performanceDashboard",
+          "name": "Performance Dashboard",
+          "when": "config.codeIngest.showPerformanceDashboard",
+          "icon": "resources/icons/icon.svg"
         }
       ]
     },
     "viewsWelcome": [
+      {
+        "view": "codeIngestExplorer",
+        "contents": "Scan your workspace to build a digest.\n[Open the dashboard](command:codeIngest.openDashboardPanel) to configure filters."
+      },
       {
         "view": "codeIngestDashboard",
         "contents": "No digests yet.\n[Open the dashboard](command:codeIngest.openDashboardPanel) to get started."
@@ -98,6 +110,11 @@
       {
         "command": "codeIngest.openDashboardPanel",
         "title": "Open Dashboard Panel",
+        "category": "Code Ingest"
+      },
+      {
+        "command": "codeIngest.showPerformanceDashboard",
+        "title": "Show Performance Dashboard",
         "category": "Code Ingest"
       },
       {
@@ -174,6 +191,9 @@
     "ts-jest": "^29.0.0",
     "ts-loader": "^9.4.0",
     "ts-node": "10.9.2",
+    "canvas": "^2.11.2",
+    "puppeteer": "^23.5.3",
+    "sharp": "^0.33.4",
   "vsce": "^2.23.0",
     "typescript": "^4.9.0",
     "webpack": "^5.75.0",

@@ -30,6 +30,7 @@ import { NotebookProcessor } from "./notebookProcessor";
 import { TokenAnalyzer } from "./tokenAnalyzer";
 import { ConfigurationService } from "./configurationService";
 import { ErrorReporter } from "./errorReporter";
+import { TelemetryService } from "./telemetryService";
 import { ErrorClassifier, type ErrorContext } from "../utils/errorHandler";
 
 const DEFAULT_TOTAL_TOKEN_BUDGET = 16_000;
@@ -172,119 +173,193 @@ export class DigestGenerator {
     private readonly notebookProcessor: typeof NotebookProcessor,
     private readonly tokenAnalyzer: TokenAnalyzer,
     private readonly configService: ConfigurationService,
-    private readonly errorReporter: ErrorReporter
+    private readonly errorReporter: ErrorReporter,
+    private readonly telemetry?: TelemetryService
   ) {}
 
   public async generateDigest(options: DigestOptions): Promise<DigestResult> {
     const startedAt = performance.now();
+    const cpuStart = process.cpuUsage();
+    this.telemetry?.trackFeatureUsage("digest.pipeline", { format: options.outputFormat });
     const emitProgress = this.createProgressEmitter(options.progressCallback, startedAt);
 
-    const config = this.configService.loadConfig();
-    const context = this.resolvePipelineContext(options, config);
+    try {
+      const config = this.configService.loadConfig();
+      const context = this.resolvePipelineContext(options, config);
 
-    emitProgress("scanning", {
-      filesProcessed: 0,
-      totalFiles: 0,
-      tokensProcessed: 0
-    });
+      emitProgress("scanning", {
+        filesProcessed: 0,
+        totalFiles: 0,
+        tokensProcessed: 0
+      });
 
-    const scannerResult = await this.scanWorkspace(emitProgress, context);
+      const scannerResult = await this.scanWorkspace(emitProgress, context);
 
-    const candidates = await this.filterCandidates(scannerResult.nodes, context, options, emitProgress);
-    const sortedCandidates = this.sortCandidatesByPriority(candidates);
+      const candidates = await this.filterCandidates(scannerResult.nodes, context, options, emitProgress);
+      const sortedCandidates = this.sortCandidatesByPriority(candidates);
 
-    const limitedCandidates = sortedCandidates.slice(0, context.maxFiles);
-    const truncationByCount = sortedCandidates.length > context.maxFiles;
+      const limitedCandidates = sortedCandidates.slice(0, context.maxFiles);
+      const truncationByCount = sortedCandidates.length > context.maxFiles;
 
-    const processedFiles: ProcessedFileContent[] = [];
-    const warnings: string[] = [];
-    const errors: string[] = [];
+      const processedFiles: ProcessedFileContent[] = [];
+      const warnings: string[] = [];
+      const errors: string[] = [];
 
-    let tokensProcessed = 0;
-    let filesProcessed = 0;
-    let binaryFiles = 0;
-    let truncationApplied = truncationByCount;
+      let tokensProcessed = 0;
+      let filesProcessed = 0;
+      let binaryFiles = 0;
+      let truncationApplied = truncationByCount;
 
-    const tasks = limitedCandidates.map((candidate) => async () => {
-      const outcome = await this.processFileCandidate(candidate, context, tokensProcessed, emitProgress);
-      if (outcome.file) {
-        processedFiles.push(outcome.file);
-        filesProcessed += 1;
-        tokensProcessed += outcome.tokens;
-        if (outcome.binary) {
-          binaryFiles += 1;
+      const tasks = limitedCandidates.map((candidate) => async () => {
+        const outcome = await this.processFileCandidate(candidate, context, tokensProcessed, emitProgress);
+        if (outcome.file) {
+          processedFiles.push(outcome.file);
+          filesProcessed += 1;
+          tokensProcessed += outcome.tokens;
+          if (outcome.binary) {
+            binaryFiles += 1;
+          }
+          if (outcome.truncated) {
+            truncationApplied = true;
+          }
         }
-        if (outcome.truncated) {
-          truncationApplied = true;
-        }
-      }
-      warnings.push(...outcome.warnings);
-      errors.push(...outcome.errors);
-    });
+        warnings.push(...outcome.warnings);
+        errors.push(...outcome.errors);
+      });
 
-    await asyncPool(tasks, 1);
+      await asyncPool(tasks, 1);
 
-    emitProgress("generating", {
-      filesProcessed,
-      totalFiles: limitedCandidates.length,
-      tokensProcessed
-    });
+      emitProgress("generating", {
+        filesProcessed,
+        totalFiles: limitedCandidates.length,
+        tokensProcessed
+      });
 
-    const summary: DigestSummary = {
-      overview: {
+      const summary: DigestSummary = {
+        overview: {
+          totalFiles: scannerResult.totalFiles,
+          includedFiles: processedFiles.length,
+          skippedFiles: scannerResult.totalFiles - processedFiles.length,
+          binaryFiles,
+          totalTokens: tokensProcessed
+        },
+        tableOfContents: processedFiles
+          .map((file) => ({ path: file.relativePath, tokens: file.tokens, truncated: file.truncated }))
+          .sort((a, b) => a.path.localeCompare(b.path)),
+        notes: [...warnings]
+      } satisfies DigestSummary;
+
+      emitProgress("formatting", {
+        filesProcessed,
+        totalFiles: limitedCandidates.length,
+        tokensProcessed
+      });
+
+      const metadata: DigestMetadata = {
+        generatedAt: new Date(),
+        workspaceRoot: context.workspaceRoot,
         totalFiles: scannerResult.totalFiles,
         includedFiles: processedFiles.length,
-        skippedFiles: scannerResult.totalFiles - processedFiles.length,
+        skippedFiles: Math.max(scannerResult.totalFiles - processedFiles.length, 0),
         binaryFiles,
-        totalTokens: tokensProcessed
-      },
-      tableOfContents: processedFiles
-        .map((file) => ({ path: file.relativePath, tokens: file.tokens, truncated: file.truncated }))
-        .sort((a, b) => a.path.localeCompare(b.path)),
-      notes: [...warnings]
-    } satisfies DigestSummary;
+        tokenEstimate: tokensProcessed,
+        processingTime: Math.round(performance.now() - startedAt),
+        redactionApplied: context.shouldRedact,
+        generatorVersion: PACKAGE_VERSION
+      } satisfies DigestMetadata;
 
-    emitProgress("formatting", {
-      filesProcessed,
-      totalFiles: limitedCandidates.length,
-      tokensProcessed
-    });
+      emitProgress("complete", {
+        filesProcessed,
+        totalFiles: limitedCandidates.length,
+        tokensProcessed
+      });
 
-    const metadata: DigestMetadata = {
-      generatedAt: new Date(),
-      workspaceRoot: context.workspaceRoot,
-      totalFiles: scannerResult.totalFiles,
-      includedFiles: processedFiles.length,
-      skippedFiles: Math.max(scannerResult.totalFiles - processedFiles.length, 0),
-      binaryFiles,
-      tokenEstimate: tokensProcessed,
-      processingTime: Math.round(performance.now() - startedAt),
-      redactionApplied: context.shouldRedact,
-      generatorVersion: PACKAGE_VERSION
-    } satisfies DigestMetadata;
+      const result: DigestResult = {
+        content: {
+          files: processedFiles.sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
+          summary,
+          metadata
+        },
+        statistics: {
+          filesProcessed: processedFiles.length,
+          totalTokens: tokensProcessed,
+          processingTime: metadata.processingTime,
+          warnings: [...new Set(warnings)],
+          errors
+        },
+        redactionApplied: context.shouldRedact,
+        truncationApplied
+      } satisfies DigestResult;
 
-    emitProgress("complete", {
-      filesProcessed,
-      totalFiles: limitedCandidates.length,
-      tokensProcessed
-    });
+      const durationMs = Math.round(performance.now() - startedAt);
+      const cpuUsage = process.cpuUsage(cpuStart);
+      const cpuMs = (cpuUsage.user + cpuUsage.system) / 1000;
+      const memoryUsageMb =
+        typeof process.memoryUsage === "function" ? process.memoryUsage().heapUsed / (1024 * 1024) : undefined;
 
-    return {
-      content: {
-        files: processedFiles.sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
-        summary,
-        metadata
-      },
-      statistics: {
+      this.telemetry?.trackOperationDuration("digest.generate", durationMs, true);
+
+      const performanceMeasurements: Record<string, number> = {
+        cpuTimeMs: cpuMs,
         filesProcessed: processedFiles.length,
-        totalTokens: tokensProcessed,
-        processingTime: metadata.processingTime,
-        warnings: [...new Set(warnings)],
-        errors
-      },
-      redactionApplied: context.shouldRedact,
-      truncationApplied
-    } satisfies DigestResult;
+        tokensProcessed
+      };
+      if (memoryUsageMb !== undefined && Number.isFinite(memoryUsageMb)) {
+        performanceMeasurements.memoryUsageMb = memoryUsageMb;
+      }
+
+      this.telemetry?.trackEvent(
+        "performance.digest",
+        {
+          stage: "completed",
+          format: options.outputFormat,
+          redacted: context.shouldRedact,
+          truncated: truncationApplied
+        },
+        performanceMeasurements
+      );
+
+      this.telemetry?.trackEvent(
+        "digest.summary",
+        {
+          truncated: truncationApplied,
+          binaryFiles,
+          format: options.outputFormat
+        },
+        {
+          filesProcessed: processedFiles.length,
+          totalTokens: tokensProcessed,
+          durationMs,
+          warnings: warnings.length
+        }
+      );
+
+      return result;
+    } catch (error) {
+      const durationMs = Math.round(performance.now() - startedAt);
+      this.telemetry?.trackOperationDuration("digest.generate", durationMs, false);
+
+      const cpuUsage = process.cpuUsage(cpuStart);
+      const cpuMs = (cpuUsage.user + cpuUsage.system) / 1000;
+
+      this.telemetry?.trackEvent(
+        "performance.digest",
+        {
+          stage: "failed",
+          format: options.outputFormat
+        },
+        {
+          cpuTimeMs: cpuMs,
+          durationMs
+        }
+      );
+
+      if (error instanceof Error) {
+        this.telemetry?.trackError(error, { component: "digestGenerator", operation: "generateDigest" });
+      }
+
+      throw error;
+    }
   }
 
   private resolvePipelineContext(options: DigestOptions, config: DigestConfig): PipelineContext {
