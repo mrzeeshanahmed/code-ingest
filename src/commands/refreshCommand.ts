@@ -1,21 +1,18 @@
 import * as vscode from "vscode";
 import { COMMAND_MAP } from "./commandMap";
 import type { CommandServices } from "./types";
-import { getActiveProvider } from "./utils";
 
 export function registerRefreshCommand(
   context: vscode.ExtensionContext,
   services: CommandServices
 ): void {
-  const disposable = vscode.commands.registerCommand(COMMAND_MAP.EXTENSION_ONLY.REFRESH_TREE, () => {
-    const provider = getActiveProvider(services.treeProviders);
+  const disposable = vscode.commands.registerCommand(COMMAND_MAP.WEBVIEW_TO_HOST.REFRESH_TREE, () => {
+    services.diagnostics.add("Refresh tree command invoked.");
+    void services.webviewPanelManager.createAndShowPanel();
 
-    if (!provider) {
-      void vscode.window.showWarningMessage("Code Ingest: No active workspace tree to refresh.");
-      return;
-    }
-
-    provider.refresh();
+    void vscode.window.showInformationMessage(
+      "Code Ingest: Refresh actions are coordinated through the dashboard."
+    );
   });
 
   context.subscriptions.push(disposable);

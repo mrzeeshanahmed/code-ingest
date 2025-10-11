@@ -39,19 +39,23 @@ function injectCsp(html: string, webview: vscode.Webview, nonce?: string): strin
 
   const cspContent = [
     "default-src 'none'",
-    `img-src ${webview.cspSource} data:`,
+    `img-src ${webview.cspSource} https: data:`,
     `script-src ${scriptSources.join(' ')}`,
-    `style-src ${webview.cspSource}`,
+    `style-src ${webview.cspSource} 'unsafe-inline'`,
     `font-src ${webview.cspSource}`,
     `connect-src ${webview.cspSource}`
   ].join('; ');
 
   const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${cspContent}">`;
-  if (/<head[^>]*>/i.test(html)) {
-    return html.replace(/<head([^>]*)>/i, (match) => `${match}\n    ${cspMeta}`);
+  
+  // Remove existing CSP if present
+  let cleanedHtml = html.replace(/<meta[^>]*Content-Security-Policy[^>]*>/gi, '');
+  
+  if (/<head[^>]*>/i.test(cleanedHtml)) {
+    return cleanedHtml.replace(/<head([^>]*)>/i, (match) => `${match}\n    ${cspMeta}`);
   }
 
-  return html.replace(/<html([^>]*)>/i, (match) => `${match}\n<head>\n    ${cspMeta}\n</head>`);
+  return cleanedHtml.replace(/<html([^>]*)>/i, (match) => `${match}\n<head>\n    ${cspMeta}\n</head>`);
 }
 
 function toWebviewUri(
@@ -94,16 +98,20 @@ function transformResourceUris(html: string, webview: vscode.Webview, htmlFilePa
   const baseDir = path.dirname(htmlFilePath);
   const attributePattern = /(src|href)=("|')([^"']+)(\2)/gi;
 
+  console.log('webviewHelpers: transformResourceUris', { baseDir, htmlFilePath });
+
   return html.replace(attributePattern, (match, attr, quote, value) => {
-    if (/^(https?:|vscode-resource:|data:|#|\{|\/\/)/i.test(value)) {
+    if (/^(https?:|vscode-resource:|vscode-webview-resource:|data:|#|\{|\/\/)/i.test(value)) {
       return match;
     }
 
     const transformed = toWebviewUri(webview, baseDir, value);
     if (!transformed) {
+      console.warn('webviewHelpers: Failed to transform', { attr, value });
       return match;
     }
 
+    console.log('webviewHelpers: Transformed', { original: value, transformed });
     return `${attr}=${quote}${transformed}${quote}`;
   });
 }

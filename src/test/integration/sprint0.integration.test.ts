@@ -100,18 +100,17 @@ describe("Sprint 0 integration", () => {
   it("Extension activation test", () => {
     expect(context.subscriptions.length).toBeGreaterThan(0);
 
-    const requiredCommands = [
-      COMMAND_MAP.generateDigest,
-      COMMAND_MAP.refreshTree,
-      COMMAND_MAP.selectAll,
-      COMMAND_MAP.deselectAll,
-      COMMAND_MAP.ingestRemoteRepo,
+    const requiredCommands: string[] = [
+      COMMAND_MAP.WEBVIEW_TO_HOST.GENERATE_DIGEST,
+      COMMAND_MAP.WEBVIEW_TO_HOST.REFRESH_TREE,
+      COMMAND_MAP.WEBVIEW_TO_HOST.LOAD_REMOTE_REPO,
+      COMMAND_MAP.EXTENSION_ONLY.SELECT_ALL,
+      COMMAND_MAP.EXTENSION_ONLY.DESELECT_ALL,
+      COMMAND_MAP.EXTENSION_ONLY.INGEST_REMOTE_REPO,
       "codeIngest.openDashboardPanel",
       "codeIngest.flushErrorReports",
       "codeIngest.viewMetrics",
       "codeIngest.toggleRedactionOverride",
-      "codeIngest.selectNone",
-      "codeIngest.loadRemoteRepo",
       "codeIngest.invertSelection"
     ];
 
@@ -127,7 +126,7 @@ describe("Sprint 0 integration", () => {
     const createdTreeViews = (vscode.window as unknown as {
       __getCreatedTreeViews?: () => Map<string, unknown>;
     }).__getCreatedTreeViews?.();
-    expect(createdTreeViews?.has("codeIngestExplorer")).toBe(true);
+    expect(createdTreeViews?.size ?? 0).toBe(0);
 
     const providers = getRegisteredWebviewProviders();
     expect(providers.has("codeIngestDashboard")).toBe(true);
@@ -202,8 +201,9 @@ describe("Sprint 0 integration", () => {
 
   it("Basic command execution", async () => {
     const commandsToExecute = [
-      COMMAND_MAP.refreshTree,
-      COMMAND_MAP.generateDigest,
+      COMMAND_MAP.WEBVIEW_TO_HOST.REFRESH_TREE,
+      COMMAND_MAP.WEBVIEW_TO_HOST.GENERATE_DIGEST,
+      COMMAND_MAP.EXTENSION_ONLY.SELECT_ALL,
       "codeIngest.flushErrorReports",
       "codeIngest.viewMetrics"
     ];

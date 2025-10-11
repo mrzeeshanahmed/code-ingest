@@ -10,10 +10,10 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider, vscode
   resolveWebviewView(webviewView: vscode.WebviewView): void | Thenable<void> {
     webviewView.webview.options = {
       enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "resources", "webview")]
+      localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "out", "resources", "webview")]
     };
 
-    const htmlPath = vscode.Uri.joinPath(this.extensionUri, "resources", "webview", "index.html").fsPath;
+    const htmlPath = vscode.Uri.joinPath(this.extensionUri, "out", "resources", "webview", "index.html").fsPath;
     try {
       setWebviewHtml(webviewView.webview, htmlPath);
     } catch (error) {

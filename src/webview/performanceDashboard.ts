@@ -551,7 +551,7 @@ export class PerformanceDashboard {
       {
         enableScripts: true,
         retainContextWhenHidden: true,
-        localResourceRoots: [vscode.Uri.file(path.join(this.context.extensionPath, "resources"))]
+        localResourceRoots: [vscode.Uri.file(path.join(this.context.extensionPath, "out", "resources"))]
       }
     );
 

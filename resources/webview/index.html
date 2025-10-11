@@ -4,16 +4,13 @@
         <meta charset="UTF-8" />
         <meta http-equiv="X-UA-Compatible" content="IE=edge" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <meta
-            http-equiv="Content-Security-Policy"
-            content="default-src 'none'; img-src https: data: vscode-resource:; style-src 'unsafe-inline' https:; script-src 'self' 'unsafe-inline'; font-src https: data:; connect-src https: vscode-resource:;"
-        />
+        <!-- CSP will be injected by webviewHelpers.ts -->
         <title>Code Ingest Control Center</title>
-        <link rel="stylesheet" href="styles.css" />
-        <script type="module" src="store.js" defer></script>
-        <script type="module" src="commandRegistry.js" defer></script>
-        <script src="commandMap.generated.js" defer></script>
-        <script type="module" src="main.js" defer></script>
+        <link rel="stylesheet" href="./styles.css" />
+        <script type="module" src="./store.js" defer></script>
+        <script type="module" src="./commandRegistry.js" defer></script>
+        <script src="./commandMap.generated.js" defer></script>
+        <script type="module" src="./main.js" defer></script>
     </head>
     <body data-app-theme="dark">
         <!-- INITIAL_STATE -->
@@ -59,7 +56,7 @@
         <div class="dashboard" id="dashboard">
             <header class="dashboard__header" role="banner">
                 <div class="dashboard__title-group">
-                    <img class="dashboard__logo" src="../icons/icon.png" data-webview-src="../icons/icon.png" alt="Code Ingest" />
+                    <img class="dashboard__logo" src="./icons/icon.png" alt="Code Ingest" />
                     <div class="dashboard__headline">
                         <h1 class="dashboard__title">Code Ingest Control Center</h1>
                         <p class="dashboard__subtitle" id="workspace-slug" aria-live="polite">Workspace ready</p>

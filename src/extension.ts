@@ -2,9 +2,9 @@ import { performance } from "node:perf_hooks";
 import * as vscode from "vscode";
 import { registerAllCommands } from "./commands";
 import type { CommandServices } from "./commands/types";
+import { COMMAND_MAP } from "./commands/commandMap";
 import { DashboardViewProvider } from "./providers/dashboardViewProvider";
 import { PerformanceDashboardProvider } from "./providers/performanceDashboardProvider";
-import { CodeIngestTreeProvider } from "./tree/codeIngestTreeProvider";
 import { ConfigurationService } from "./services/configurationService";
 import { Diagnostics } from "./services/diagnostics";
 import { ErrorReporter } from "./services/errorReporter";
@@ -16,6 +16,9 @@ import { WebviewPanelManager } from "./webview/webviewPanelManager";
 import { DEFAULT_CONFIG } from "./config/constants";
 import type { Logger } from "./utils/gitProcessManager";
 import { GitProcessManager } from "./utils/gitProcessManager";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { spawnSync } from "node:child_process";
 
 let errorReporter: ErrorReporter | undefined;
 let outputChannel: vscode.OutputChannel | undefined;
@@ -129,6 +132,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(outputChannel, errorChannel);
   outputChannel.appendLine("[activation] Starting Code Ingest activation sequence...");
 
+  // Ensure webview resources are present in out/resources/webview - helpful in development
+  try {
+    const webviewOutIndex = path.join(context.extensionPath, "out", "resources", "webview", "index.html");
+    if (!fs.existsSync(webviewOutIndex)) {
+      outputChannel.appendLine("[activation] Webview build artifacts not found. Running webview copy script...");
+      const script = path.join(context.extensionPath, "scripts", "copyWebviewResources.js");
+      const result = spawnSync(process.execPath, [script], { cwd: context.extensionPath, encoding: "utf8" });
+      if (result.error) {
+        errorChannel.appendLine(`[activation] Failed to run webview copy script: ${result.error.message}`);
+      } else if (result.status !== 0) {
+        errorChannel.appendLine(`[activation] Webview copy script exited with code ${result.status}: ${result.stderr}`);
+      } else {
+        outputChannel.appendLine("[activation] Webview assets copied successfully.");
+      }
+    }
+  } catch (err) {
+    errorChannel.appendLine(`[activation] Webview asset check failed: ${(err as Error).message}`);
+  }
+
   const diagnostics = new Diagnostics();
 
   const diagnosticsAdapter = {
@@ -188,38 +210,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   processHandlers.push(() => process.off("unhandledRejection", unhandledRejectionHandler));
   context.subscriptions.push({ dispose: () => processHandlers.forEach((dispose) => dispose()) });
 
-  const treeProviders = new Map<string, CodeIngestTreeProvider>();
-  const treeViews = new Map<string, vscode.TreeView<vscode.TreeItem>>();
-  const ensureTreeForFolder = (folder: vscode.WorkspaceFolder): void => {
-    const key = folder.uri.fsPath;
-    if (treeProviders.has(key)) {
-      return;
-    }
-    const provider = new CodeIngestTreeProvider(folder);
-    const view = vscode.window.createTreeView("codeIngestExplorer", {
-      treeDataProvider: provider,
-      showCollapseAll: true
-    });
-    treeProviders.set(key, provider);
-    treeViews.set(key, view);
-    context.subscriptions.push(view);
-  };
-
-  vscode.workspace.workspaceFolders?.forEach(ensureTreeForFolder);
-  const workspaceWatcher = vscode.workspace.onDidChangeWorkspaceFolders((event) => {
-    event.added.forEach(ensureTreeForFolder);
-    event.removed.forEach((folder) => {
-      const key = folder.uri.fsPath;
-      const view = treeViews.get(key);
-      if (view) {
-        view.dispose();
-        treeViews.delete(key);
-      }
-      treeProviders.delete(key);
-    });
-  });
-  context.subscriptions.push(workspaceWatcher);
-
   const webviewPanelManager = new WebviewPanelManager(context.extensionUri);
   const dashboardProvider = new DashboardViewProvider(context.extensionUri, errorReporter);
   const webviewViewDisposable = vscode.window.registerWebviewViewProvider("codeIngestDashboard", dashboardProvider, {
@@ -241,19 +231,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   context.subscriptions.push(performanceDashboardDisposable, { dispose: () => performanceDashboardProvider.dispose() });
 
+  const buildPanelState = (): Record<string, unknown> => ({
+    config: configurationService.getConfig(),
+    diagnostics: diagnostics.getAll()
+  });
+
   const services: CommandServices = {
     diagnostics,
     gitignoreService,
     workspaceManager,
     webviewPanelManager,
-    treeProviders,
     performanceMonitor,
     diagnosticService
   };
 
   registerAllCommands(context, services);
 
+  webviewPanelManager.setStateSnapshot(buildPanelState(), { emit: false });
+
   const manualCommands: Array<[string, (...args: unknown[]) => Promise<unknown> | unknown]> = [
+    [
+      COMMAND_MAP.WEBVIEW_TO_HOST.WEBVIEW_READY,
+      async () => {
+        if (!webviewPanelManager.tryRestoreState()) {
+          webviewPanelManager.setStateSnapshot(buildPanelState());
+          webviewPanelManager.tryRestoreState();
+        }
+      }
+    ],
     ["codeIngest.openDashboardPanel", () => webviewPanelManager.createAndShowPanel()],
     [
       "codeIngest.showPerformanceDashboard",
@@ -267,8 +272,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await vscode.window.showInformationMessage("Code Ingest: Error reports flushed to output channel.");
     }],
     ["codeIngest.viewMetrics", async () => {
-      const message = `Tree providers: ${treeProviders.size}`;
-      outputChannel?.appendLine(`[metrics] ${message}`);
+      outputChannel?.appendLine("[metrics] Dashboard and services operational.");
       await vscode.window.showInformationMessage(`Code Ingest metrics available in output channel.`);
     }],
     ["codeIngest.toggleRedactionOverride", async () => {
@@ -295,6 +299,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const configListener = vscode.workspace.onDidChangeConfiguration((event) => {
     if (event.affectsConfiguration("codeIngest")) {
       outputChannel?.appendLine("[config] codeIngest configuration changed");
+      webviewPanelManager.setStateSnapshot(buildPanelState());
     }
   });
   context.subscriptions.push(configListener);

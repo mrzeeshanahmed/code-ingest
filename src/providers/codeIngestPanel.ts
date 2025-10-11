@@ -48,13 +48,30 @@ export class CodeIngestPanel {
       {
         enableScripts: true,
         retainContextWhenHidden: true,
-        localResourceRoots: [vscode.Uri.joinPath(extensionUri, "resources", "webview")]
+        localResourceRoots: [vscode.Uri.joinPath(extensionUri, "out", "resources", "webview")]
       }
     );
 
+    console.log('CodeIngestPanel: WebviewPanel created successfully', {
+      viewType: panel.viewType,
+      title: panel.title,
+      localResourceRoots: [vscode.Uri.joinPath(extensionUri, "out", "resources", "webview").toString()]
+    });
+
     CodeIngestPanel.instance = new CodeIngestPanel(panel, extensionUri, sessionToken);
-    const htmlPath = vscode.Uri.joinPath(extensionUri, "resources", "webview", "index.html").fsPath;
+    const htmlPath = vscode.Uri.joinPath(extensionUri, "out", "resources", "webview", "index.html").fsPath;
+    
+    console.log('CodeIngestPanel: Loading HTML from', htmlPath);
     setWebviewHtml(panel.webview, htmlPath, { sessionToken });
+  }
+
+  static restoreState(state: unknown): boolean {
+    if (!CodeIngestPanel.instance) {
+      return false;
+    }
+
+    CodeIngestPanel.instance.updateState(state);
+    return true;
   }
 
   updateState(state: unknown): void {

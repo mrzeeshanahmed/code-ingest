@@ -24,3 +24,6 @@ Icon?
 .idea/
 .vscode/
 *.sw?
+
+WEBVIEW_RESOURCE_FIX_APPLIED.md
+WEBVIEW_FIX_VERIFICATION.md

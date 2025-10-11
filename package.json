@@ -3,15 +3,15 @@
   "displayName": "Code Ingest",
   "description": "Professional codebase digest generation with advanced filtering and remote repository support",
   "version": "1.0.0",
-  "publisher": "your-publisher",
+  "publisher": "mrzeeshanahmed",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/code-ingest.git"
+    "url": "https://github.com/mrzeeshanahmed/code-ingest.git"
   },
   "bugs": {
-    "url": "https://github.com/your-org/code-ingest/issues"
+    "url": "https://github.com/mrzeeshanahmed/code-ingest/issues"
   },
-  "homepage": "https://github.com/your-org/code-ingest#readme",
+  "homepage": "https://github.com/mrzeeshanahmed/code-ingest#readme",
   "license": "MIT",
   "keywords": [
     "codebase",
@@ -50,7 +50,6 @@
     },
     "views": {
       "codeIngest": [
-      
         {
           "id": "codeIngestDashboard",
           "name": "Code Ingest Dashboard",
@@ -67,10 +66,6 @@
       ]
     },
     "viewsWelcome": [
-      {
-        "view": "codeIngestExplorer",
-        "contents": "Scan your workspace to build a digest.\n[Open the dashboard](command:codeIngest.openDashboardPanel) to configure filters."
-      },
       {
         "view": "codeIngestDashboard",
         "contents": "No digests yet.\n[Open the dashboard](command:codeIngest.openDashboardPanel) to get started."
@@ -161,8 +156,7 @@
     "ci": "npm run lint && npm run type-check && npm run test:unit && npm run test:integration && npm run check-bundle-size && npm run check-webview-assets && npm run check-handlers-coverage && npm run build"
   },
   "dependencies": {
-    "minimatch": "^9.0.4",
-    "zustand": "^4.5.2"
+    "minimatch": "^9.0.4"
   },
   "devDependencies": {
     "@babel/core": "^7.28.4",

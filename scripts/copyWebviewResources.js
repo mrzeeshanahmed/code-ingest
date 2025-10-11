@@ -7,7 +7,9 @@ const path = require('node:path');
 const os = require('node:os');
 
 const SRC_DIR = path.resolve(__dirname, '..', 'resources', 'webview');
+const ICONS_SRC_DIR = path.resolve(__dirname, '..', 'resources', 'icons');
 const DEST_DIR = path.resolve(__dirname, '..', 'out', 'resources', 'webview');
+const ICONS_DEST_DIR = path.resolve(__dirname, '..', 'out', 'resources', 'webview', 'icons');
 const MANIFEST_FILENAME = 'externals.json';
 const MANIFEST_PATH = path.join(DEST_DIR, MANIFEST_FILENAME);
 const ALLOWED_EXTENSIONS = new Set(['.html', '.js', '.css', '.json', '.svg', '.png']);
@@ -180,8 +182,23 @@ async function main() {
 
   await ensureSourceDir();
   const files = await collectFiles(SRC_DIR);
+  
+  // Also collect icon files
+  try {
+    const iconFiles = await collectFiles(ICONS_SRC_DIR, ICONS_SRC_DIR);
+    // Prefix icon files with 'icons/' in their relative path
+    iconFiles.forEach(file => {
+      file.relativePath = path.join('icons', file.relativePath);
+    });
+    files.push(...iconFiles);
+    logProgress(`Found ${iconFiles.length} icon file(s).`);
+  } catch (error) {
+    logProgress(`Warning: Could not copy icons: ${error.message}`);
+  }
+  
   validateRequiredFiles(files);
   await ensureDestDir();
+  await fsp.mkdir(ICONS_DEST_DIR, { recursive: true });
 
   logProgress(`Found ${files.length} asset${files.length === 1 ? '' : 's'} to evaluate.`);
 

@@ -2,17 +2,14 @@
  * Follow instructions in copilot-instructions.md exactly.
  */
 
-import { createStore as createZustandStore } from "zustand/vanilla";
-import { devtools, persist, subscribeWithSelector } from "zustand/middleware";
+import { createStore as createSimpleStore } from "../vendor/simpleStore.js";
 
-import { createInitialState, deserializeState, dehydrateSets } from "./state.js";
+import { createInitialState, deserializeState, dehydrateSets, serializeState } from "./state.js";
 import { createActions } from "./actions.js";
 import { createMiddlewarePipeline } from "./middleware.js";
 import { registerStateSync } from "./sync.js";
 
 const PERSIST_KEY = "code-ingest-webview";
-
-const isDevtoolsAvailable = () => typeof window !== "undefined" && !!window.__REDUX_DEVTOOLS_EXTENSION__;
 
 const createStorage = (storageImpl) => {
   const storage = storageImpl ?? (typeof window !== "undefined" ? window.localStorage : undefined);
@@ -137,6 +134,36 @@ const fromLegacyState = (state) => {
   return next;
 };
 
+const loadPersistedState = (storageAdapter) => {
+  try {
+    const raw = storageAdapter.getItem(PERSIST_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    const snapshot = parsed?.state ?? parsed;
+    if (!snapshot) {
+      return null;
+    }
+    return deserializeState(snapshot);
+  } catch (error) {
+    console.warn("store.persist.load.failed", error);
+    return null;
+  }
+};
+
+const writePersistedState = (storageAdapter, state) => {
+  try {
+    const payload = {
+      state: serializeState(persistPartialize(state)),
+      version: 1
+    };
+    storageAdapter.setItem(PERSIST_KEY, JSON.stringify(payload));
+  } catch (error) {
+    console.warn("store.persist.save.failed", error);
+  }
+};
+
 export const createWebviewStore = ({
   initialState,
   logger,
@@ -160,33 +187,25 @@ export const createWebviewStore = ({
     return nextState;
   };
 
-  const enhanceWithPersist = persist(initializer, {
-    name: PERSIST_KEY,
-    version: 1,
-    storage: createStorage(storage),
-    partialize: persistPartialize,
-    merge: (persistedState, currentState) => {
-      if (!persistedState) {
-        return currentState;
-      }
-      const merged = withLegacyMirrors({
-        ...currentState,
-        ...deserializeState(persistedState)
-      });
-      return merged;
-    }
+  const storageAdapter = createStorage(storage);
+  const pipeline = createMiddlewarePipeline(initializer, logger);
+  const store = createSimpleStore(pipeline);
+
+  const persistedSnapshot = loadPersistedState(storageAdapter);
+  if (persistedSnapshot) {
+    store.setState(
+      withLegacyMirrors({
+        ...store.getState(),
+        ...persistedSnapshot
+      }),
+      true,
+      "persist.rehydrate"
+    );
+  }
+
+  store.subscribe((nextState) => {
+    writePersistedState(storageAdapter, nextState);
   });
-
-  const devtoolsWrap = (stateCreator) =>
-    isDevtoolsAvailable()
-      ? devtools(stateCreator, { name: "code-ingest-webview" })
-      : stateCreator;
-
-  const pipeline = subscribeWithSelector(
-    createMiddlewarePipeline(devtoolsWrap(enhanceWithPersist), logger)
-  );
-
-  const store = createZustandStore(pipeline);
 
   if (enableSync) {
     registerStateSync(store);
@@ -196,6 +215,8 @@ export const createWebviewStore = ({
 
   return {
     ...store,
-    getActions
+    getActions,
+    loadPersistedState,
+    writePersistedState
   };
 };

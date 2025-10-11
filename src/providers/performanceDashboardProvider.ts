@@ -38,8 +38,8 @@ export class PerformanceDashboardProvider implements vscode.WebviewViewProvider 
     this.webview.options = {
       enableScripts: true,
       localResourceRoots: [
-        vscode.Uri.joinPath(this.context.extensionUri, "resources", "webview"),
-        vscode.Uri.joinPath(this.context.extensionUri, "resources", "webview", "performanceDashboard")
+        vscode.Uri.joinPath(this.context.extensionUri, "out", "resources", "webview"),
+        vscode.Uri.joinPath(this.context.extensionUri, "out", "resources", "webview", "performanceDashboard")
       ]
     };
 
