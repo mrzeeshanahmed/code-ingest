@@ -69,6 +69,11 @@ const applyLegacyPatch = (store, patch) => {
     delete remaining.viewState;
   }
 
+  if (Object.prototype.hasOwnProperty.call(remaining, "redactionOverride")) {
+    actions.config.update({ redactionOverride: Boolean(remaining.redactionOverride) });
+    delete remaining.redactionOverride;
+  }
+
   if (Object.keys(remaining).length > 0) {
     store.setState(remaining, false, "legacy.patch");
   }

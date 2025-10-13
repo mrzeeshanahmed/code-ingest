@@ -156,7 +156,8 @@ export class WebviewApplication {
     this.commandRegistry = new CommandRegistry({
       postMessage: (payload) => this.vscode.postMessage(payload),
       logger: this.logger,
-      envelope
+      envelope,
+      acknowledgeTimeout: 120000
     });
 
     const inboundCommandBindings = new Map([

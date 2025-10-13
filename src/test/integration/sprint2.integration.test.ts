@@ -20,6 +20,7 @@ import { ConfigurationService } from "../../services/configurationService";
 import { DEFAULT_CONFIG } from "../../config/constants";
 import { formatDigest } from "../../utils/digestFormatters";
 import { Diagnostics, type DigestConfig } from "../../utils/validateConfig";
+import type { Logger } from "../../utils/gitProcessManager";
 import { configureWorkspaceEnvironment, resetWorkspaceEnvironment } from "../support/workspaceEnvironment";
 
 interface TestFile {
@@ -202,6 +203,7 @@ describe("Sprint 2 Integration: Content Processing Pipeline", () => {
   let filterService: FilterService;
   let configurationService: ConfigurationService;
   let errorReporter: ErrorReporter;
+  let logger: Logger;
   let outputChannel: vscode.OutputChannel;
 
   beforeAll(() => {
@@ -259,7 +261,13 @@ describe("Sprint 2 Integration: Content Processing Pipeline", () => {
 
     configurationService = new ConfigurationService(config, createDiagnostics());
     outputChannel = vscode.window.createOutputChannel("sprint2-test");
-    errorReporter = new ErrorReporter(outputChannel);
+    logger = {
+      debug: jest.fn(),
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn()
+    };
+    errorReporter = new ErrorReporter(configurationService, logger);
 
     digestGenerator = new DigestGenerator(
       fileScanner,
@@ -765,7 +773,13 @@ describe("Format Consistency", () => {
       exclude: ["**/*.skip"],
       maxFiles: 50
     }, createDiagnostics());
-    const errorReporter = new ErrorReporter(vscode.window.createOutputChannel("format-consistency"));
+    const formatLogger: Logger = {
+      debug: jest.fn(),
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn()
+    };
+    const errorReporter = new ErrorReporter(configurationService, formatLogger);
 
     digestGenerator = new DigestGenerator(
       fileScanner,

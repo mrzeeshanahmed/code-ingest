@@ -51,26 +51,13 @@
     "views": {
       "codeIngest": [
         {
-          "id": "codeIngestDashboard",
-          "name": "Code Ingest Dashboard",
           "type": "webview",
-          "icon": "resources/icons/icon.svg"
-        },
-        {
-          "type": "webview",
-          "id": "codeIngest.performanceDashboard",
-          "name": "Performance Dashboard",
-          "when": "config.codeIngest.showPerformanceDashboard",
+          "id": "codeIngest.dashboard",
+          "name": "Dashboard",
           "icon": "resources/icons/icon.svg"
         }
       ]
     },
-    "viewsWelcome": [
-      {
-        "view": "codeIngestDashboard",
-        "contents": "No digests yet.\n[Open the dashboard](command:codeIngest.openDashboardPanel) to get started."
-      }
-    ],
     "commands": [
       {
         "command": "codeIngest.generateDigest",
@@ -131,9 +118,9 @@
   },
   "scripts": {
     "clean": "rimraf out dist",
-  "lint": "eslint \"./src/**/*.{ts,tsx}\"",
+    "lint": "eslint \"./src/**/*.{ts,tsx}\"",
     "type-check": "tsc --noEmit",
-    "build": "webpack --mode production",
+    "build": "npm run build:webview && webpack --mode production",
     "build:dev": "webpack --mode development",
     "build:watch": "webpack --mode development --watch",
     "build:webview": "node scripts/copyWebviewResources.js",

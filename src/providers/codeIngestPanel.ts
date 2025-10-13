@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import * as vscode from "vscode";
 import { COMMAND_MAP } from "../commands/commandMap";
 import {
@@ -59,10 +60,11 @@ export class CodeIngestPanel {
     });
 
     CodeIngestPanel.instance = new CodeIngestPanel(panel, extensionUri, sessionToken);
-    const htmlPath = vscode.Uri.joinPath(extensionUri, "out", "resources", "webview", "index.html").fsPath;
-    
-    console.log('CodeIngestPanel: Loading HTML from', htmlPath);
-    setWebviewHtml(panel.webview, htmlPath, { sessionToken });
+    const htmlRelativePath = path.posix.join("out", "resources", "webview", "index.html");
+    const htmlUri = vscode.Uri.joinPath(extensionUri, "out", "resources", "webview", "index.html");
+
+    console.log("CodeIngestPanel: Loading HTML from", htmlUri.fsPath);
+    setWebviewHtml(panel.webview, extensionUri, htmlRelativePath, { sessionToken });
   }
 
   static restoreState(state: unknown): boolean {
@@ -72,6 +74,24 @@ export class CodeIngestPanel {
 
     CodeIngestPanel.instance.updateState(state);
     return true;
+  }
+
+  static postCommand(command: string, payload: unknown, options?: { expectsAck?: boolean }): boolean {
+    const instance = CodeIngestPanel.instance;
+    if (!instance) {
+      return false;
+    }
+
+    try {
+      const messageOptions =
+        typeof options?.expectsAck === "boolean" ? { expectsAck: options.expectsAck } : undefined;
+      const message = instance.envelope.createMessage("command", command, payload, messageOptions);
+      void instance.panel.webview.postMessage(message);
+      return true;
+    } catch (error) {
+      console.error("CodeIngestPanel: failed to post command", command, error);
+      return false;
+    }
   }
 
   updateState(state: unknown): void {

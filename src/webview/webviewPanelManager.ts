@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 import { CodeIngestPanel } from "../providers/codeIngestPanel";
+import { DashboardViewProvider } from "../providers/dashboardViewProvider";
+import type { HostCommandId } from "../commands/commandMap";
 
 type PanelState = Record<string, unknown>;
 
@@ -12,8 +14,15 @@ export class WebviewPanelManager {
     if (state) {
       this.setStateSnapshot(state, { emit: false });
     }
-
-    void CodeIngestPanel.createOrShow(this.extensionUri);
+    const focusCommand = `${DashboardViewProvider.viewType}.focus`;
+    void vscode.commands
+      .executeCommand(focusCommand)
+      .then(
+        undefined,
+        () => {
+          void CodeIngestPanel.createOrShow(this.extensionUri);
+        }
+      );
   }
 
   setStateSnapshot(state: PanelState, options?: { emit?: boolean }): void {
@@ -23,8 +32,13 @@ export class WebviewPanelManager {
     if (options?.emit === false) {
       return;
     }
-
-    CodeIngestPanel.restoreState({ ...nextState });
+    const snapshot = { ...nextState };
+    const delivered = DashboardViewProvider.restoreState(snapshot);
+    if (!delivered) {
+      CodeIngestPanel.restoreState({ ...snapshot });
+      return;
+    }
+    CodeIngestPanel.restoreState({ ...snapshot });
   }
 
   getStateSnapshot(): PanelState | undefined {
@@ -35,7 +49,18 @@ export class WebviewPanelManager {
     if (!this.stateSnapshot) {
       return false;
     }
+    const snapshot = { ...this.stateSnapshot };
+    const viewRestored = DashboardViewProvider.restoreState({ ...snapshot });
+    const panelRestored = CodeIngestPanel.restoreState({ ...snapshot });
+    return viewRestored || panelRestored;
+  }
 
-    return CodeIngestPanel.restoreState({ ...this.stateSnapshot });
+  sendCommand(command: HostCommandId, payload: unknown, options?: { expectsAck?: boolean }): void {
+    const deliveredToView = DashboardViewProvider.postCommand(command, payload, options);
+    const deliveredToPanel = CodeIngestPanel.postCommand(command, payload, options);
+
+    if (!deliveredToView && !deliveredToPanel) {
+      console.warn("WebviewPanelManager: unable to deliver command", { command });
+    }
   }
 }

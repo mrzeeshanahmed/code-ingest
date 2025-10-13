@@ -7,6 +7,7 @@ import type { CommandServices } from "./types";
 import { authenticate, partialClone, resolveRefToSha } from "../services/githubService";
 import { spawnGitPromise } from "../utils/procRedact";
 import { DigestGenerator } from "../services/digestGenerator";
+import type { DigestResult } from "../services/digestGenerator";
 import { ContentProcessor, type BinaryFilePolicy } from "../services/contentProcessor";
 import { TokenAnalyzer } from "../services/tokenAnalyzer";
 import { GitignoreService } from "../services/gitignoreService";
@@ -20,6 +21,7 @@ import { formatDigest } from "../utils/digestFormatters";
 import type { Logger } from "../utils/gitProcessManager";
 
 const EXCLUDED_DIRECTORIES = new Set([".git", "node_modules"]);
+const MAX_PREVIEW_LENGTH = 60_000;
 
 function formatLogContext(context?: Record<string, unknown>): string {
   if (!context) {
@@ -69,6 +71,32 @@ function normalizeSubpath(input: string): string {
   return converted.replace(/^\/+/, "").replace(/\/+$/u, "");
 }
 
+function clampPreview(content: string): { text: string; truncated: boolean } {
+  if (content.length <= MAX_PREVIEW_LENGTH) {
+    return { text: content, truncated: false };
+  }
+  return {
+    text: `${content.slice(0, MAX_PREVIEW_LENGTH)}\n\n… (preview truncated)`,
+    truncated: true
+  };
+}
+
+function buildPreviewFromOutcome(outcome: IngestOutcome) {
+  const { text, truncated } = clampPreview(outcome.digest);
+  const overview = outcome.digestResult.content.summary.overview;
+
+  return {
+    title: `Remote digest · ${outcome.repoSlug}`,
+    subtitle: `${overview.includedFiles} files · ${overview.totalTokens} tokens`,
+    content: text,
+    truncated,
+    tokenCount: {
+      total: outcome.totalTokens
+    },
+    metadata: outcome.digestResult.content.metadata
+  } as const;
+}
+
 function throwIfCancelled(token: vscode.CancellationToken): void {
   if (token.isCancellationRequested) {
     throw new vscode.CancellationError();
@@ -107,6 +135,7 @@ async function collectFilesRecursive(rootDir: string, token: vscode.Cancellation
 
 interface IngestOutcome {
   digest: string;
+  digestResult: DigestResult;
   repoSlug: string;
   sha: string;
   totalTokens: number;
@@ -177,6 +206,20 @@ export function registerIngestRemoteRepoCommand(
       }.`
     );
 
+    services.webviewPanelManager.createAndShowPanel();
+    services.webviewPanelManager.setStateSnapshot({
+      status: "digest-running",
+      preview: null,
+      progress: {
+        phase: "ingest",
+        percent: undefined,
+        message: "Preparing remote ingestion…",
+        busy: true,
+        filesProcessed: 0,
+        totalFiles: 0
+      }
+    });
+
     let outcome: IngestOutcome | undefined;
     try {
       outcome = await vscode.window.withProgress<IngestOutcome>({
@@ -184,28 +227,44 @@ export function registerIngestRemoteRepoCommand(
         title: `Code Ingest: Ingesting ${repoSlug}@${trimmedRef}`,
         cancellable: true
       }, async (progress, cancellationToken) => {
-  let tempDir: string | undefined;
-  let token: string | undefined;
+        let tempDir: string | undefined;
+        let token: string | undefined;
+
+        const updatePanelProgress = (message: string) => {
+          const safeMessage = message || "Remote ingestion in progress…";
+          services.webviewPanelManager.setStateSnapshot({
+            status: "digest-running",
+            progress: {
+              phase: "ingest",
+              percent: undefined,
+              message: safeMessage,
+              busy: true,
+              filesProcessed: 0,
+              totalFiles: 0
+            }
+          });
+          progress.report({ message: safeMessage });
+        };
 
         throwIfCancelled(cancellationToken);
-        progress.report({ message: "Authenticating with GitHub..." });
+        updatePanelProgress("Authenticating with GitHub…");
         token = await authenticate();
         if (!token) {
           throw new Error("GitHub authentication failed or was cancelled.");
         }
 
         throwIfCancelled(cancellationToken);
-        progress.report({ message: "Resolving repository reference..." });
+  updatePanelProgress("Resolving repository reference…");
         const sha = await resolveRefToSha(repoSlug, trimmedRef, token);
 
         throwIfCancelled(cancellationToken);
-        progress.report({ message: "Cloning repository (blobless)..." });
+  updatePanelProgress("Cloning repository (blobless)…");
         const { tempDir: cloneDir } = await partialClone(repoSlug, token);
         tempDir = cloneDir;
 
         try {
           throwIfCancelled(cancellationToken);
-          progress.report({ message: "Fetching requested reference..." });
+          updatePanelProgress("Fetching requested reference…");
 
           try {
             await spawnGitPromise(["-C", tempDir, "fetch", "--depth=1", "origin", trimmedRef], {
@@ -220,7 +279,7 @@ export function registerIngestRemoteRepoCommand(
           }
 
           throwIfCancelled(cancellationToken);
-          progress.report({ message: "Checking out target commit..." });
+          updatePanelProgress("Checking out target commit…");
           await spawnGitPromise(["-C", tempDir, "checkout", sha], {
             secretsToRedact: [token]
           });
@@ -257,7 +316,7 @@ export function registerIngestRemoteRepoCommand(
           }
 
           throwIfCancelled(cancellationToken);
-          progress.report({ message: "Preparing ingestion pipeline..." });
+          updatePanelProgress("Preparing ingestion pipeline…");
 
           const uniqueFiles = Array.from(new Set(filesToProcess.map((filePath) => path.resolve(filePath))));
           const configurationMessages: string[] = [];
@@ -301,7 +360,7 @@ export function registerIngestRemoteRepoCommand(
 
           try {
             throwIfCancelled(cancellationToken);
-            progress.report({ message: "Generating repository digest..." });
+            updatePanelProgress("Generating repository digest…");
 
             const digestGenerator = new DigestGenerator(
               fileScanner,
@@ -331,7 +390,7 @@ export function registerIngestRemoteRepoCommand(
                   update.tokensProcessed ? `${update.tokensProcessed} tokens` : undefined
                 ].filter(Boolean);
 
-                progress.report({ message: segments.join(" · ") });
+                updatePanelProgress(segments.join(" · "));
               }
             });
 
@@ -344,6 +403,7 @@ export function registerIngestRemoteRepoCommand(
 
             return {
               digest: formattedDigest,
+              digestResult,
               repoSlug,
               sha,
               totalTokens: digestResult.statistics.totalTokens,
@@ -367,11 +427,23 @@ export function registerIngestRemoteRepoCommand(
       });
     } catch (error) {
       if (error instanceof vscode.CancellationError) {
+        services.webviewPanelManager.setStateSnapshot({
+          progress: null,
+          status: null
+        });
         services.diagnostics.add("Remote ingestion cancelled by the user.");
         return;
       }
 
       const message = error instanceof Error ? error.message : String(error);
+      services.webviewPanelManager.setStateSnapshot({
+        progress: null,
+        status: null
+      });
+      services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
+        title: "Remote ingestion failed",
+        message
+      });
       services.diagnostics.add(`Remote ingestion failed: ${message}`);
       void vscode.window.showErrorMessage(`Code Ingest: Failed to ingest repository. ${message}`);
       return;
@@ -380,6 +452,21 @@ export function registerIngestRemoteRepoCommand(
     if (!outcome) {
       return;
     }
+
+    const preview = buildPreviewFromOutcome(outcome);
+    const overview = outcome.digestResult.content.summary.overview;
+    services.webviewPanelManager.setStateSnapshot({
+      preview,
+      progress: null,
+      status: "digest-ready",
+      lastDigest: {
+        generatedAt: outcome.digestResult.content.metadata.generatedAt.toISOString(),
+        redactionApplied: outcome.digestResult.redactionApplied,
+        truncationApplied: outcome.digestResult.truncationApplied,
+        totalTokens: outcome.digestResult.statistics.totalTokens,
+        totalFiles: overview.includedFiles
+      }
+    });
 
     for (const diagnostic of outcome.diagnostics) {
       services.diagnostics.add(diagnostic);

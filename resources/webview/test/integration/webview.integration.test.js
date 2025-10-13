@@ -2,11 +2,19 @@
  * Follow instructions in copilot-instructions.md exactly.
  */
 
-const { WebviewApplication } = require("../../main.js");
-const { COMMAND_MAP } = require("../../commandMap.js");
 const { TestUtils, mockVSCodeAPI } = require("../setup.js");
 
-describe("Webview integration", () => {
+let WebviewApplication;
+let COMMAND_MAP;
+
+if (typeof window !== "undefined") {
+  ({ WebviewApplication } = require("../../main.js"));
+  ({ COMMAND_MAP } = require("../../commandMap.js"));
+}
+
+const describeOrSkip = typeof window === "undefined" ? describe.skip : describe;
+
+describeOrSkip("Webview integration", () => {
   let app;
 
   beforeEach(async () => {

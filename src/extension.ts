@@ -1,10 +1,10 @@
 import { performance } from "node:perf_hooks";
 import * as vscode from "vscode";
 import { registerAllCommands } from "./commands";
+import { hydrateRedactionOverride } from "./commands/redactionCommands";
 import type { CommandServices } from "./commands/types";
 import { COMMAND_MAP } from "./commands/commandMap";
 import { DashboardViewProvider } from "./providers/dashboardViewProvider";
-import { PerformanceDashboardProvider } from "./providers/performanceDashboardProvider";
 import { ConfigurationService } from "./services/configurationService";
 import { Diagnostics } from "./services/diagnostics";
 import { ErrorReporter } from "./services/errorReporter";
@@ -183,14 +183,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     error: (message, context) => errorChannel.appendLine(`[error] ${message}${formatLogContext(context)}`)
   };
 
-  errorReporter = new ErrorReporter(configurationService, logger);
-  context.subscriptions.push(errorReporter);
+  const reporter = new ErrorReporter(configurationService, logger);
+  errorReporter = reporter;
+  context.subscriptions.push(reporter);
 
   activationTelemetry = new Telemetry(outputChannel, !isDevelopment);
   activationTelemetry.start("activation");
 
   const gitignoreService = new GitignoreService();
   const workspaceManager = new WorkspaceManager(diagnostics, gitignoreService);
+  await workspaceManager.initialize();
+  hydrateRedactionOverride(context, workspaceManager);
 
   const performanceMonitor = new PerformanceMonitor(logger, configurationService);
   const gitProcessManager = new GitProcessManager(logger, errorReporter);
@@ -211,30 +214,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push({ dispose: () => processHandlers.forEach((dispose) => dispose()) });
 
   const webviewPanelManager = new WebviewPanelManager(context.extensionUri);
-  const dashboardProvider = new DashboardViewProvider(context.extensionUri, errorReporter);
-  const webviewViewDisposable = vscode.window.registerWebviewViewProvider("codeIngestDashboard", dashboardProvider, {
-    webviewOptions: {
-      retainContextWhenHidden: true
-    }
-  });
-  context.subscriptions.push(webviewViewDisposable);
 
-  const performanceDashboardProvider = new PerformanceDashboardProvider(context, performanceMonitor, diagnosticService);
-  const performanceDashboardDisposable = vscode.window.registerWebviewViewProvider(
-    PerformanceDashboardProvider.viewType,
-    performanceDashboardProvider,
-    {
-      webviewOptions: {
-        retainContextWhenHidden: true
-      }
-    }
+  const dashboardViewProvider = new DashboardViewProvider(context.extensionUri, webviewPanelManager);
+  const dashboardDisposable = vscode.window.registerWebviewViewProvider(
+    DashboardViewProvider.viewType,
+    dashboardViewProvider
   );
-  context.subscriptions.push(performanceDashboardDisposable, { dispose: () => performanceDashboardProvider.dispose() });
+  context.subscriptions.push(dashboardDisposable, { dispose: () => dashboardViewProvider.dispose() });
 
-  const buildPanelState = (): Record<string, unknown> => ({
-    config: configurationService.getConfig(),
-    diagnostics: diagnostics.getAll()
-  });
+  const buildPanelState = (): Record<string, unknown> => {
+    const configSnapshot = configurationService.getConfig();
+    const workspaceState = workspaceManager.getStateSnapshot();
+
+    const configPayload = { ...configSnapshot, redactionOverride: workspaceState.redactionOverride };
+
+    return {
+      config: configPayload,
+      diagnostics: diagnostics.getAll(),
+      tree: workspaceState.tree,
+      selection: workspaceState.selection,
+      expandState: workspaceState.expandState,
+      warnings: workspaceState.warnings,
+      status: workspaceState.status,
+      scanId: workspaceState.scanId,
+      totalFiles: workspaceState.totalFiles,
+      workspaceFolder: workspaceState.workspaceFolder,
+      redactionOverride: workspaceState.redactionOverride
+    } satisfies Record<string, unknown>;
+  };
 
   const services: CommandServices = {
     diagnostics,
@@ -242,7 +249,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     workspaceManager,
     webviewPanelManager,
     performanceMonitor,
-    diagnosticService
+    diagnosticService,
+    configurationService,
+    errorReporter: reporter,
+    extensionUri: context.extensionUri
   };
 
   registerAllCommands(context, services);
@@ -264,7 +274,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       "codeIngest.showPerformanceDashboard",
       async () => {
         await vscode.commands.executeCommand("workbench.view.extension.codeIngest");
-        await vscode.commands.executeCommand(`${PerformanceDashboardProvider.viewType}.focus`);
+        await vscode.commands.executeCommand(`${DashboardViewProvider.viewType}.focus`);
       }
     ],
     ["codeIngest.flushErrorReports", async () => {
@@ -274,15 +284,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ["codeIngest.viewMetrics", async () => {
       outputChannel?.appendLine("[metrics] Dashboard and services operational.");
       await vscode.window.showInformationMessage(`Code Ingest metrics available in output channel.`);
-    }],
-    ["codeIngest.toggleRedactionOverride", async () => {
-      const key = "codeIngest.redactionOverride";
-      const current = context.globalState.get<boolean>(key, false);
-      const next = !current;
-      await context.globalState.update(key, next);
-      outputChannel?.appendLine(`[redaction] override set to ${next}`);
-      await vscode.window.showInformationMessage(`Code Ingest redaction override ${next ? "enabled" : "disabled"}.`);
-      return next;
     }],
     ["codeIngest.selectNone", () => vscode.commands.executeCommand("codeIngest.deselectAll")],
     ["codeIngest.loadRemoteRepo", () => vscode.commands.executeCommand("codeIngest.ingestRemoteRepo")],
@@ -295,7 +296,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     createCommandWrapper(context, id, handler, errorReporter!);
   });
 
-  workspaceManager.initialize();
   const configListener = vscode.workspace.onDidChangeConfiguration((event) => {
     if (event.affectsConfiguration("codeIngest")) {
       outputChannel?.appendLine("[config] codeIngest configuration changed");

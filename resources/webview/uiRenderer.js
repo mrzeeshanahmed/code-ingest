@@ -2,10 +2,8 @@
  * Follow instructions in copilot-instructions.md exactly.
  */
 
-import { sanitizeRecord, sanitizeText } from "./utils/sanitizers.js";
+import { clampNumber, sanitizeRecord, sanitizeText } from "./utils/sanitizers.js";
 import { FileTreeComponent } from "./components/fileTree.js";
-import { PreviewComponent } from "./components/preview.js";
-import { ProgressComponent } from "./components/progress.js";
 import { COMMAND_MAP } from "./commandMap.js";
 
 const COMPLETION_TOAST_TIMEOUT = 3000;
@@ -25,23 +23,32 @@ export class UIRenderer {
 
     this.document = doc;
     this.vscode = window?.vscode;
-    this.dashboard = doc.querySelector(".dashboard") ?? doc.body;
-    this.treeMount = doc.querySelector(".panel--tree .panel__body");
-    this.previewMount = doc.querySelector(".panel--preview .panel__body");
-  this.statusPrimaryChip = this.dashboard.querySelector('[data-element="status-primary"]');
-  this.statusRepoChip = this.dashboard.querySelector('[data-element="status-repo"]');
-  this.statusConfigChip = this.dashboard.querySelector('[data-element="status-config"]');
-  this.previewMetaElement = this.dashboard.querySelector('[data-element="preview-meta"]');
-  this.insightConfigElement = this.dashboard.querySelector('[data-element="insight-config"]');
-  this.insightRepoElement = this.dashboard.querySelector('[data-element="insight-repo"]');
-  this.insightPerformanceElement = this.dashboard.querySelector('[data-element="insight-performance"]');
+    this.dashboard = doc.querySelector(".layout") ?? doc.body;
+    this.statusArea = doc.querySelector(".status-strip") ?? this.dashboard;
+
+    this.statusPrimaryChip = this.statusArea.querySelector('[data-element="status-primary"]')
+      ?? this.dashboard.querySelector('[data-element="status-primary"]');
+    this.statusRepoChip = this.dashboard.querySelector('[data-element="status-repo"]');
+    this.statusConfigChip = this.dashboard.querySelector('[data-element="status-config"]');
+    this.insightConfigElement = this.dashboard.querySelector('[data-element="insight-config"]');
+    this.insightRepoElement = this.dashboard.querySelector('[data-element="insight-repo"]');
+    this.insightPerformanceElement = this.dashboard.querySelector('[data-element="insight-performance"]');
+
+    this.pipelineSection = doc.querySelector("#panel-status .progress");
+    this.pipelineTrack = this.pipelineSection?.querySelector(".progress__track");
+    this.pipelineIndicator = this.pipelineSection?.querySelector(".progress__indicator");
+    this.pipelineMessage = this.pipelineSection?.querySelector(".progress__message");
+    this.pipelineLog = doc.querySelector('[data-element="status-log"]');
+    this.pipelineLogEntries = [];
+
+    this.treeHost = doc.getElementById("file-tree-host");
+    this.treePlaceholder = doc.querySelector('[data-element="tree-placeholder"]');
 
     this.selectionSet = new Set();
     this.expandedPaths = new Set();
     this.treeModel = [];
-    this.currentPreview = {};
 
-    this.fileTree = this.treeMount
+    this.fileTree = this.treeHost
       ? new FileTreeComponent({
           nodes: [],
           selectedFiles: this.selectionSet,
@@ -53,49 +60,71 @@ export class UIRenderer {
         })
       : null;
 
-    if (this.fileTree && this.treeMount) {
-      this.treeMount.replaceChildren(this.fileTree.element);
+    if (this.fileTree && this.treeHost) {
+      this.treeHost.replaceChildren(this.fileTree.element);
+      this.treeHost.hidden = false;
     }
 
-    this.previewComponent = this.previewMount
-      ? new PreviewComponent({
-          onOpenFile: () => {},
-          onCopyPreview: () => {},
-          onRequestFullContent: () => {}
-        })
-      : null;
+    this.previewArticle = doc.querySelector("article.preview");
+    this.previewTitleNode = this.previewArticle?.querySelector(".preview__title") ?? null;
+    this.previewSubtitleNode = this.previewArticle?.querySelector(".preview__subtitle") ?? null;
+    this.previewContentNode = this.previewArticle?.querySelector(".preview__content") ?? null;
+    this.previewFooterNode = this.previewArticle?.querySelector(".preview__footer") ?? null;
+    this.previewMetaElement = doc.querySelector('[data-element="preview-meta"]');
+    this.previewTruncationElement = this.previewFooterNode?.querySelector('[data-element="preview-truncation"]') ?? null;
 
-    if (this.previewComponent && this.previewMount) {
-      this.previewMount.replaceChildren(this.previewComponent.element);
-    }
-
-    this.statusArea = this.ensureStatusArea();
-    this.progressComponent = new ProgressComponent({
-      onCancel: () => this.postCommand("cancelOperation")
-    });
-    this.progressComponent.hide();
-    this.statusArea.appendChild(this.progressComponent.element);
+    this.currentPreview = {
+      previewId: null,
+      title: "",
+      subtitle: "",
+      summary: "",
+      previewText: "",
+      previewHtml: "",
+      truncated: false,
+      nodes: [],
+      metadata: {},
+      tokenCount: null,
+      stats: null
+    };
 
     this.errorBanner = null;
     this.errorMessageNode = null;
     this.repoBanner = null;
     this.configSummary = null;
-    this.tokenCountElement = null;
-    this.statsContainer = null;
     this.loadingOverlay = null;
     this.toastTimeout = null;
   }
 
   updateTree(nodes, options = {}) {
-    if (!this.fileTree) {
-      return;
-    }
+    const candidateNodes = Array.isArray(nodes) ? nodes : [];
+    this.treeModel = this.normalizeTree(candidateNodes);
 
-    this.treeModel = this.normalizeTree(Array.isArray(nodes) ? nodes : []);
     if (options.expandState) {
       this.expandedPaths = this.extractExpandedPaths(options.expandState);
     } else {
-      this.expandedPaths = this.collectExpandedPaths(Array.isArray(nodes) ? nodes : []);
+      this.expandedPaths = this.collectExpandedPaths(candidateNodes);
+    }
+
+    const hasNodes = this.treeModel.length > 0;
+    if (this.treePlaceholder) {
+      if (hasNodes) {
+        this.treePlaceholder.setAttribute("hidden", "true");
+      } else {
+        this.treePlaceholder.removeAttribute("hidden");
+      }
+    }
+
+    if (this.treeHost) {
+      this.treeHost.classList.toggle("is-empty", !hasNodes);
+      if (this.fileTree) {
+        this.treeHost.hidden = false;
+      } else {
+        this.treeHost.hidden = !hasNodes;
+      }
+    }
+
+    if (!this.fileTree) {
+      return;
     }
 
     this.fileTree.setSelection(this.selectionSet);
@@ -111,70 +140,258 @@ export class UIRenderer {
   }
 
   updatePreview(preview) {
-    if (!this.previewComponent) {
-      return;
-    }
-    const nextPreview = {
+    const sanitizedMetadata = sanitizeRecord(preview?.metadata ?? {}, (value) => sanitizeText(value, { maxLength: 2048 }));
+    const normalizedNodes = Array.isArray(preview?.nodes)
+      ? preview.nodes
+          .filter((node) => node && typeof node === "object")
+          .map((node) => ({
+            path: sanitizeText(node.path ?? node.uri ?? node.relPath ?? "", { maxLength: 1024 }),
+            snippet: sanitizeText(node.snippet ?? node.preview ?? node.text ?? "", { maxLength: 4000 }),
+            truncated: Boolean(node.truncated)
+          }))
+      : [];
+
+    this.currentPreview = {
       previewId: preview?.id ?? preview?.previewId ?? null,
-      title: preview?.title ?? "Digest preview",
-      subtitle: preview?.subtitle ?? "Live digest preview",
-      summary: preview?.summary ?? "",
-      previewText: preview?.content ?? preview?.text ?? "",
-      previewHtml: preview?.html ?? "",
+      title: sanitizeText(preview?.title ?? "Digest preview"),
+      subtitle: sanitizeText(preview?.subtitle ?? "Live digest preview"),
+      summary: sanitizeText(preview?.summary ?? "", { maxLength: 20_000 }),
+      previewText: sanitizeText(preview?.content ?? preview?.text ?? preview?.previewText ?? "", { maxLength: 200_000 }),
+      previewHtml: sanitizeText(preview?.html ?? preview?.previewHtml ?? "", { maxLength: 200_000 }),
       truncated: Boolean(preview?.truncated),
-      nodes: preview?.nodes ?? [],
-      metadata: preview?.metadata ?? {}
+      nodes: normalizedNodes,
+      metadata: sanitizedMetadata,
+      tokenCount: preview?.tokenCount ?? null,
+      stats: preview?.stats ?? null
     };
-    this.currentPreview = nextPreview;
-    this.previewComponent.updatePreview(nextPreview);
-    if (preview?.tokenCount) {
-      this.setTokenCount(preview.tokenCount);
-    }
+
+    this.renderCurrentPreview();
+    this.refreshPreviewMeta();
   }
 
   setTokenCount(tokenInfo) {
-    if (this.previewComponent) {
-      this.previewComponent.setTokenCount(tokenInfo);
-    }
+    this.currentPreview.tokenCount = tokenInfo ?? null;
+    this.refreshPreviewMeta();
   }
 
   applyPreviewDelta(delta) {
-    if (!this.previewComponent) {
+    const changes = Array.isArray(delta?.changes) ? delta.changes : [];
+    let nextText = this.currentPreview.previewText ?? "";
+    for (const change of changes) {
+      const type = change?.changeType ?? change?.op ?? "update";
+      const content = sanitizeText(change?.content ?? "", { maxLength: 200_000 });
+      if (type === "append") {
+        nextText += content;
+      } else if (type === "remove") {
+        nextText = "";
+      } else {
+        nextText = content;
+      }
+    }
+    this.currentPreview.previewText = nextText;
+    this.renderCurrentPreview();
+  }
+
+  renderCurrentPreview() {
+    const preview = this.currentPreview ?? {};
+    const title = preview.title || "Digest preview";
+    const subtitle = preview.subtitle || "";
+
+    if (this.previewTitleNode) {
+      this.previewTitleNode.textContent = title;
+    }
+
+    if (this.previewSubtitleNode) {
+      if (subtitle) {
+        this.previewSubtitleNode.textContent = subtitle;
+        this.previewSubtitleNode.removeAttribute("hidden");
+      } else {
+        this.previewSubtitleNode.textContent = "";
+        this.previewSubtitleNode.setAttribute("hidden", "true");
+      }
+    }
+
+    if (this.previewContentNode) {
+      const sections = [];
+      if (preview.summary) {
+        sections.push(preview.summary);
+      }
+      const body = preview.previewHtml || preview.previewText;
+      if (body) {
+        sections.push(body);
+      }
+      if (Array.isArray(preview.nodes) && preview.nodes.length > 0) {
+        const nodeStrings = preview.nodes
+          .filter((node) => node && (node.path || node.snippet))
+          .map((node) => {
+            const snippet = node.snippet ? `\n  ${node.snippet}` : "";
+            return `${node.path || "(unknown path)"}${snippet}`;
+          });
+        sections.push(nodeStrings.join("\n\n"));
+      }
+      const combined = sections.filter(Boolean).join("\n\n");
+      this.previewContentNode.textContent = combined || "Run a generation to populate the preview.";
+    }
+
+    if (this.previewArticle) {
+      const hasContent = Boolean(this.previewContentNode?.textContent?.trim());
+      this.previewArticle.dataset.state = hasContent ? "ready" : "empty";
+    }
+
+    if (this.previewFooterNode) {
+      const shouldShowNotice = preview.truncated === true;
+      if (shouldShowNotice) {
+        if (!this.previewTruncationElement) {
+          this.previewTruncationElement = this.document.createElement("span");
+          this.previewTruncationElement.className = "preview__truncation";
+          this.previewTruncationElement.dataset.element = "preview-truncation";
+          this.previewFooterNode.appendChild(this.previewTruncationElement);
+        }
+        this.previewTruncationElement.textContent = "Content truncated. Use copy to capture full output.";
+      } else if (this.previewTruncationElement) {
+        this.previewTruncationElement.remove();
+        this.previewTruncationElement = null;
+      }
+    }
+  }
+
+  refreshPreviewMeta() {
+    if (!this.previewMetaElement) {
       return;
     }
-    const changes = Array.isArray(delta?.changes) ? delta.changes : [];
-    this.previewComponent.applyDelta(changes);
-    this.currentPreview.previewText = this.previewComponent.state.text;
+
+    const parts = [];
+    const tokenInfo = this.currentPreview.tokenCount;
+    if (tokenInfo && typeof tokenInfo === "object") {
+      if (typeof tokenInfo.total === "number" && Number.isFinite(tokenInfo.total)) {
+        parts.push(`${tokenInfo.total.toLocaleString()} tokens`);
+      } else if (typeof tokenInfo.approx === "number" && Number.isFinite(tokenInfo.approx)) {
+        parts.push(`~${tokenInfo.approx.toLocaleString()} tokens`);
+      }
+    }
+
+    const stats = this.currentPreview.stats;
+    if (stats && typeof stats === "object") {
+      for (const [key, value] of Object.entries(stats).slice(0, 3)) {
+        const safeKey = sanitizeText(key, { maxLength: 128 });
+        const safeValue = sanitizeText(value, { maxLength: 1024 });
+        if (safeKey && safeValue) {
+          parts.push(`${safeKey}: ${safeValue}`);
+        }
+      }
+    }
+
+    if (parts.length === 0) {
+      const metadataEntries = Object.entries(this.currentPreview.metadata ?? {}).slice(0, 2);
+      for (const [metaKey, metaValue] of metadataEntries) {
+        const safeKey = sanitizeText(metaKey, { maxLength: 128 });
+        const safeValue = sanitizeText(metaValue, { maxLength: 512 });
+        if (safeKey && safeValue) {
+          parts.push(`${safeKey}: ${safeValue}`);
+        }
+      }
+    }
+
+    if (this.currentPreview.truncated) {
+      parts.push("Preview truncated");
+    }
+
+    const message = parts.length > 0 ? parts.join(" • ") : "Token usage and stats will appear here.";
+    this.previewMetaElement.textContent = message;
+  }
+
+  appendPipelineLog(entry) {
+    if (!this.pipelineLog) {
+      return;
+    }
+    const safeEntry = sanitizeText(entry, { maxLength: 4096 });
+    if (!safeEntry) {
+      return;
+    }
+
+    const lastEntry = this.pipelineLogEntries[this.pipelineLogEntries.length - 1];
+    if (lastEntry === safeEntry) {
+      return;
+    }
+
+    this.pipelineLogEntries.push(safeEntry);
+    if (this.pipelineLogEntries.length > 100) {
+      this.pipelineLogEntries.splice(0, this.pipelineLogEntries.length - 100);
+    }
+
+    this.pipelineLog.textContent = this.pipelineLogEntries.join("\n");
+    this.pipelineLog.scrollTop = this.pipelineLog.scrollHeight;
   }
 
   updateProgress(progress) {
+    const label = PROGRESS_LABELS[progress?.phase] ?? "Processing";
+    const percent = clampNumber(progress?.percent, { min: 0, max: 100, defaultValue: undefined });
+    const statusMessage = sanitizeText(progress?.message ?? label);
+
     if (!progress) {
-      this.progressComponent.hide();
+      if (this.pipelineIndicator) {
+        this.pipelineIndicator.style.width = "0%";
+      }
+      if (this.pipelineTrack) {
+        this.pipelineTrack.removeAttribute("aria-valuenow");
+      }
+      if (this.pipelineMessage) {
+        this.pipelineMessage.textContent = "Waiting for operation.";
+      }
+      if (this.pipelineSection) {
+        this.pipelineSection.dataset.phase = "idle";
+        this.pipelineSection.classList.remove("is-busy");
+      }
       if (this.statusPrimaryChip) {
         this.statusPrimaryChip.textContent = "Idle";
       }
+      if (this.insightPerformanceElement) {
+        this.insightPerformanceElement.textContent = "Idle";
+      }
+      this.toggleLoadingOverlay(false);
       return;
     }
 
-    this.progressComponent.update(progress);
-
-    const label = PROGRESS_LABELS[progress.phase] ?? "Processing";
-    const statusMessage = sanitizeText(progress.message ?? label);
-    if (this.statusPrimaryChip) {
-      this.statusPrimaryChip.textContent = statusMessage;
+    if (this.pipelineIndicator) {
+      this.pipelineIndicator.style.width = typeof percent === "number" ? `${percent}%` : "0%";
     }
+    if (this.pipelineTrack) {
+      if (typeof percent === "number") {
+        this.pipelineTrack.setAttribute("aria-valuenow", String(Math.round(percent)));
+      } else {
+        this.pipelineTrack.removeAttribute("aria-valuenow");
+      }
+      this.pipelineTrack.setAttribute("aria-label", `${label} progress`);
+    }
+    if (this.pipelineMessage) {
+      this.pipelineMessage.textContent = statusMessage || label;
+    }
+    if (this.pipelineSection) {
+      this.pipelineSection.dataset.phase = progress.phase ?? "processing";
+      const isBusy = progress.busy === true || (typeof percent === "number" && percent < 100);
+      this.pipelineSection.classList.toggle("is-busy", isBusy);
+    }
+
+    if (this.statusPrimaryChip) {
+      this.statusPrimaryChip.textContent = statusMessage || label;
+    }
+
     if (this.insightPerformanceElement) {
-      const percentText = typeof progress.percent === "number" ? `${Math.round(progress.percent)}%` : "…";
+      const percentText = typeof percent === "number" ? `${Math.round(percent)}%` : "…";
       this.insightPerformanceElement.textContent = `${label}: ${percentText}`;
     }
 
     if (progress.overlayMessage) {
       this.toggleLoadingOverlay(true, progress.overlayMessage);
-    } else if (!progress.busy) {
+    } else if (progress.busy === false && (typeof percent === "number" ? percent >= 100 : true)) {
       this.toggleLoadingOverlay(false);
     }
 
-    if (progress.phase === "ingest" && progress.percent === 100) {
+    if (typeof progress.message === "string" && progress.message.trim()) {
+      this.appendPipelineLog(`${label}: ${progress.message}`);
+    }
+
+    if (progress.phase === "ingest" && percent === 100) {
       this.showCompletionToast("Ingestion complete");
     }
   }
@@ -289,8 +506,9 @@ export class UIRenderer {
     }
 
     const safeConfig = sanitizeRecord(config ?? {});
+    const redactionOverride = Boolean(safeConfig.redactionOverride);
     const entries = Object.entries(safeConfig)
-      .filter(([, value]) => value !== undefined)
+      .filter(([key, value]) => key !== "redactionOverride" && value !== undefined)
       .map(([key, value]) => `${key}: ${value}`);
     const summary = entries.length === 0 ? "Using default configuration" : entries.join(" · ");
     this.configSummary.textContent = summary;
@@ -299,6 +517,13 @@ export class UIRenderer {
     }
     if (this.insightConfigElement) {
       this.insightConfigElement.textContent = summary;
+    }
+
+    const toggleButton = this.document.querySelector('[data-action="toggle-redaction"]');
+    if (toggleButton instanceof HTMLButtonElement) {
+      toggleButton.setAttribute("aria-pressed", redactionOverride ? "true" : "false");
+      toggleButton.classList.toggle("is-active", redactionOverride);
+      toggleButton.textContent = redactionOverride ? "Disable Redaction" : "Enable Redaction";
     }
   }
 
@@ -310,43 +535,25 @@ export class UIRenderer {
       content: result?.content ?? "",
       summary: result?.summary,
       tokenCount: result?.tokenCount,
-      nodes: result?.nodes ?? []
+      nodes: result?.nodes ?? [],
+      stats: result?.stats ?? null,
+      metadata: result?.metadata ?? {}
     });
 
-    if (result?.stats && this.previewComponent) {
-      const container = this.ensureStatsContainer();
-      container.textContent = "";
-      for (const [key, value] of Object.entries(result.stats)) {
-        const item = this.document.createElement("div");
-        item.className = "preview__stat";
-        item.textContent = `${sanitizeText(key)}: ${sanitizeText(value)}`;
-        container.appendChild(item);
-      }
-      if (this.insightPerformanceElement) {
-        const primaryStat = Object.entries(result.stats)[0];
-        if (primaryStat) {
-          const [statKey, statValue] = primaryStat;
-          this.insightPerformanceElement.textContent = `${sanitizeText(statKey)}: ${sanitizeText(statValue)}`;
-        }
+    if (result?.stats && this.insightPerformanceElement) {
+      const primaryStat = Object.entries(result.stats)[0];
+      if (primaryStat) {
+        const [statKey, statValue] = primaryStat;
+        this.insightPerformanceElement.textContent = `${sanitizeText(statKey)}: ${sanitizeText(statValue)}`;
+      } else {
+        this.insightPerformanceElement.textContent = "Digest updated";
       }
     }
 
-    if (this.previewMetaElement) {
-      const tokenSummary = result?.tokenCount?.total ?? result?.tokenCount?.approx;
-      if (tokenSummary !== undefined && tokenSummary !== null) {
-        this.previewMetaElement.textContent = `Estimated tokens: ${sanitizeText(String(tokenSummary))}`;
-      } else if (result?.stats) {
-        const [firstStatKey, firstStatValue] = Object.entries(result.stats)[0] ?? [];
-        if (firstStatKey) {
-          const safeKey = sanitizeText(firstStatKey);
-          const safeValue = sanitizeText(String(firstStatValue ?? ""));
-          this.previewMetaElement.textContent = `${safeKey}: ${safeValue}`;
-        } else {
-          this.previewMetaElement.textContent = "Preview updated.";
-        }
-      } else {
-        this.previewMetaElement.textContent = "Preview updated.";
-      }
+    if (typeof result?.message === "string" && result.message.trim()) {
+      this.appendPipelineLog(result.message);
+    } else {
+      this.appendPipelineLog("Digest generation completed.");
     }
 
     if (this.statusPrimaryChip) {
@@ -393,33 +600,24 @@ export class UIRenderer {
     return section;
   }
 
-  ensureStatsContainer() {
-    if (this.statsContainer) {
-      return this.statsContainer;
-    }
-    if (!this.previewComponent) {
-      this.statsContainer = this.document.createElement("div");
-      this.statsContainer.className = "preview__stats";
-      return this.statsContainer;
-    }
-    this.statsContainer = this.document.createElement("section");
-    this.statsContainer.className = "preview__stats";
-    this.previewComponent.element.appendChild(this.statsContainer);
-    return this.statsContainer;
-  }
-
   normalizeTree(nodes, depth = 0) {
     const result = [];
     for (const node of nodes) {
       if (!node || typeof node !== "object") {
         continue;
       }
-      const path = typeof node.uri === "string" ? node.uri : typeof node.path === "string" ? node.path : node.name ?? `node-${depth}-${result.length}`;
+
+      const absolutePath = typeof node.uri === "string" ? node.uri : typeof node.path === "string" ? node.path : undefined;
+      const relativePath = typeof node.relPath === "string" && node.relPath.length > 0
+        ? node.relPath
+        : absolutePath ?? node.name ?? `node-${depth}-${result.length}`;
       const children = Array.isArray(node.children) ? this.normalizeTree(node.children, depth + 1) : [];
       const type = node.type ?? (children.length > 0 ? "directory" : "file");
+
       result.push({
         name: node.name ?? node.label ?? "(unnamed)",
-        relPath: path,
+        relPath: relativePath,
+        uri: absolutePath,
         type,
         children,
         placeholder: Boolean(node.placeholder),

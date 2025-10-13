@@ -211,7 +211,15 @@ export const createActions = (set, get, api) => {
 
     config: {
       update: (patch) => updateState((state) => ({
-        config: { ...state.config, ...(patch ?? {}) }
+        config: { ...state.config, ...(patch ?? {}) },
+        ...(patch && typeof patch.redactionOverride === "boolean"
+          ? {
+              generation: {
+                ...state.generation,
+                redactionOverride: patch.redactionOverride
+              }
+            }
+          : {})
       }), "config.update"),
       setRedactionPatterns: (patterns) => updateState((state) => ({
         config: { ...state.config, redactionPatterns: Array.isArray(patterns) ? [...patterns] : [] }

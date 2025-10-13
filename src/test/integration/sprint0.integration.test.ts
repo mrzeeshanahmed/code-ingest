@@ -128,8 +128,8 @@ describe("Sprint 0 integration", () => {
     }).__getCreatedTreeViews?.();
     expect(createdTreeViews?.size ?? 0).toBe(0);
 
-    const providers = getRegisteredWebviewProviders();
-    expect(providers.has("codeIngestDashboard")).toBe(true);
+  const providers = getRegisteredWebviewProviders();
+  expect(providers.has("codeIngestDashboard")).toBe(false);
   });
 
   it("Webview resource loading test", () => {
@@ -137,7 +137,7 @@ describe("Sprint 0 integration", () => {
     const initialState = { preview: { enabled: true } };
     const { html, webview } = loadWebviewHtml(
       mockWebview,
-      "resources/webview/index.html",
+      "out/resources/webview/index.html",
       initialState
     );
 

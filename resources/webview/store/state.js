@@ -170,8 +170,9 @@ export const deserializeState = (state) => {
     return state;
   }
 
-  return {
-    ...state,
-    fileTree: rehydrateSets(state.fileTree)
-  };
+  const next = { ...state };
+  if (state.fileTree !== undefined) {
+    next.fileTree = rehydrateSets(state.fileTree);
+  }
+  return next;
 };

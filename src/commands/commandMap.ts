@@ -20,7 +20,10 @@ export const COMMAND_MAP = {
     REFRESH_PREVIEW: "codeIngest.refreshPreview",
     SELECT_ALL: "codeIngest.selectAll",
     DESELECT_ALL: "codeIngest.deselectAll",
-    WEBVIEW_READY: "codeIngest.webviewReady"
+    WEBVIEW_READY: "codeIngest.webviewReady",
+    FLUSH_ERROR_REPORTS: "codeIngest.flushErrorReports",
+    VIEW_METRICS: "codeIngest.viewMetrics",
+    OPEN_DASHBOARD_PANEL: "codeIngest.openDashboardPanel"
   },
   EXTENSION_ONLY: {
     REFRESH_TREE: "codeIngest.refreshTree",
@@ -30,7 +33,8 @@ export const COMMAND_MAP = {
     REFRESH_PREVIEW: "codeIngest.refreshPreview",
     SELECT_ALL: "codeIngest.selectAll",
     DESELECT_ALL: "codeIngest.deselectAll",
-    INGEST_REMOTE_REPO: "codeIngest.ingestRemoteRepo"
+    INGEST_REMOTE_REPO: "codeIngest.ingestRemoteRepo",
+    VIEW_METRICS: "codeIngest.viewMetrics"
   }
 } as const;
 

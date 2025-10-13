@@ -106,5 +106,17 @@ describe("Webview Store", () => {
       state = store.getState();
       expect(state.generation.redactionOverride).toBe(false);
     });
+
+    it("syncs redaction override from config updates", () => {
+      const actions = store.getActions();
+
+      actions.config.update({ redactionOverride: true });
+      let state = store.getState();
+      expect(state.generation.redactionOverride).toBe(true);
+
+      actions.config.update({ redactionOverride: false });
+      state = store.getState();
+      expect(state.generation.redactionOverride).toBe(false);
+    });
   });
 });

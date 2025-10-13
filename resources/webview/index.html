@@ -53,121 +53,111 @@
             </defs>
         </svg>
 
-        <div class="dashboard" id="dashboard">
-            <header class="dashboard__header" role="banner">
-                <div class="dashboard__title-group">
-                    <img class="dashboard__logo" src="./icons/icon.png" alt="Code Ingest" />
-                    <div class="dashboard__headline">
-                        <h1 class="dashboard__title">Code Ingest Control Center</h1>
-                        <p class="dashboard__subtitle" id="workspace-slug" aria-live="polite">Workspace ready</p>
+        <div id="dashboard" class="layout">
+            <header class="layout__bar layout__bar--top" role="banner">
+                <div class="layout__identity">
+                    <span class="layout__logo" aria-hidden="true">
+                        <img src="./icons/icon.svg" alt="" />
+                    </span>
+                    <div class="layout__identity-text">
+                        <p class="layout__title">Code Ingest</p>
+                        <p class="layout__subtitle" id="workspace-slug" aria-live="polite">Workspace ready</p>
                     </div>
                 </div>
-                <nav class="dashboard__actions" role="toolbar" aria-label="Primary actions">
-                    <button class="button" type="button" data-action="refresh">
-                        <svg class="button__icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>
-                        <span>Refresh</span>
-                    </button>
-                    <button class="button button--primary" type="button" data-action="generate">
-                        <svg class="button__icon" aria-hidden="true"><use href="#icon-file"></use></svg>
-                        <span>Generate Digest</span>
-                    </button>
-                    <button class="button" type="button" data-action="load-remote">
-                        <svg class="button__icon" aria-hidden="true"><use href="#icon-link"></use></svg>
-                        <span>Load Remote</span>
-                    </button>
-                    <button class="button" type="button" data-action="toggle-redaction" aria-pressed="false">
-                        <svg class="button__icon" aria-hidden="true"><use href="#icon-shield"></use></svg>
-                        <span>Toggle Redaction</span>
-                    </button>
-                    <button class="button" type="button" data-action="view-metrics">
-                        <svg class="button__icon" aria-hidden="true"><use href="#icon-stats"></use></svg>
-                        <span>View Metrics</span>
-                    </button>
-                    <button class="button" type="button" data-action="flush-errors">
-                        <svg class="button__icon" aria-hidden="true"><use href="#icon-warning"></use></svg>
-                        <span>Flush Errors</span>
-                    </button>
+                <nav class="layout__actions" role="toolbar" aria-label="Primary actions">
+                    <button type="button" class="action-link" data-action="refresh">Refresh</button>
+                    <button type="button" class="action-link action-link--accent" data-action="generate">Generate digest</button>
+                    <button type="button" class="action-link" data-action="load-remote">Load remote</button>
+                    <button type="button" class="action-link" data-action="toggle-redaction" aria-pressed="false">Toggle redaction</button>
+                    <button type="button" class="action-link" data-action="view-metrics">View metrics</button>
+                    <button type="button" class="action-link" data-action="flush-errors">Flush errors</button>
                 </nav>
             </header>
 
-            <section class="status-bar" role="status" aria-live="polite">
-                <div class="status-bar__row">
-                    <span class="status-bar__chip" data-element="status-primary">Idle</span>
-                    <span class="status-bar__chip status-bar__chip--muted" data-element="status-repo">No remote repository</span>
-                    <span class="status-bar__chip status-bar__chip--muted" data-element="status-config">Using defaults</span>
+            <section class="status-strip" role="status" aria-live="polite">
+                <div class="status-strip__items">
+                    <span class="status-chip" data-element="status-primary">Idle</span>
+                    <span class="status-chip status-chip--muted" data-element="status-repo">No remote repository</span>
+                    <span class="status-chip status-chip--muted" data-element="status-config">Using defaults</span>
                 </div>
-                <div class="status-bar__actions" role="group" aria-label="Quick actions">
-                    <button class="icon-button" type="button" data-action="open-dashboard" title="Open dashboard panel">
-                        <svg aria-hidden="true"><use href="#icon-stats"></use></svg>
-                    </button>
-                    <button class="icon-button" type="button" data-action="flush-errors" title="Copy scrubbed errors">
-                        <svg aria-hidden="true"><use href="#icon-warning"></use></svg>
-                    </button>
+                <div class="status-strip__actions" role="group" aria-label="Quick actions">
+                    <button type="button" class="action-link action-link--quiet" data-action="open-dashboard">Open dashboard</button>
+                    <button type="button" class="action-link action-link--quiet" data-action="flush-errors">Copy errors</button>
                 </div>
             </section>
 
-            <main class="dashboard__grid" role="main">
-                <section class="panel panel--tree" aria-labelledby="tree-heading">
-                    <header class="panel__header">
-                        <div class="panel__heading">
-                            <h2 id="tree-heading" class="panel__title">Workspace Files</h2>
-                            <p class="panel__subtitle">Select the files that should inform the digest pipeline.</p>
+            <main class="layout__grid" role="main">
+                <details class="block block--span-12" id="panel-status" open>
+                    <summary class="block__summary">
+                        <span class="block__title">Pipeline status</span>
+                        <span class="block__meta">Scans, filters, and generation</span>
+                    </summary>
+                    <div class="block__content block__content--stack">
+                        <div class="progress" role="group" aria-label="Pipeline progress monitor">
+                            <div class="progress__track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Pipeline progress">
+                                <div class="progress__indicator"></div>
+                            </div>
+                            <p class="progress__message status__message">Waiting for operation.</p>
                         </div>
-                        <div class="panel__controls" role="group" aria-label="Tree actions">
-                            <div class="panel__control-group" role="group" aria-label="Structure">
-                                <button class="icon-button" type="button" data-action="expand-all" title="Expand all">
-                                    <svg aria-hidden="true"><use href="#icon-chevron-down"></use></svg>
-                                </button>
-                                <button class="icon-button" type="button" data-action="collapse-all" title="Collapse all">
-                                    <svg aria-hidden="true"><use href="#icon-chevron-up"></use></svg>
-                                </button>
+                        <div class="progress__log status__log" data-element="status-log"></div>
+                    </div>
+                </details>
+
+                <details class="block block--span-7" id="panel-files" open>
+                    <summary class="block__summary">
+                        <span class="block__title">Workspace files</span>
+                        <span class="block__meta">Define inputs for the digest</span>
+                    </summary>
+                    <div class="block__content block__content--stack">
+                        <div class="control-column" role="group" aria-label="Tree commands">
+                            <div class="control-line">
+                                <span class="control-label">Structure</span>
+                                <div class="control-actions">
+                                    <button type="button" class="action-link" data-action="expand-all">Expand all</button>
+                                    <button type="button" class="action-link" data-action="collapse-all">Collapse all</button>
+                                </div>
                             </div>
-                            <div class="panel__control-group" role="group" aria-label="Selection">
-                                <button class="button" type="button" data-action="select-all">Select All</button>
-                                <button class="button" type="button" data-action="select-none">Clear</button>
+                            <div class="control-line">
+                                <span class="control-label">Selection</span>
+                                <div class="control-actions">
+                                    <button type="button" class="action-link" data-action="select-all">Select all</button>
+                                    <button type="button" class="action-link" data-action="select-none">Clear</button>
+                                </div>
                             </div>
-                            <div class="panel__control-group" role="group" aria-label="Preset filters">
-                                <label class="panel__label" for="preset-select">Preset</label>
-                                <select id="preset-select" class="panel__select" data-action="apply-preset">
+                            <div class="control-line">
+                                <label class="control-label" for="preset-select">Preset</label>
+                                <select id="preset-select" class="control-input" data-action="apply-preset">
                                     <option value="default">Default</option>
-                                    <option value="code">Code Focus</option>
+                                    <option value="code">Code focus</option>
                                     <option value="docs">Documentation</option>
-                                    <option value="tests">Test Coverage</option>
+                                    <option value="tests">Test coverage</option>
                                 </select>
                             </div>
                         </div>
-                    </header>
-                    <div class="panel__body">
-                        <div class="panel__placeholder" data-element="tree-placeholder">Run a scan to populate the file tree.</div>
-                        <div id="file-tree-host" class="file-tree-host" aria-live="polite"></div>
+                        <div class="tree-surface">
+                            <div class="tree-placeholder" data-element="tree-placeholder">Run a scan to populate the file tree.</div>
+                            <div id="file-tree-host" class="file-tree-host" aria-live="polite"></div>
+                        </div>
+                        <footer class="block__footer">
+                            <p class="block__meta">Totals update after each scan.</p>
+                            <button type="button" class="action-link action-link--quiet" data-action="refresh-tree">Rescan workspace</button>
+                        </footer>
                     </div>
-                    <footer class="panel__footer">
-                        <div class="panel__meta">Totals update after each scan.</div>
-                        <div class="panel__footer-actions">
-                            <button class="button" type="button" data-action="refresh-tree">Rescan Workspace</button>
-                        </div>
-                    </footer>
-                </section>
+                </details>
 
-                <section class="panel panel--preview" aria-labelledby="preview-heading">
-                    <header class="panel__header">
-                        <div class="panel__heading">
-                            <h2 id="preview-heading" class="panel__title">Digest Preview</h2>
-                            <p class="panel__subtitle">Review the synthesized narrative before exporting.</p>
+                <details class="block block--span-5" id="panel-preview" open>
+                    <summary class="block__summary">
+                        <span class="block__title">Digest preview</span>
+                        <span class="block__meta">Review before export</span>
+                    </summary>
+                    <div class="block__content block__content--stack">
+                        <div class="control-line control-line--inline" role="group" aria-label="Preview actions">
+                            <button type="button" class="action-link" data-action="refresh-preview">Refresh</button>
+                            <button type="button" class="action-link" data-action="copy-preview">Copy</button>
                         </div>
-                        <div class="panel__controls" role="group" aria-label="Preview actions">
-                            <button class="icon-button" type="button" data-action="refresh-preview" title="Refresh preview">
-                                <svg aria-hidden="true"><use href="#icon-refresh"></use></svg>
-                            </button>
-                            <button class="icon-button" type="button" data-action="copy-preview" title="Copy preview">
-                                <svg aria-hidden="true"><use href="#icon-copy"></use></svg>
-                            </button>
-                        </div>
-                    </header>
-                    <div class="panel__body">
                         <article class="preview" data-state="empty">
                             <header class="preview__header">
-                                <h3 class="preview__title">Awaiting Selection</h3>
+                                <h3 class="preview__title">Awaiting selection</h3>
                                 <p class="preview__subtitle">Choose files to stream a live digest.</p>
                             </header>
                             <section class="preview__content" aria-live="polite"></section>
@@ -176,59 +166,38 @@
                             </footer>
                         </article>
                     </div>
-                </section>
+                </details>
 
-                <section class="panel panel--status" aria-labelledby="status-heading">
-                    <header class="panel__header">
-                        <div class="panel__heading">
-                            <h2 id="status-heading" class="panel__title">Pipeline Status</h2>
-                            <p class="panel__subtitle">Track scanning, filtering, and generation progress.</p>
-                        </div>
-                    </header>
-                    <div class="panel__body panel__body--scrollable">
-                        <div class="status" aria-live="polite">
-                              <div class="status__track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Pipeline progress">
-                                <div class="status__indicator"></div>
-                            </div>
-                            <p class="status__message">Waiting for operation.</p>
-                            <div class="status__log" data-element="status-log"></div>
-                        </div>
-                    </div>
-                </section>
-
-                <section class="panel panel--insights" aria-labelledby="insights-heading">
-                    <header class="panel__header">
-                        <div class="panel__heading">
-                            <h2 id="insights-heading" class="panel__title">Insights</h2>
-                            <p class="panel__subtitle">Configuration, repository state, and performance notes.</p>
-                        </div>
-                    </header>
-                    <div class="panel__body panel__body--scrollable">
-                        <dl class="insights-list">
-                            <div class="insights-list__item">
+                <details class="block block--span-5" id="panel-insights" open>
+                    <summary class="block__summary">
+                        <span class="block__title">Insights</span>
+                        <span class="block__meta">Repository, configuration, performance</span>
+                    </summary>
+                    <div class="block__content block__content--stack">
+                        <dl class="insight-list">
+                            <div class="insight-list__item">
                                 <dt>Configuration</dt>
                                 <dd data-element="insight-config">Awaiting configuration data.</dd>
                             </div>
-                            <div class="insights-list__item">
-                                <dt>Remote Repository</dt>
+                            <div class="insight-list__item">
+                                <dt>Remote repository</dt>
                                 <dd data-element="insight-repo">No remote repository connected.</dd>
                             </div>
-                            <div class="insights-list__item">
+                            <div class="insight-list__item">
                                 <dt>Performance</dt>
                                 <dd data-element="insight-performance">Metrics appear as generation runs.</dd>
                             </div>
                         </dl>
                     </div>
-                </section>
+                </details>
             </main>
 
-            <footer class="dashboard__footer" role="contentinfo">
-                <span>Code Ingest • Developer Knowledge Accelerator</span>
-                <div class="dashboard__footer-actions">
-                    <button class="button" type="button" data-action="flush-errors">Flush Errors</button>
-                    <button class="button button--primary" type="button" data-action="view-metrics">Metrics</button>
+            <footer class="layout__bar layout__bar--bottom" role="contentinfo">
+                <span>Code Ingest · Developer knowledge accelerator</span>
+                <div class="layout__footer-actions">
+                    <button type="button" class="action-link" data-action="flush-errors">Flush errors</button>
+                    <button type="button" class="action-link action-link--accent" data-action="view-metrics">Metrics</button>
                 </div>
-                <span class="footer__pulse" aria-hidden="true"></span>
             </footer>
         </div>
 

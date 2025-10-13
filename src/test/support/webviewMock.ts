@@ -46,11 +46,12 @@ export function loadWebviewHtml(
     throw new Error("Extension path is unavailable in test environment.");
   }
 
-  const absoluteHtmlPath = path.join(extensionPath, htmlRelativePath);
+  const normalizedRelativePath = htmlRelativePath.replace(/\\/g, "/");
+  const absoluteHtmlPath = path.join(extensionPath, normalizedRelativePath);
   if (!fs.existsSync(absoluteHtmlPath)) {
     throw new Error(`HTML template is missing: ${absoluteHtmlPath}`);
   }
 
-  const html = setWebviewHtml(webview, absoluteHtmlPath, initialState);
+  const html = setWebviewHtml(webview, vscode.Uri.file(extensionPath), normalizedRelativePath, initialState);
   return { html, webview };
 }

@@ -31,6 +31,7 @@ export class FileTreeComponent {
 
     this.focusedPath = null;
     this.dragState = null;
+  this.selectedDirectories = new Set();
 
     this.onClick = this.handleTreeClick.bind(this);
     this.onKeydown = this.handleKeydown.bind(this);
@@ -98,10 +99,12 @@ export class FileTreeComponent {
     }
     this.props.nodes = nodes;
     this.renderNodes(nodes);
+    this.recalculateDirectorySelection();
   }
 
   setSelection(selected) {
     this.props.selectedFiles = selected instanceof Set ? selected : new Set(selected ?? []);
+    this.recalculateDirectorySelection();
     if (this.virtualScroller) {
       const flattened = this.flattenNodes(this.props.nodes ?? []);
       this.virtualScroller.setItems(flattened);
@@ -193,8 +196,17 @@ export class FileTreeComponent {
   updateSelectionStyles() {
     const checkboxes = this.element.querySelectorAll("input.file-checkbox");
     checkboxes.forEach((cb) => {
-      const path = cb.closest(".file-node")?.dataset.path;
-      cb.checked = path ? this.props.selectedFiles.has(path) : false;
+      const nodeElement = cb.closest(".file-node");
+      const path = nodeElement?.dataset.path;
+      if (!path) {
+        cb.checked = false;
+        return;
+      }
+      if (nodeElement?.dataset.type === "directory") {
+        cb.checked = this.selectedDirectories.has(path);
+      } else {
+        cb.checked = this.props.selectedFiles.has(path);
+      }
     });
   }
 
@@ -231,7 +243,8 @@ export class FileTreeComponent {
       if (!path) {
         return;
       }
-      this.toggleSelection(path, checkbox.checked, event.shiftKey);
+      const nodeType = nodeElement?.dataset.type ?? "file";
+      this.toggleSelection(path, checkbox.checked, event.shiftKey, nodeType);
       event.stopPropagation();
       return;
     }
@@ -300,7 +313,8 @@ export class FileTreeComponent {
             const checkbox = focusNode.querySelector(".file-checkbox");
             if (checkbox) {
               checkbox.checked = !checkbox.checked;
-              this.toggleSelection(path, checkbox.checked, event.shiftKey);
+              const nodeType = focusNode.dataset.type ?? "file";
+              this.toggleSelection(path, checkbox.checked, event.shiftKey, nodeType);
             }
           }
         }
@@ -340,17 +354,38 @@ export class FileTreeComponent {
     this.dragState = null;
   }
 
-  toggleSelection(path, isSelected, useRange) {
+  toggleSelection(path, isSelected, useRange, nodeType = "file") {
     if (useRange) {
       this.props.onRangeSelect(path);
       return;
     }
-    if (isSelected) {
-      this.props.selectedFiles.add(path);
+    if (nodeType === "directory") {
+      if (isSelected) {
+        this.selectedDirectories.add(path);
+      } else {
+        this.selectedDirectories.delete(path);
+      }
+      const node = this.findNode(path, this.props.nodes ?? []);
+      if (node) {
+        const descendants = this.collectDescendantFiles(node);
+        for (const descendant of descendants) {
+          if (isSelected) {
+            this.props.selectedFiles.add(descendant);
+          } else {
+            this.props.selectedFiles.delete(descendant);
+          }
+          this.props.onToggleSelection({ path: descendant, selected: isSelected });
+        }
+      }
     } else {
-      this.props.selectedFiles.delete(path);
+      if (isSelected) {
+        this.props.selectedFiles.add(path);
+      } else {
+        this.props.selectedFiles.delete(path);
+      }
+      this.props.onToggleSelection({ path, selected: isSelected });
     }
-    this.props.onToggleSelection({ path, selected: isSelected });
+
     if (this.virtualScroller) {
       const flattened = this.flattenNodes(this.props.nodes ?? []);
       this.virtualScroller.setItems(flattened);
@@ -448,8 +483,100 @@ export class FileTreeComponent {
     }
   }
 
+  recalculateDirectorySelection() {
+    this.selectedDirectories.clear();
+
+    const evaluateNode = (node) => {
+      if (!node) {
+        return { allSelected: true, hasFiles: false };
+      }
+      const relPath = node.relPath ?? node.uri ?? node.path;
+      if (node.type === "directory") {
+        if (relPath && this.props.selectedFiles.has(relPath)) {
+          this.selectedDirectories.add(relPath);
+          return { allSelected: true, hasFiles: true };
+        }
+        if (!Array.isArray(node.children) || node.children.length === 0) {
+          return { allSelected: true, hasFiles: false };
+        }
+      }
+
+      if (node.type !== "directory" || !Array.isArray(node.children) || node.children.length === 0) {
+        const isFile = node.type !== "directory";
+        if (!isFile || !relPath) {
+          return { allSelected: true, hasFiles: false };
+        }
+        return {
+          allSelected: this.props.selectedFiles.has(relPath),
+          hasFiles: true
+        };
+      }
+
+      let allSelected = true;
+      let hasFiles = false;
+      for (const child of node.children) {
+        const result = evaluateNode(child);
+        if (result.hasFiles) {
+          hasFiles = true;
+          if (!result.allSelected) {
+            allSelected = false;
+          }
+        }
+      }
+
+      if (hasFiles && allSelected && relPath) {
+        this.selectedDirectories.add(relPath);
+      }
+
+      return { allSelected, hasFiles };
+    };
+
+    for (const rootNode of this.props.nodes ?? []) {
+      evaluateNode(rootNode);
+    }
+
+    this.updateSelectionStyles();
+  }
+
   destroy() {
     this.teardownVirtualScrolling();
     this.detachEventListeners();
+  }
+
+  findNode(path, nodes) {
+    for (const node of nodes) {
+      if (!node) {
+        continue;
+      }
+      const relPath = node.relPath ?? node.uri ?? node.path;
+      if (relPath === path) {
+        return node;
+      }
+      if (Array.isArray(node.children)) {
+        const match = this.findNode(path, node.children);
+        if (match) {
+          return match;
+        }
+      }
+    }
+    return null;
+  }
+
+  collectDescendantFiles(node, acc = []) {
+    if (!node || !Array.isArray(node.children)) {
+      return acc;
+    }
+    for (const child of node.children) {
+      if (!child) {
+        continue;
+      }
+      const relPath = child.relPath ?? child.uri ?? child.path;
+      if (child.type === "directory") {
+        this.collectDescendantFiles(child, acc);
+      } else if (relPath) {
+        acc.push(relPath);
+      }
+    }
+    return acc;
   }
 }

@@ -32,7 +32,7 @@ function ensureHtmlStructure(html: string): string {
 }
 
 function injectCsp(html: string, webview: vscode.Webview, nonce?: string): string {
-  const scriptSources = [`${webview.cspSource}`];
+  const scriptSources = [webview.cspSource];
   if (nonce) {
     scriptSources.unshift(`'nonce-${nonce}'`);
   }
@@ -44,13 +44,11 @@ function injectCsp(html: string, webview: vscode.Webview, nonce?: string): strin
     `style-src ${webview.cspSource} 'unsafe-inline'`,
     `font-src ${webview.cspSource}`,
     `connect-src ${webview.cspSource}`
-  ].join('; ');
+  ].join("; ");
 
   const cspMeta = `<meta http-equiv="Content-Security-Policy" content="${cspContent}">`;
-  
-  // Remove existing CSP if present
-  let cleanedHtml = html.replace(/<meta[^>]*Content-Security-Policy[^>]*>/gi, '');
-  
+  const cleanedHtml = html.replace(/<meta[^>]*Content-Security-Policy[^>]*>/gi, "");
+
   if (/<head[^>]*>/i.test(cleanedHtml)) {
     return cleanedHtml.replace(/<head([^>]*)>/i, (match) => `${match}\n    ${cspMeta}`);
   }
@@ -60,28 +58,26 @@ function injectCsp(html: string, webview: vscode.Webview, nonce?: string): strin
 
 function toWebviewUri(
   webview: vscode.Webview,
-  baseDir: string,
+  baseDirUri: vscode.Uri,
   resourcePath: string
 ): string | null {
   try {
     const suffixMatch = resourcePath.match(/([^?#]*)([?#].*)?/);
     const barePath = suffixMatch ? suffixMatch[1] : resourcePath;
-    const suffix = suffixMatch && suffixMatch[2] ? suffixMatch[2] : "";
+    const suffix = suffixMatch?.[2] ?? "";
 
-    const isAbsoluteWithinBundle = barePath.startsWith("/");
     const normalizedPath = barePath.replace(/^\.\//, "");
-    const absoluteFsPath = isAbsoluteWithinBundle
-      ? path.resolve(baseDir, normalizedPath.replace(/^\/+/, ""))
-      : path.resolve(baseDir, normalizedPath);
-
+    const baseDir = baseDirUri.fsPath;
+    const absoluteFsPath = path.resolve(baseDir, normalizedPath);
     const relative = path.relative(baseDir, absoluteFsPath);
+
     if (relative.startsWith("..") || relative.includes(`..${path.sep}`) || path.isAbsolute(relative)) {
       console.warn(`webviewHelpers: Skipping path outside bundle: ${resourcePath}`);
       return null;
     }
 
-    const uri = vscode.Uri.file(absoluteFsPath);
-    const webviewUri = webview.asWebviewUri(uri);
+    const resourceUri = vscode.Uri.file(absoluteFsPath);
+    const webviewUri = webview.asWebviewUri(resourceUri);
     if (!webviewUri || !webviewUri.scheme) {
       console.warn(`webviewHelpers: Invalid webview URI generated for ${resourcePath}`);
       return null;
@@ -94,24 +90,23 @@ function toWebviewUri(
   }
 }
 
-function transformResourceUris(html: string, webview: vscode.Webview, htmlFilePath: string): string {
-  const baseDir = path.dirname(htmlFilePath);
+function transformResourceUris(html: string, webview: vscode.Webview, baseDirUri: vscode.Uri): string {
   const attributePattern = /(src|href)=("|')([^"']+)(\2)/gi;
 
-  console.log('webviewHelpers: transformResourceUris', { baseDir, htmlFilePath });
+  console.log("webviewHelpers: transformResourceUris", { baseDir: baseDirUri.fsPath });
 
   return html.replace(attributePattern, (match, attr, quote, value) => {
     if (/^(https?:|vscode-resource:|vscode-webview-resource:|data:|#|\{|\/\/)/i.test(value)) {
       return match;
     }
 
-    const transformed = toWebviewUri(webview, baseDir, value);
+    const transformed = toWebviewUri(webview, baseDirUri, value);
     if (!transformed) {
-      console.warn('webviewHelpers: Failed to transform', { attr, value });
+      console.warn("webviewHelpers: Failed to transform", { attr, value });
       return match;
     }
 
-    console.log('webviewHelpers: Transformed', { original: value, transformed });
+    console.log("webviewHelpers: Transformed", { original: value, transformed });
     return `${attr}=${quote}${transformed}${quote}`;
   });
 }
@@ -191,10 +186,15 @@ function buildFallbackHtml(error: unknown): string {
 
 export function setWebviewHtml(
   webview: vscode.Webview,
-  htmlFilePath: string,
+  extensionUri: vscode.Uri,
+  htmlRelativePath: string,
   initialState?: object
 ): string {
   let rawHtml: string;
+  const htmlSegments = htmlRelativePath.split(/[\\/]+/).filter(Boolean);
+  const htmlUri = vscode.Uri.joinPath(extensionUri, ...htmlSegments);
+  const htmlFilePath = htmlUri.fsPath;
+  const baseDirUri = vscode.Uri.file(path.dirname(htmlFilePath));
 
   try {
     rawHtml = readFileSync(htmlFilePath, "utf8");
@@ -210,7 +210,7 @@ export function setWebviewHtml(
     const serializedState = safeSerializeInitialState(initialState);
     const nonce = serializedState ? randomBytes(16).toString("base64") : undefined;
     html = injectCsp(html, webview, nonce);
-    html = transformResourceUris(html, webview, htmlFilePath);
+    html = transformResourceUris(html, webview, baseDirUri);
     html = injectInitialState(html, serializedState, nonce);
 
     webview.html = html;

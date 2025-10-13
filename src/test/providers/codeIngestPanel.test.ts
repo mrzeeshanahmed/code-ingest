@@ -29,9 +29,15 @@ describe("CodeIngestPanel", () => {
 
   it("executes inbound commands and acknowledges", async () => {
     const harness = createPanelHarness();
-    await CodeIngestPanel.createOrShow(vscode.Uri.file(path.resolve("./")));
+    const extensionUri = vscode.Uri.file(path.resolve("./"));
+    await CodeIngestPanel.createOrShow(extensionUri);
 
-    expect(setWebviewHtml).toHaveBeenCalledWith(harness.webview, expect.any(String), { sessionToken: "test-token" });
+    expect(setWebviewHtml).toHaveBeenCalledWith(
+      harness.webview,
+      extensionUri,
+      expect.stringMatching(/out\/resources\/webview\/index\.html$/),
+      { sessionToken: "test-token" }
+    );
     expect(harness.messageListeners.length).toBeGreaterThan(0);
 
     const listener = harness.messageListeners[0];
@@ -116,7 +122,7 @@ function createPanelHarness() {
   const webview = {
     html: "",
     cspSource: "vscode-resource://test",
-  postMessage: jest.fn(() => Promise.resolve(true)),
+    postMessage: jest.fn(() => Promise.resolve(true)),
     asWebviewUri: jest.fn((uri) => uri),
     onDidReceiveMessage: jest.fn((listener: MessageListener) => {
       messageListeners.push(listener);
