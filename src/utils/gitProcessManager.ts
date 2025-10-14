@@ -423,6 +423,8 @@ class ProcessController {
 export class GitProcessManager {
   private static readonly instances = new Set<GitProcessManager>();
   private static cleanupRegistered = false;
+  private static sigintCleanupInFlight = false;
+  private static cleanupPromise: Promise<void> | null = null;
 
   private readonly activeProcesses = new Map<string, ChildProcess>();
   private readonly credentialScrubber = new CredentialScrubber();
@@ -770,18 +772,22 @@ export class GitProcessManager {
   }
 
   private setupProcessCleanup(): void {
-    if (!GitProcessManager.cleanupRegistered) {
-      GitProcessManager.cleanupRegistered = true;
-      const cleanup = () => GitProcessManager.cleanupAll();
-      process.on("exit", cleanup);
-      process.once("SIGINT", () => {
-        cleanup();
-        process.removeListener("exit", cleanup);
-        if (typeof process.exitCode !== "number") {
-          process.exitCode = 130;
-        }
-      });
+    if (GitProcessManager.cleanupRegistered) {
+      return;
     }
+
+    GitProcessManager.cleanupRegistered = true;
+    process.once("beforeExit", () => {
+      void GitProcessManager.runGlobalCleanup();
+    });
+
+    process.once("SIGINT", () => {
+      void GitProcessManager.runGlobalCleanup("SIGINT");
+    });
+
+    process.once("exit", () => {
+      GitProcessManager.forceTerminateAll();
+    });
   }
 
   private safeKill(child: ChildProcess, signal: NodeJS.Signals): void {
@@ -795,16 +801,97 @@ export class GitProcessManager {
     }
   }
 
-  private static cleanupAll(): void {
+  private static async runGlobalCleanup(signal?: NodeJS.Signals): Promise<void> {
+    if (GitProcessManager.cleanupPromise) {
+      await GitProcessManager.cleanupPromise;
+      return;
+    }
+
+    GitProcessManager.cleanupPromise = (async () => {
+      if (GitProcessManager.sigintCleanupInFlight) {
+        return;
+      }
+      GitProcessManager.sigintCleanupInFlight = true;
+      try {
+        await Promise.allSettled(
+          Array.from(GitProcessManager.instances).map((instance) => instance.cancelAndAwaitProcesses())
+        );
+      } finally {
+        GitProcessManager.sigintCleanupInFlight = false;
+        if (signal === "SIGINT" && typeof process.exitCode !== "number") {
+          process.exitCode = 130;
+        }
+        GitProcessManager.cleanupPromise = null;
+      }
+    })();
+
+    await GitProcessManager.cleanupPromise;
+  }
+
+  private static forceTerminateAll(): void {
     for (const instance of GitProcessManager.instances) {
-      instance.killAllActiveProcesses();
+      instance.forceKillActiveProcesses();
     }
   }
 
-  private killAllActiveProcesses(): void {
-    for (const [, child] of this.activeProcesses.entries()) {
+  private async cancelAndAwaitProcesses(): Promise<void> {
+    const processes = Array.from(this.activeProcesses.values());
+    this.activeProcesses.clear();
+
+    if (processes.length === 0) {
+      return;
+    }
+
+    await Promise.allSettled(processes.map((child) => this.terminateProcess(child)));
+  }
+
+  private forceKillActiveProcesses(): void {
+    for (const child of this.activeProcesses.values()) {
       this.safeKill(child, "SIGTERM");
+      this.safeKill(child, "SIGKILL");
     }
     this.activeProcesses.clear();
+  }
+
+  private terminateProcess(child: ChildProcess): Promise<void> {
+    if (!child) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer: NodeJS.Timeout | null = null;
+      const finalize = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        resolve();
+      };
+
+      const onClose = () => finalize();
+      const onExit = () => finalize();
+
+      if (typeof child.once === "function") {
+        child.once("close", onClose);
+        child.once("exit", onExit);
+      }
+
+      timer = setTimeout(() => {
+        this.safeKill(child, "SIGKILL");
+      }, 5_000);
+      timer.unref?.();
+
+      this.safeKill(child, "SIGTERM");
+
+      const exitCode = (child as unknown as { exitCode?: number | null }).exitCode;
+      if (child.killed || (exitCode !== undefined && exitCode !== null)) {
+        finalize();
+      }
+    });
   }
 }

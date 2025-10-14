@@ -5,10 +5,14 @@ import { performance } from "node:perf_hooks";
 import * as vscode from "vscode";
 
 import { wrapError } from "../utils/errorHandling";
+import type { ErrorReporter } from "./errorReporter";
 
 const DEFAULT_WRITE_CHUNK_BYTES = 64 * 1024;
 const STREAM_WRITE_CHUNK_BYTES = 128 * 1024;
 const DEFAULT_FILENAME_TEMPLATE = "digest-{timestamp}.{format}";
+const DIGEST_WRITE_OPERATION = "Writing digest file…";
+const DIGEST_OPEN_OPERATION = "Opening digest file…";
+const DIGEST_PREPARE_OPERATION = "Preparing digest output";
 
 type OutputFormat = "markdown" | "json" | "text";
 export type OutputTargetType = "editor" | "file" | "clipboard";
@@ -124,6 +128,8 @@ export interface OutputWriterDependencies {
   workspace?: typeof vscode.workspace;
   clipboard?: vscode.Clipboard;
   clock?: () => number;
+  errorReporter?: ErrorReporter;
+  errorChannel?: Pick<vscode.OutputChannel, "appendLine">;
 }
 
 /**
@@ -139,11 +145,17 @@ export class OutputWriter {
 
   private readonly now: () => number;
 
+  private readonly errorReporter: ErrorReporter | undefined;
+
+  private readonly errorChannel: Pick<vscode.OutputChannel, "appendLine"> | undefined;
+
   public constructor(dependencies: OutputWriterDependencies = {}) {
     this.window = dependencies.window ?? vscode.window;
     this.workspace = dependencies.workspace ?? vscode.workspace;
     this.clipboard = dependencies.clipboard ?? vscode.env.clipboard;
     this.now = dependencies.clock ?? (() => performance.now());
+    this.errorReporter = dependencies.errorReporter;
+    this.errorChannel = dependencies.errorChannel;
   }
 
   /**
@@ -165,7 +177,7 @@ export class OutputWriter {
 
     try {
       this.throwIfCancelled(cancellationToken);
-      report({ phase: "preparing", bytesWritten, totalBytes, currentOperation: "Preparing output" });
+  report({ phase: "preparing", bytesWritten, totalBytes, currentOperation: DIGEST_PREPARE_OPERATION });
 
       let result: WriteResult;
 
@@ -210,6 +222,7 @@ export class OutputWriter {
     } catch (error) {
       const wrapped = wrapError(error, { scope: "outputWriter", target: mergedTarget.type });
       report({ phase: "complete", bytesWritten, totalBytes, currentOperation: "Failed" });
+      this.reportFailure(wrapped, mergedTarget);
       return {
         success: false,
         target: mergedTarget,
@@ -316,6 +329,7 @@ export class OutputWriter {
       }
     } catch (error) {
       const wrapped = wrapError(error, { scope: "outputWriter", target: mergedTarget.type, mode: "stream" });
+      this.reportFailure(wrapped, mergedTarget);
       return {
         success: false,
         target: mergedTarget,
@@ -429,6 +443,8 @@ export class OutputWriter {
       const target: OutputTarget = { type: "file", path: resolution.finalPath };
       const buffer = Buffer.from(context.content, "utf8");
 
+      report({ phase: "writing", bytesWritten, totalBytes, currentOperation: DIGEST_WRITE_OPERATION });
+
       if (resolution.appendToExisting) {
         await this.appendToFile(resolution.finalPath, buffer, context.cancellationToken, report, totalBytes, (chunkBytes) => {
           bytesWritten += chunkBytes;
@@ -448,13 +464,19 @@ export class OutputWriter {
         tempPath = undefined;
       }
 
-      report({ phase: "complete", bytesWritten, totalBytes, currentOperation: "File write complete" });
+      const fileUri = vscode.Uri.file(resolution.finalPath);
+      const progressTotal = totalBytes > 0 ? totalBytes : bytesWritten;
+
+      report({ phase: "writing", bytesWritten, totalBytes: progressTotal, currentOperation: DIGEST_OPEN_OPERATION });
+      await this.openFileInEditor(fileUri.fsPath, context.cancellationToken);
+
+      report({ phase: "complete", bytesWritten, totalBytes: progressTotal, currentOperation: "Digest file opened" });
 
       return {
         success: true,
         target,
         bytesWritten,
-        uri: vscode.Uri.file(resolution.finalPath),
+        uri: fileUri,
         writeTime: this.now() - start
       };
     } catch (error) {
@@ -468,6 +490,7 @@ export class OutputWriter {
           ? context.explicitPath
           : path.join(this.getWorkspaceRoot(), context.explicitPath);
       }
+      this.reportFailure(wrapped, failureTarget);
       return {
         success: false,
         target: failureTarget,
@@ -525,6 +548,8 @@ export class OutputWriter {
 
       const target: OutputTarget = { type: "file", path: resolution.finalPath };
 
+      report({ phase: "writing", bytesWritten, totalBytes: totalBytes || bytesWritten, currentOperation: DIGEST_WRITE_OPERATION });
+
       if (resolution.appendToExisting) {
         await this.appendStreamToFile(resolution.finalPath, context, report, totalBytes, (written) => {
           bytesWritten += written;
@@ -542,13 +567,19 @@ export class OutputWriter {
         tempPath = undefined;
       }
 
-      report({ phase: "complete", bytesWritten, totalBytes: totalBytes || bytesWritten, currentOperation: "Streaming complete" });
+      const progressTotal = totalBytes > 0 ? totalBytes : bytesWritten;
+      const fileUri = vscode.Uri.file(resolution.finalPath);
+
+      report({ phase: "writing", bytesWritten, totalBytes: progressTotal, currentOperation: DIGEST_OPEN_OPERATION });
+      await this.openFileInEditor(fileUri.fsPath, context.cancellationToken);
+
+      report({ phase: "complete", bytesWritten, totalBytes: progressTotal, currentOperation: "Digest file opened" });
 
       return {
         success: true,
         target,
         bytesWritten,
-        uri: vscode.Uri.file(resolution.finalPath),
+        uri: fileUri,
         writeTime: this.now() - start
       };
     } catch (error) {
@@ -556,6 +587,7 @@ export class OutputWriter {
         await this.safeRemove(tempPath);
       }
       const wrapped = wrapError(error, { scope: "outputWriter", target: "file", mode: "stream" });
+      this.reportFailure(wrapped, { type: "file", path: context.target.path });
       return {
         success: false,
         target: { type: "file", path: context.target.path },
@@ -740,7 +772,7 @@ export class OutputWriter {
         await handle.write(view);
         offset = end;
         const written = updateBytes(chunk.byteLength);
-        progress({ phase: "writing", bytesWritten: written, totalBytes, currentOperation: "Appending to file" });
+        progress({ phase: "writing", bytesWritten: written, totalBytes, currentOperation: DIGEST_WRITE_OPERATION });
       }
     } finally {
       await handle.close();
@@ -765,8 +797,8 @@ export class OutputWriter {
         const view = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
         await handle.write(view);
         offset = end;
-  const written = updateBytes(chunk.byteLength);
-        progress({ phase: "writing", bytesWritten: written, totalBytes, currentOperation: "Writing file" });
+        const written = updateBytes(chunk.byteLength);
+        progress({ phase: "writing", bytesWritten: written, totalBytes, currentOperation: DIGEST_WRITE_OPERATION });
       }
     } finally {
       await handle.close();
@@ -788,8 +820,9 @@ export class OutputWriter {
         const buffer = Buffer.from(text, "utf8");
         const view = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
         await handle.write(view);
-  const written = updateBytes(buffer.byteLength);
-        progress({ phase: "writing", bytesWritten: written, totalBytes, currentOperation: "Appending stream" });
+        const written = updateBytes(buffer.byteLength);
+        const progressTotal = totalBytes > 0 ? totalBytes : written;
+        progress({ phase: "writing", bytesWritten: written, totalBytes: progressTotal, currentOperation: DIGEST_WRITE_OPERATION });
       }
     } finally {
       await handle.close();
@@ -811,8 +844,9 @@ export class OutputWriter {
         const buffer = Buffer.from(text, "utf8");
         const view = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
         await handle.write(view);
-  const written = updateBytes(buffer.byteLength);
-        progress({ phase: "writing", bytesWritten: written, totalBytes, currentOperation: "Streaming write" });
+        const written = updateBytes(buffer.byteLength);
+        const progressTotal = totalBytes > 0 ? totalBytes : written;
+        progress({ phase: "writing", bytesWritten: written, totalBytes: progressTotal, currentOperation: DIGEST_WRITE_OPERATION });
       }
     } finally {
       await handle.close();
@@ -954,5 +988,32 @@ export class OutputWriter {
     if (token?.isCancellationRequested) {
       throw new vscode.CancellationError();
     }
+  }
+
+  private reportFailure(error: Error, target: OutputTarget): void {
+    if (error instanceof vscode.CancellationError) {
+      return;
+    }
+
+    this.errorReporter?.report(error, {
+      source: "outputWriter.write",
+      metadata: {
+        target: target.type,
+        path: target.path
+      }
+    });
+
+    if (this.errorChannel) {
+      const location = target.type === "file" ? target.path ?? "(unspecified path)" : target.type;
+      this.errorChannel.appendLine(`[output-writer] Failed to write output to ${location}: ${error.message}`);
+    }
+  }
+
+  private async openFileInEditor(filePath: string, cancellationToken?: vscode.CancellationToken | undefined): Promise<void> {
+    const uri = vscode.Uri.file(filePath);
+    this.throwIfCancelled(cancellationToken);
+    const document = await this.workspace.openTextDocument(uri);
+    this.throwIfCancelled(cancellationToken);
+    await this.window.showTextDocument(document, { preview: false });
   }
 }

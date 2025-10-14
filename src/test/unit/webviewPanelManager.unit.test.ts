@@ -6,9 +6,11 @@ import { CodeIngestPanel } from "../../providers/codeIngestPanel";
 describe("WebviewPanelManager", () => {
   const extensionUri = vscode.Uri.parse("file:///test-extension");
   let restoreSpy: jest.SpiedFunction<typeof CodeIngestPanel.restoreState>;
+  let ensureResourcesReady: jest.MockedFunction<() => Promise<void>>;
 
   beforeEach(() => {
     restoreSpy = jest.spyOn(CodeIngestPanel, "restoreState").mockReturnValue(false);
+    ensureResourcesReady = jest.fn(async () => {});
   });
 
   afterEach(() => {
@@ -16,7 +18,7 @@ describe("WebviewPanelManager", () => {
   });
 
   it("stores state without emitting when emit option is false", () => {
-    const manager = new WebviewPanelManager(extensionUri);
+    const manager = new WebviewPanelManager(extensionUri, ensureResourcesReady);
     manager.setStateSnapshot({ foo: "bar" }, { emit: false });
 
     expect(restoreSpy).not.toHaveBeenCalled();
@@ -24,7 +26,7 @@ describe("WebviewPanelManager", () => {
   });
 
   it("attempts to restore immediately when emit option is omitted", () => {
-    const manager = new WebviewPanelManager(extensionUri);
+    const manager = new WebviewPanelManager(extensionUri, ensureResourcesReady);
     manager.setStateSnapshot({ foo: "bar" });
 
     expect(restoreSpy).toHaveBeenCalledTimes(1);
@@ -32,7 +34,7 @@ describe("WebviewPanelManager", () => {
   });
 
   it("restores the stored state when requested", () => {
-    const manager = new WebviewPanelManager(extensionUri);
+    const manager = new WebviewPanelManager(extensionUri, ensureResourcesReady);
     manager.setStateSnapshot({ foo: "bar" }, { emit: false });
 
     restoreSpy.mockReturnValueOnce(true);

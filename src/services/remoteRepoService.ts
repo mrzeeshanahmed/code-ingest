@@ -136,6 +136,15 @@ interface RemoteRepoConfigSnapshot {
   retryableErrors: string[];
 }
 
+interface RemoteOperationHandle {
+  cancel(): void;
+  completion: Promise<void>;
+  abortSignal: AbortSignal;
+  cancellationToken: vscode.CancellationToken;
+  markFinished(): void;
+  markFailed(reason?: unknown): void;
+}
+
 interface MergedRemoteRepoOptions {
   url: string;
   ref?: string;
@@ -182,6 +191,7 @@ export class RemoteRepoService {
   private readonly tempDirectoryManager: TemporaryDirectoryManager;
   private readonly retryFactory: (config: RetryConfig) => RetryableGitOperation;
   private readonly progressTrackerFactory: (callback?: (progress: CloneProgress) => void, token?: vscode.CancellationToken) => ProgressTracker;
+  private readonly activeOperations = new Set<RemoteOperationHandle>();
 
   constructor(
     private readonly configService: ConfigurationService,
@@ -193,7 +203,9 @@ export class RemoteRepoService {
     this.gitOperations = dependencies.gitOperations ?? new AdvancedGitOperations(logger);
     this.validator = dependencies.validator ?? new RepositoryValidator(logger);
     this.tempDirectoryManager = dependencies.tempDirectoryManager ?? new TemporaryDirectoryManager();
-    this.tempDirectoryManager.setupProcessCleanup();
+    this.tempDirectoryManager.setupProcessCleanup({
+      beforeCleanup: () => this.cancelActiveOperations()
+    });
     this.retryFactory = dependencies.retryFactory ?? ((config) => new RetryableGitOperation(config, logger));
     this.progressTrackerFactory =
       dependencies.progressTrackerFactory ?? ((callback, token) => new ProgressTracker(callback, token));
@@ -205,7 +217,21 @@ export class RemoteRepoService {
     const started = Date.now();
     const settings = this.getRemoteRepoSettings();
     const merged = this.mergeOptions(options, settings);
-    const tracker = this.progressTrackerFactory(merged.progressCallback, merged.cancellationToken);
+    const operationScope = this.createOperationHandle();
+    const externalCancellationDisposables: vscode.Disposable[] = [];
+
+    if (merged.cancellationToken) {
+      if (merged.cancellationToken.isCancellationRequested) {
+        operationScope.cancel();
+      } else {
+        const disposable = merged.cancellationToken.onCancellationRequested(() => {
+          operationScope.cancel();
+        });
+        externalCancellationDisposables.push(disposable);
+      }
+    }
+
+    const tracker = this.progressTrackerFactory(merged.progressCallback, operationScope.cancellationToken);
     const sanitizedUrl = sanitizeUrl(merged.url);
     const warnings: string[] = [];
 
@@ -235,7 +261,8 @@ export class RemoteRepoService {
         tracker.checkCancellation();
         try {
           const baseOptions: CloneExecutionOptions = {
-            singleBranch: Boolean(merged.ref)
+            singleBranch: Boolean(merged.ref),
+            signal: operationScope.abortSignal
           };
           if (merged.ref) {
             baseOptions.branch = merged.ref;
@@ -260,20 +287,29 @@ export class RemoteRepoService {
         }
       }, "remoteRepo.clone");
 
-      tracker.reportProgress("checking-out", 70, "Resolving commit");
-      resolvedRef = await this.resolveRef(merged.url, merged.ref ?? "HEAD");
+  tracker.reportProgress("checking-out", 70, "Resolving commit");
+  resolvedRef = await this.resolveRef(merged.url, merged.ref ?? "HEAD", operationScope.abortSignal);
 
       if (merged.sparseCheckout.length > 0) {
         tracker.reportProgress("checking-out", 75, "Configuring sparse checkout");
-        await this.setupSparseCheckout(tmpDir, merged.sparseCheckout, authInfo.env);
+        await this.setupSparseCheckout(tmpDir, merged.sparseCheckout, authInfo.env, operationScope.abortSignal);
       }
 
       if (merged.includeSubmodules) {
         tracker.reportProgress("submodules", 85, "Initializing submodules");
       }
-      const submodules = merged.includeSubmodules ? await this.initializeSubmodules(tmpDir, authInfo.env) : [];
+      const submodules = merged.includeSubmodules
+        ? await this.initializeSubmodules(tmpDir, authInfo.env, operationScope.abortSignal)
+        : [];
 
-      const metadata = await this.collectRepositoryMetadata(tmpDir, merged.url, resolvedRef, submodules, authInfo.env);
+      const metadata = await this.collectRepositoryMetadata(
+        tmpDir,
+        merged.url,
+        resolvedRef,
+        submodules,
+        authInfo.env,
+        operationScope.abortSignal
+      );
 
       tracker.reportProgress("complete", 100, "Clone completed successfully");
 
@@ -303,6 +339,7 @@ export class RemoteRepoService {
       return result;
     } catch (error) {
       const wrapped = wrapError(error, { scope: "remoteRepo.clone", url: sanitizedUrl });
+      operationScope.markFailed(wrapped);
       this.logger.error("remoteRepo.clone.failed", { url: sanitizedUrl, message: wrapped.message });
       this.errorReporter.report(wrapped, { source: "remoteRepo.clone", metadata: { url: sanitizedUrl } });
       if (!merged.keepTmpDir) {
@@ -311,6 +348,15 @@ export class RemoteRepoService {
         warnings.push("Clone failed but temporary directory retained for inspection.");
       }
       throw wrapped;
+    } finally {
+      for (const disposable of externalCancellationDisposables) {
+        try {
+          disposable.dispose();
+        } catch {
+          // ignore cancellation disposal errors
+        }
+      }
+      operationScope.markFinished();
     }
   }
 
@@ -324,9 +370,12 @@ export class RemoteRepoService {
   /**
    * Resolves a reference (branch, tag, or commit) to an absolute commit SHA.
    */
-  async resolveRef(url: string, ref: string): Promise<string> {
+  async resolveRef(url: string, ref: string, signal?: AbortSignal): Promise<string> {
     try {
-      const response = await spawnGitPromise(["ls-remote", url, ref], { secretsToRedact: [url] });
+      const response = await spawnGitPromise(["ls-remote", url, ref], {
+        secretsToRedact: [url],
+        ...(signal ? { signal } : {})
+      });
       const line = response.stdout.split(/\r?\n/).find((entry) => entry.trim().length > 0);
       if (!line) {
         throw new Error(`Unable to resolve reference '${ref}' for ${sanitizeUrl(url)}`);
@@ -349,16 +398,17 @@ export class RemoteRepoService {
   /**
    * Configures sparse checkout for an existing clone.
    */
-  async setupSparseCheckout(localPath: string, patterns: string[], env?: NodeJS.ProcessEnv): Promise<void> {
-    const options = env ? { env } : undefined;
+  async setupSparseCheckout(localPath: string, patterns: string[], env?: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<void> {
+    const options = env || signal ? { ...(env ? { env } : {}), ...(signal ? { signal } : {}) } : undefined;
     await this.gitOperations.setupSparseCheckout(localPath, patterns, options);
   }
 
   /**
    * Initializes submodules and returns discovered metadata.
    */
-  async initializeSubmodules(localPath: string, env?: NodeJS.ProcessEnv): Promise<SubmoduleInfo[]> {
-    return this.gitOperations.initializeSubmodules(localPath, env ? { env } : undefined);
+  async initializeSubmodules(localPath: string, env?: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<SubmoduleInfo[]> {
+    const options = env || signal ? { ...(env ? { env } : {}), ...(signal ? { signal } : {}) } : undefined;
+    return this.gitOperations.initializeSubmodules(localPath, options);
   }
 
   /**
@@ -431,9 +481,10 @@ export class RemoteRepoService {
     url: string,
     resolvedRef: string,
     submodules: SubmoduleInfo[],
-    env?: NodeJS.ProcessEnv
+    env?: NodeJS.ProcessEnv,
+    signal?: AbortSignal
   ): Promise<RepositoryMetadata> {
-    const headInfo = await this.getLastCommit(localPath, env);
+    const headInfo = await this.getLastCommit(localPath, env, signal);
     const cloneSize = await this.calculateDirectorySize(localPath);
     const fileCount = await this.countFiles(localPath);
 
@@ -447,11 +498,14 @@ export class RemoteRepoService {
     } satisfies RepositoryMetadata;
   }
 
-  private async getLastCommit(localPath: string, env?: NodeJS.ProcessEnv): Promise<RepositoryMetadata["lastCommit"]> {
+  private async getLastCommit(localPath: string, env?: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<RepositoryMetadata["lastCommit"]> {
     try {
-      const options: { secretsToRedact: string[]; env?: NodeJS.ProcessEnv } = { secretsToRedact: [localPath] };
+      const options: { secretsToRedact: string[]; env?: NodeJS.ProcessEnv; signal?: AbortSignal } = { secretsToRedact: [localPath] };
       if (env) {
         options.env = env;
+      }
+      if (signal) {
+        options.signal = signal;
       }
       const { stdout } = await spawnGitPromise([
         "-C",
@@ -541,6 +595,77 @@ export class RemoteRepoService {
       this.errorReporter.report(wrapped, { source: "remoteRepo.cleanup", metadata: { path: localPath } });
     }
   }
+
+  private createOperationHandle(): RemoteOperationHandle {
+    const abortController = new AbortController();
+    const cancellationSource = new vscode.CancellationTokenSource();
+    let settled = false;
+    let resolveCompletion!: () => void;
+    let rejectCompletion!: (reason?: unknown) => void;
+    const completion = new Promise<void>((resolve, reject) => {
+      resolveCompletion = resolve;
+      rejectCompletion = reject;
+    });
+    void completion.catch(() => undefined);
+
+    const handle: RemoteOperationHandle = {
+      abortSignal: abortController.signal,
+      cancellationToken: cancellationSource.token,
+      completion,
+      cancel: () => {
+        if (!cancellationSource.token.isCancellationRequested) {
+          cancellationSource.cancel();
+        }
+        if (!abortController.signal.aborted) {
+          abortController.abort();
+        }
+      },
+      markFinished: () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolveCompletion();
+        this.activeOperations.delete(handle);
+        cancellationSource.dispose();
+      },
+      markFailed: (reason?: unknown) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        rejectCompletion(reason);
+        this.activeOperations.delete(handle);
+        cancellationSource.dispose();
+      }
+    } satisfies RemoteOperationHandle;
+
+    this.activeOperations.add(handle);
+    return handle;
+  }
+
+  private async cancelActiveOperations(): Promise<void> {
+    const operations = Array.from(this.activeOperations);
+    if (operations.length === 0) {
+      return;
+    }
+
+    for (const operation of operations) {
+      try {
+        operation.cancel();
+      } catch {
+        // Ignore cancellation errors during shutdown
+      }
+    }
+
+    await Promise.allSettled(
+      operations.map((operation) =>
+        operation.completion.catch(() => {
+          // Swallow rejection when coordinating shutdown
+        })
+      )
+    );
+  }
 }
 
 /**
@@ -626,10 +751,12 @@ interface CloneExecutionOptions {
   singleBranch?: boolean;
   branch?: string;
   env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
 }
 
 interface GitOperationOptions {
   env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
 }
 
 export class AdvancedGitOperations {
@@ -658,6 +785,7 @@ export class AdvancedGitOperations {
     this.logger.debug("remoteRepo.git.partialClone", { url: sanitizeUrl(url) });
     await this.execGit(args, {
       ...(options.env ? { env: options.env } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
       secretsToRedact: [url]
     });
   }
@@ -681,6 +809,7 @@ export class AdvancedGitOperations {
     this.logger.debug("remoteRepo.git.clone", { url: sanitizeUrl(url) });
     await this.execGit(args, {
       ...(options.env ? { env: options.env } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
       secretsToRedact: [url]
     });
   }
@@ -693,8 +822,15 @@ export class AdvancedGitOperations {
     if (normalised.length === 0) {
       return;
     }
-    await this.execGit(["-C", localPath, "sparse-checkout", "init", "--cone"], options?.env ? { env: options.env } : undefined);
-    await this.execGit(["-C", localPath, "sparse-checkout", "set", ...normalised], options?.env ? { env: options.env } : undefined);
+    const execOptions = options?.env ? { env: options.env } : undefined;
+    await this.execGit(["-C", localPath, "sparse-checkout", "init", "--cone"], {
+      ...(execOptions ?? {}),
+      ...(options?.signal ? { signal: options.signal } : {})
+    });
+    await this.execGit(["-C", localPath, "sparse-checkout", "set", ...normalised], {
+      ...(execOptions ?? {}),
+      ...(options?.signal ? { signal: options.signal } : {})
+    });
   }
 
   async fetchMissing(localPath: string, paths: string[], options?: GitOperationOptions): Promise<void> {
@@ -702,12 +838,18 @@ export class AdvancedGitOperations {
       return;
     }
     const sanitized = paths.map((p) => p.replace(/\s+/g, ""));
-    await this.execGit(["-C", localPath, "fetch", "origin", "--depth=1", ...sanitized], options?.env ? { env: options.env } : undefined);
+    await this.execGit(["-C", localPath, "fetch", "origin", "--depth=1", ...sanitized], {
+      ...(options?.env ? { env: options.env } : {}),
+      ...(options?.signal ? { signal: options.signal } : {})
+    });
   }
 
   async initializeSubmodules(localPath: string, options?: GitOperationOptions): Promise<SubmoduleInfo[]> {
     try {
-      await this.execGit(["-C", localPath, "submodule", "update", "--init", "--recursive"], options?.env ? { env: options.env } : undefined);
+      await this.execGit(["-C", localPath, "submodule", "update", "--init", "--recursive"], {
+        ...(options?.env ? { env: options.env } : {}),
+        ...(options?.signal ? { signal: options.signal } : {})
+      });
     } catch (error) {
       this.logger.warn("remoteRepo.submodules.initFailed", { path: localPath, message: (error as Error).message });
       return [];
@@ -722,7 +864,10 @@ export class AdvancedGitOperations {
         ".gitmodules",
         "--get-regexp",
         "path"
-      ], options?.env ? { env: options.env } : undefined);
+      ], {
+        ...(options?.env ? { env: options.env } : {}),
+        ...(options?.signal ? { signal: options.signal } : {})
+      });
       const lines = stdout.split(/\r?\n/).filter((line) => line.trim().length > 0);
       const submodules: SubmoduleInfo[] = [];
       for (const line of lines) {
@@ -737,8 +882,14 @@ export class AdvancedGitOperations {
           "--file",
           ".gitmodules",
           "submodule." + key + ".url"
-        ], options?.env ? { env: options.env } : undefined);
-        const commitResult = await this.execGit(["-C", localPath, "rev-parse", "HEAD"], options?.env ? { env: options.env } : undefined);
+        ], {
+          ...(options?.env ? { env: options.env } : {}),
+          ...(options?.signal ? { signal: options.signal } : {})
+        });
+        const commitResult = await this.execGit(["-C", localPath, "rev-parse", "HEAD"], {
+          ...(options?.env ? { env: options.env } : {}),
+          ...(options?.signal ? { signal: options.signal } : {})
+        });
         submodules.push({
           name: key,
           path: modulePath,
@@ -756,15 +907,18 @@ export class AdvancedGitOperations {
 
   private async execGit(
     args: string[],
-    options?: { env?: NodeJS.ProcessEnv; secretsToRedact?: string[] }
+    options?: { env?: NodeJS.ProcessEnv; secretsToRedact?: string[]; signal?: AbortSignal }
   ): Promise<{ stdout: string; stderr: string }> {
     try {
-      const spawnOptions: { env?: NodeJS.ProcessEnv; secretsToRedact?: string[] } = {};
+      const spawnOptions: { env?: NodeJS.ProcessEnv; secretsToRedact?: string[]; signal?: AbortSignal } = {};
       if (options?.env) {
         spawnOptions.env = options.env;
       }
       if (options?.secretsToRedact && options.secretsToRedact.length > 0) {
         spawnOptions.secretsToRedact = options.secretsToRedact;
+      }
+      if (options?.signal) {
+        spawnOptions.signal = options.signal;
       }
       if (Object.keys(spawnOptions).length === 0) {
         return await spawnGitPromise(args);
@@ -915,6 +1069,9 @@ export class TemporaryDirectoryManager {
   private readonly activeDirs = new Set<string>();
   private readonly cleanupHandlers = new Map<string, () => Promise<void>>();
   private processCleanupRegistered = false;
+  private sigintCleanupInFlight = false;
+  private cleanupPromise: Promise<void> | null = null;
+  private cleanupCompleted = false;
 
   async createTempDir(prefix = "code-ingest-"): Promise<string> {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -942,23 +1099,57 @@ export class TemporaryDirectoryManager {
     await Promise.allSettled(operations);
   }
 
-  setupProcessCleanup(): void {
+  setupProcessCleanup(options: { beforeCleanup?: () => Promise<void> } = {}): void {
     if (this.processCleanupRegistered) {
       return;
     }
     this.processCleanupRegistered = true;
-    const onExit = () => {
-      this.cleanupAllSync();
+
+    const performCleanup = async (signal?: NodeJS.Signals): Promise<void> => {
+      if (this.cleanupPromise) {
+        await this.cleanupPromise;
+        return;
+      }
+
+      this.cleanupPromise = (async () => {
+        if (this.sigintCleanupInFlight) {
+          return;
+        }
+        this.sigintCleanupInFlight = true;
+        try {
+          if (typeof options.beforeCleanup === "function") {
+            try {
+              await options.beforeCleanup();
+            } catch {
+              // Ignore errors triggered by cooperative cleanup hooks.
+            }
+          }
+          await this.cleanupAll();
+          this.cleanupCompleted = true;
+        } finally {
+          this.sigintCleanupInFlight = false;
+          if (signal === "SIGINT" && typeof process.exitCode !== "number") {
+            process.exitCode = 130;
+          }
+          this.cleanupPromise = null;
+        }
+      })();
+
+      await this.cleanupPromise;
     };
-    process.on("exit", onExit);
+
+    process.once("beforeExit", () => {
+      void performCleanup();
+    });
 
     process.once("SIGINT", () => {
-      void this.cleanupAll().catch(() => undefined).finally(() => {
-        process.removeListener("exit", onExit);
-        if (typeof process.exitCode !== "number") {
-          process.exitCode = 130;
-        }
-      });
+      void performCleanup("SIGINT");
+    });
+
+    process.once("exit", () => {
+      if (!this.cleanupCompleted) {
+        this.cleanupAllSync();
+      }
     });
   }
 

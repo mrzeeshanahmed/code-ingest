@@ -122,10 +122,15 @@ describe("RemoteRepoService", () => {
 
     expect(partialClone).toHaveBeenCalledTimes(1);
     expect(partialClone).toHaveBeenCalledWith("https://example.com/repo.git", tempRoot, expect.objectContaining({
-      filterSpec: "blob:none"
+      filterSpec: "blob:none",
+      signal: expect.any(Object)
     }));
     expect(standardClone).not.toHaveBeenCalled();
-    expect(setupSparse).toHaveBeenCalledWith(tempRoot, ["src", "README.md"], undefined);
+    expect(setupSparse).toHaveBeenCalledWith(
+      tempRoot,
+      ["src", "README.md"],
+      expect.objectContaining({ signal: expect.any(Object) })
+    );
     expect(result.metadata.resolvedRef).toBe("abc123");
     expect(result.statistics.partialClone).toBe(true);
     expect(progressSpy).toHaveBeenCalledWith(expect.objectContaining({ phase: "complete" }));
@@ -233,82 +238,140 @@ describe("RemoteRepoService", () => {
         partialClone: true,
         keepTmpDir: false
       })
-    ).rejects.toThrow("network timed out");
+    ).rejects.toMatchObject({ message: expect.stringContaining("network timed out") });
 
     expect(cleanup).toHaveBeenCalledWith(tempRoot);
+  });
+
+  test("cancels active operations before process cleanup", async () => {
+    spawnGitPromiseMock.mockResolvedValue({ stdout: "", stderr: "" });
+
+    const beforeCleanupCalls: Array<() => Promise<void>> = [];
+    const setupProcessCleanup = jest.fn((options?: { beforeCleanup?: () => Promise<void> }) => {
+      if (options?.beforeCleanup) {
+        beforeCleanupCalls.push(options.beforeCleanup);
+      }
+    });
+
+    const partialClone = jest.fn(async (_url: string, _dir: string, options: { signal?: AbortSignal }) => {
+      return new Promise<void>((_resolve, reject) => {
+        const signal = options.signal;
+        if (signal?.aborted) {
+          reject(new Error("Operation cancelled"));
+          return;
+        }
+        signal?.addEventListener(
+          "abort",
+          () => {
+            reject(new Error("Operation cancelled"));
+          },
+          { once: true }
+        );
+      });
+    });
+
+    const dependencies: RemoteServiceDeps = {
+      authenticator: {
+        setupCredentials: jest.fn(async () => ({
+          method: "none",
+          successful: true,
+          credentialsUsed: false
+        } satisfies AuthenticationInfo)),
+        detectAuthenticationMethod: jest.fn(async () => "none"),
+        testAuthentication: jest.fn(async () => true)
+      } as unknown as GitAuthenticator,
+      gitOperations: {
+        partialClone,
+        standardClone: jest.fn(),
+        setupSparseCheckout: jest.fn(),
+        fetchMissing: jest.fn(),
+        initializeSubmodules: jest.fn(async () => [] as SubmoduleInfo[])
+      } as unknown as AdvancedGitOperations,
+      tempDirectoryManager: {
+        createTempDir: jest.fn(async () => tempRoot),
+        cleanup: jest.fn(async () => undefined),
+        cleanupAll: jest.fn(async () => undefined),
+        setupProcessCleanup
+      } as unknown as TemporaryDirectoryManager,
+      retryFactory: (config: RetryConfig) => new RetryableGitOperation(config, createLogger(), async () => undefined)
+    };
+
+    const service = new RemoteRepoService(createConfigService(), createErrorReporter(), createLogger(), dependencies);
+
+    expect(beforeCleanupCalls).toHaveLength(1);
+    const beforeCleanup = beforeCleanupCalls[0];
+    expect(beforeCleanup).toBeDefined();
+
+    const clonePromise = service.cloneRepository({
+      url: "https://example.com/slow.git",
+      partialClone: true
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(partialClone).toHaveBeenCalledTimes(1);
+    const cloneArgs = partialClone.mock.calls[0]?.[2];
+    expect(cloneArgs?.signal).toBeDefined();
+    expect(cloneArgs?.signal?.aborted).toBe(false);
+
+    await beforeCleanup?.();
+
+    await expect(clonePromise).rejects.toThrow("Operation cancelled");
+    expect(cloneArgs?.signal?.aborted).toBe(true);
   });
 });
 
 describe("TemporaryDirectoryManager", () => {
-  const originalPid = process.pid;
-
-  let onSpy: jest.SpiedFunction<typeof process.on>;
   let onceSpy: jest.SpiedFunction<typeof process.once>;
-  let removeSpy: jest.SpiedFunction<typeof process.removeListener>;
-  let killSpy: jest.SpiedFunction<typeof process.kill>;
   let exitSpy: jest.SpiedFunction<typeof process.exit>;
 
   beforeEach(() => {
-    onSpy = jest.spyOn(process, "on");
     onceSpy = jest.spyOn(process, "once");
-    removeSpy = jest.spyOn(process, "removeListener");
-    killSpy = jest.spyOn(process, "kill");
     exitSpy = jest.spyOn(process, "exit");
   });
 
   afterEach(() => {
-    onSpy.mockRestore();
     onceSpy.mockRestore();
-    removeSpy.mockRestore();
-    killSpy.mockRestore();
     exitSpy.mockRestore();
   });
 
-  test("registers cleanup handlers and re-emits SIGINT", async () => {
-    const exitListeners: Array<(...args: unknown[]) => void> = [];
-    const sigintListeners: Array<(...args: unknown[]) => void> = [];
-
-    onSpy.mockImplementation(((event: string, listener: (...args: unknown[]) => void) => {
-      if (event === "exit") {
-        exitListeners.push(listener);
-      }
-      return process;
-    }) as typeof process.on);
+  test("registers cleanup handlers and performs graceful SIGINT cleanup", async () => {
+    const listeners = new Map<string, (...args: unknown[]) => void>();
 
     onceSpy.mockImplementation(((event: string, listener: (...args: unknown[]) => void) => {
-      if (event === "SIGINT") {
-        sigintListeners.push(listener);
-      }
+      listeners.set(event, listener);
       return process;
     }) as typeof process.once);
-
-    removeSpy.mockImplementation(((...args: unknown[]) => {
-      void args;
-      return process;
-    }) as typeof process.removeListener);
-
-    killSpy.mockImplementation((() => true) as typeof process.kill);
     exitSpy.mockImplementation((() => undefined) as typeof process.exit);
 
+    // Save and restore exit code for test isolation
+    const originalExitCode = process.exitCode;
+    process.exitCode = undefined;
+
     const manager = new TemporaryDirectoryManager();
-    const cleanupAllSpy = jest.spyOn(manager, "cleanupAll").mockResolvedValue(undefined);
+    const order: string[] = [];
+    const beforeCleanup = jest.fn(async () => {
+      order.push("before");
+    });
+    const cleanupAllSpy = jest.spyOn(manager, "cleanupAll").mockImplementation(async () => {
+      order.push("cleanup");
+    });
 
-    manager.setupProcessCleanup();
+    manager.setupProcessCleanup({ beforeCleanup });
 
-    expect(exitListeners).toHaveLength(1);
-    expect(sigintListeners).toHaveLength(1);
-
-    const sigintHandler = sigintListeners[0];
+    const sigintHandler = listeners.get("SIGINT");
     expect(sigintHandler).toBeDefined();
 
     sigintHandler?.();
 
-    expect(cleanupAllSpy).toHaveBeenCalledTimes(1);
-    const cleanupPromise = cleanupAllSpy.mock.results[0]?.value as Promise<void> | undefined;
-    await cleanupPromise;
+    await new Promise((resolve) => setImmediate(resolve));
 
-    expect(removeSpy).toHaveBeenCalledWith("exit", exitListeners[0]);
-    expect(killSpy).toHaveBeenCalledWith(originalPid, "SIGINT");
+    expect(beforeCleanup).toHaveBeenCalledTimes(1);
+    expect(cleanupAllSpy).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["before", "cleanup"]);
+    expect(process.exitCode).toBe(130);
     expect(exitSpy).not.toHaveBeenCalled();
+
+    // restore exit code
+    process.exitCode = originalExitCode;
   });
 });

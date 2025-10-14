@@ -40,13 +40,38 @@ function createUri(fsPath) {
   };
 }
 
+const createMockDocument = (uri = createUri("untitled:mock")) => ({
+  uri,
+  fileName: uri.fsPath,
+  isUntitled: false,
+  isDirty: false,
+  languageId: "plaintext",
+  eol: 1,
+  lineCount: 0,
+  getText: jest.fn(() => ""),
+  positionAt: jest.fn((offset) => ({ line: 0, character: offset })),
+  save: jest.fn(() => Promise.resolve(true)),
+  version: 1,
+  isClosed: false,
+  lineAt: jest.fn(),
+  offsetAt: jest.fn(),
+  validateRange: jest.fn((range) => range),
+  validatePosition: jest.fn((position) => position)
+});
+
 const window = {
   showErrorMessage: jest.fn(() => Promise.resolve(undefined)),
   showWarningMessage: jest.fn(() => Promise.resolve(undefined)),
   showInformationMessage: jest.fn(() => Promise.resolve(undefined)),
   showInputBox: jest.fn(() => Promise.resolve(undefined)),
   showQuickPick: jest.fn(() => Promise.resolve(undefined)),
-  withProgress: jest.fn((_, task) => task({ report: noop }, { isCancellationRequested: false }))
+  withProgress: jest.fn((_, task) => task({ report: noop }, { isCancellationRequested: false })),
+  showTextDocument: jest.fn(async (document) => ({
+    document: document ?? createMockDocument(),
+    edit: jest.fn(async (callback) => {
+      callback({ insert: jest.fn() });
+    })
+  }))
 };
 
 function createOutputChannelImplementation(name) {
@@ -144,6 +169,15 @@ const workspace = {
   getConfiguration: jest.fn(() => ({ get: jest.fn(), update: jest.fn() })),
   getWorkspaceFolder: jest.fn(() => workspace.workspaceFolders[0]),
   workspaceFolders: [],
+  openTextDocument: jest.fn(async (input) => {
+    if (input && typeof input === "object" && "fsPath" in input) {
+      return createMockDocument(input);
+    }
+    if (typeof input === "object" && "path" in input) {
+      return createMockDocument(createUri(input.path));
+    }
+    return createMockDocument();
+  }),
   fs: {
     readFile: jest.fn(() => Promise.resolve(new Uint8Array())),
     writeFile: jest.fn(() => Promise.resolve()),
@@ -419,6 +453,7 @@ mockVSCode.__reset = () => {
   window.createTreeView.mockClear();
   window.registerWebviewViewProvider.mockClear();
   window.createWebviewPanel.mockClear();
+  window.showTextDocument.mockClear();
 
   workspace.getConfiguration.mockClear();
   workspace.getWorkspaceFolder.mockClear();
@@ -426,6 +461,7 @@ mockVSCode.__reset = () => {
   workspace.fs.writeFile.mockClear();
   workspace.fs.delete.mockClear();
   workspace.fs.rename.mockClear();
+  workspace.openTextDocument.mockClear();
   workspace.onDidChangeConfiguration.mockClear();
   workspace.onDidChangeWorkspaceFolders.mockClear();
   workspace.onDidSaveTextDocument.mockClear();

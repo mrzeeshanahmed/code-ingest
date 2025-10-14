@@ -230,3 +230,52 @@ export interface SecurityAuditMetrics {
   filesScanned: number;
   findingsSummary: SecurityFindingSummary;
 }
+
+export type SecurityPipelineStage = "STATIC_ANALYSIS" | "DYNAMIC_TESTING" | "REPORTING";
+
+export type SecurityPipelineStageStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
+
+export interface SecurityPipelineStageState<T> {
+  stage: SecurityPipelineStage;
+  status: SecurityPipelineStageStatus;
+  startedAt?: Date;
+  completedAt?: Date;
+  result?: T;
+  error?: string;
+}
+
+export interface SecurityReportingSummary {
+  totalDependencies: number;
+  vulnerableDependencies: number;
+  averageComplianceCoverage: number;
+}
+
+export interface SecurityReportingResult {
+  dependencies: DependencyVulnerability[];
+  licenseCompliance: LicenseCompliance[];
+  maliciousPackages: MaliciousPackage[];
+  compliance: ComplianceResult[];
+  summary: SecurityReportingSummary;
+  generatedAt: Date;
+}
+
+export interface SecurityPipelineContext {
+  stages: {
+    staticAnalysis: SecurityPipelineStageState<SecurityFinding[]>;
+    dynamicTesting: SecurityPipelineStageState<DynamicTestResult[]>;
+    reporting: SecurityPipelineStageState<SecurityReportingResult>;
+  };
+}
+
+export const createEmptySecurityReportingResult = (): SecurityReportingResult => ({
+  dependencies: [],
+  licenseCompliance: [],
+  maliciousPackages: [],
+  compliance: [],
+  summary: {
+    totalDependencies: 0,
+    vulnerableDependencies: 0,
+    averageComplianceCoverage: 0
+  },
+  generatedAt: new Date(0)
+});

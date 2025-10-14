@@ -56,6 +56,7 @@ export class CommandRegistry {
 
     this.commands = new Map();
     this.pendingCommands = new Map();
+    this.commandQueues = new Map();
   }
 
   register(commandId, handler, options = {}) {
@@ -98,15 +99,6 @@ export class CommandRegistry {
       throw new Error(`Command ${commandId} cannot be executed from webview context`);
     }
 
-    const now = Date.now();
-    if (now - entry.lastInvocation < entry.rateLimitMs) {
-      throw new Error(`Command rate limited: ${commandId}`);
-    }
-
-    if (!this.rateLimiter.isAllowed(commandId)) {
-      throw new Error(`Command throttled: ${commandId}`);
-    }
-
     const validationResult = entry.validation ? entry.validation(payload) : { ok: true, value: payload };
     if (!validationResult || validationResult.ok !== true) {
       const reason = validationResult?.reason ?? "validation_failed";
@@ -115,47 +107,16 @@ export class CommandRegistry {
     }
 
     const normalisedPayload = validationResult.value ?? payload;
-    entry.lastInvocation = now;
-    this.rateLimiter.recordRequest(commandId);
 
     if (entry.direction === "local") {
       return await entry.handler(normalisedPayload, this._buildContext(commandId));
     }
 
-    const message = this.envelope.createMessage("command", commandId, normalisedPayload, {
-      expectsAck: entry.requiresAck
-    });
-
-    let ackPromise;
-    if (entry.requiresAck) {
-      ackPromise = this.ackSystem.waitForAcknowledgment(message.id);
-      this.pendingCommands.set(message.id, {
-        commandId,
-        timestamp: now,
-        promise: ackPromise
-      });
+    if (entry.direction === "outbound" && entry.requiresAck) {
+      return this._enqueueCommand(entry, commandId, normalisedPayload);
     }
 
-    try {
-      if (typeof entry.handler === "function") {
-        await entry.handler(normalisedPayload, { message });
-      }
-    } catch (handlerError) {
-      this.log.error?.("Command handler failed", handlerError);
-      if (entry.requiresAck && ackPromise) {
-        this.ackSystem.reject(message.id, handlerError);
-        this.pendingCommands.delete(message.id);
-      }
-      throw handlerError;
-    }
-
-    this.postMessage(message);
-
-    if (entry.requiresAck && ackPromise) {
-      return ackPromise;
-    }
-
-    return { ok: true };
+    return this._executeOutbound(entry, commandId, normalisedPayload);
   }
 
   async handleIncoming(message) {
@@ -211,6 +172,99 @@ export class CommandRegistry {
     if (resolved) {
       this.pendingCommands.delete(message.id);
     }
+  }
+
+  async _executeOutbound(entry, commandId, payload, options = {}) {
+    const skipRateLimit = options.skipRateLimit === true;
+    const now = Date.now();
+    if (!skipRateLimit && now - entry.lastInvocation < entry.rateLimitMs) {
+      throw new Error(`Command rate limited: ${commandId}`);
+    }
+
+    if (!this.rateLimiter.isAllowed(commandId)) {
+      throw new Error(`Command throttled: ${commandId}`);
+    }
+
+    entry.lastInvocation = now;
+    this.rateLimiter.recordRequest(commandId);
+
+    const message = this.envelope.createMessage("command", commandId, payload, {
+      expectsAck: entry.requiresAck
+    });
+
+    let ackPromise;
+    if (entry.requiresAck) {
+      ackPromise = this.ackSystem.waitForAcknowledgment(message.id);
+      this.pendingCommands.set(message.id, {
+        commandId,
+        timestamp: now,
+        promise: ackPromise
+      });
+    }
+
+    try {
+      if (typeof entry.handler === "function") {
+        await entry.handler(payload, { message });
+      }
+    } catch (handlerError) {
+      this.log.error?.("Command handler failed", handlerError);
+      if (entry.requiresAck && ackPromise) {
+        this.ackSystem.reject(message.id, handlerError);
+        this.pendingCommands.delete(message.id);
+      }
+      throw handlerError;
+    }
+
+    this.postMessage(message);
+
+    if (entry.requiresAck && ackPromise) {
+      return ackPromise;
+    }
+
+    return { ok: true };
+  }
+
+  _enqueueCommand(entry, commandId, payload) {
+    const queueState = this._getQueueState(commandId);
+    const shouldStartImmediately = queueState.queue.length === 0 && !queueState.inFlight;
+
+    return new Promise((resolve, reject) => {
+      queueState.queue.push({ entry, payload, resolve, reject, skipRateLimit: !shouldStartImmediately });
+      if (shouldStartImmediately) {
+        this._processQueue(commandId);
+      }
+    });
+  }
+
+  _processQueue(commandId) {
+    const state = this.commandQueues.get(commandId);
+    if (!state || state.inFlight) {
+      return;
+    }
+
+    const next = state.queue.shift();
+    if (!next) {
+      return;
+    }
+
+    state.inFlight = true;
+
+    Promise.resolve()
+      .then(() => this._executeOutbound(next.entry, commandId, next.payload, { skipRateLimit: next.skipRateLimit }))
+      .then(next.resolve, next.reject)
+      .finally(() => {
+        state.inFlight = false;
+        this._processQueue(commandId);
+      });
+  }
+
+  _getQueueState(commandId) {
+    let state = this.commandQueues.get(commandId);
+    if (!state) {
+      state = { inFlight: false, queue: [] };
+      this.commandQueues.set(commandId, state);
+    }
+    return state;
   }
 
   _sendAck(originalMessage, payload) {

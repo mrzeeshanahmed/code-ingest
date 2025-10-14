@@ -119,4 +119,56 @@ describe("Webview Store", () => {
       expect(state.generation.redactionOverride).toBe(false);
     });
   });
+
+  describe("legacy patch buffering", () => {
+    it("queues partial updates until markReady is invoked", () => {
+      store.setState({ preview: { title: "Queued" } });
+
+      expect(store.getState().preview.title).not.toBe("Queued");
+
+      store.markReady();
+
+      expect(store.getState().preview.title).toBe("Queued");
+    });
+
+    it("applies tree and selection updates atomically", () => {
+      const initialState = store.getState();
+      const initialSelectionSet = initialState.fileTree.selectedFiles;
+
+      store.markReady();
+      store.setState({ tree: [{ path: "src/index.ts" }], selection: ["src/index.ts"] });
+
+      const nextState = store.getState();
+      expect(nextState.tree).toEqual([{ path: "src/index.ts" }]);
+      expect(nextState.selection).toEqual(["src/index.ts"]);
+      expect(nextState.fileTree.selectedFiles.has("src/index.ts")).toBe(true);
+      expect(nextState.fileTree.selectedFiles).not.toBe(initialSelectionSet);
+    });
+
+    it("flushes queued updaters in order", () => {
+      store.setState(() => ({ status: "loading" }));
+      store.setState(() => ({ status: "ready" }));
+
+      expect(store.getState().status).toBe("idle");
+
+      store.markReady();
+
+      expect(store.getState().status).toBe("ready");
+    });
+
+    it("clones notification arrays to avoid external mutation", () => {
+      const errors = [{ message: "one" }];
+
+      store.markReady();
+      store.setState({ errors });
+
+      const nextState = store.getState();
+      expect(nextState.errors).not.toBe(errors);
+      expect(nextState.notifications.errors).not.toBe(errors);
+      expect(nextState.errors).toEqual(errors);
+
+      errors.push({ message: "two" });
+      expect(nextState.errors).toEqual([{ message: "one" }]);
+    });
+  });
 });

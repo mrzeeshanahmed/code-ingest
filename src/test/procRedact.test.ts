@@ -10,12 +10,14 @@ jest.mock("node:child_process", () => ({
 type MockChildProcess = EventEmitter & {
   stdout: EventEmitter;
   stderr: EventEmitter;
+  kill: jest.Mock;
 };
 
 function createChildProcess(): MockChildProcess {
   const child = new EventEmitter() as MockChildProcess;
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
+  child.kill = jest.fn();
   return child;
 }
 
@@ -63,5 +65,20 @@ describe("spawnGitPromise", () => {
     await expect(promise).rejects.toMatchObject({
       message: expect.stringContaining("[REDACTED]")
     });
+  });
+
+  it("terminates the process when the provided abort signal fires", async () => {
+    spawnMock.mockReset();
+    const child = createChildProcess();
+    spawnMock.mockReturnValue(child as unknown as ReturnType<typeof spawn>);
+
+    const controller = new AbortController();
+    const promise = spawnGitPromise(["fetch"], { signal: controller.signal });
+
+    controller.abort();
+    child.emit("close", null, "SIGTERM");
+
+    await expect(promise).rejects.toThrow(/signal SIGTERM/);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 });

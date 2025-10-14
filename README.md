@@ -139,9 +139,12 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 git clone https://github.com/your-org/code-ingest
 cd code-ingest
 npm install
+npm run build:webview
 npm run build
 code .
 ```
+
+> **Note:** Always run `npm run build:webview` before packaging the extension or executing the test/CI pipelines so the webview assets are up to date.
 
 ### Running Tests
 

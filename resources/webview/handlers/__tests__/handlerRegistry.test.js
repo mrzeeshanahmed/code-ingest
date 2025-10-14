@@ -18,7 +18,12 @@ describe("HandlerRegistry", () => {
 
   it("dispatches messages to registered handlers", async () => {
     const registry = new HandlerRegistry();
-    const handler = { process: jest.fn().mockResolvedValue(undefined), canHandle: () => true };
+    const handler = {
+      process: jest.fn().mockResolvedValue(undefined),
+      canHandle: () => true,
+      validate: jest.fn().mockReturnValue({ ok: true }),
+      handle: jest.fn()
+    };
 
     registry.register("foo", handler);
     await registry.process("foo", { value: 1 });
@@ -39,6 +44,8 @@ describe("HandlerRegistry", () => {
     const registry = new HandlerRegistry();
     const handler = {
       canHandle: () => true,
+      validate: jest.fn().mockReturnValue({ ok: true }),
+      handle: jest.fn(),
       process: () => {
         throw new Error("boom");
       }
@@ -50,5 +57,27 @@ describe("HandlerRegistry", () => {
     expect(window.vscode.postMessage).toHaveBeenCalledWith(
       expect.objectContaining({ type: "handler:error" })
     );
+  });
+
+  it("rejects handlers missing required interface methods", () => {
+    const registry = new HandlerRegistry();
+
+    expect(() => registry.register("missingValidate", {
+      process: jest.fn(),
+      canHandle: jest.fn(),
+      handle: jest.fn()
+    })).toThrow(/must implement validate/);
+
+    expect(() => registry.register("missingHandle", {
+      process: jest.fn(),
+      canHandle: jest.fn(),
+      validate: jest.fn()
+    })).toThrow(/must implement validate/);
+
+    expect(() => registry.register("missingCanHandle", {
+      process: jest.fn(),
+      validate: jest.fn(),
+      handle: jest.fn()
+    })).toThrow(/must implement canHandle/);
   });
 });

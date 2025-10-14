@@ -221,4 +221,41 @@ describe("GitProcessManager", () => {
     expect(metrics.failedCommands).toBeGreaterThanOrEqual(1);
     expect(metrics.errorTypes.get(GitErrorType.AUTHENTICATION)).toBeGreaterThanOrEqual(1);
   });
+
+  test("SIGINT handler cancels active processes and waits for completion", async () => {
+    const logger = createLogger();
+    const { instance: reporter } = createErrorReporter();
+    const manager = new GitProcessManager(logger, reporter);
+
+    const { child, stdout, stderr } = createMockChildProcess();
+    spawnMock.mockReturnValueOnce(child);
+
+    const execution = manager.executeGitCommand(["status"], { cwd: "/workspace", retries: 1 });
+
+    await flushAsync();
+
+    const originalExitCode = process.exitCode;
+    process.exitCode = undefined;
+
+  const cleanupPromise = (GitProcessManager as unknown as { runGlobalCleanup(signal?: NodeJS.Signals): Promise<void> }).runGlobalCleanup("SIGINT");
+
+    expect(killSpy).toHaveBeenCalledWith(child.pid, "SIGTERM");
+
+    stderr.end();
+    stdout.end();
+    child.emit("close", null, "SIGTERM");
+
+  await cleanupPromise;
+
+    await expect(execution).rejects.toThrow(/signal SIGTERM/);
+
+    const active = (manager as unknown as { activeProcesses: Map<string, ChildProcess> }).activeProcesses;
+    expect(active.size).toBe(0);
+    expect(process.exitCode).toBe(130);
+
+    const cleanupState = (GitProcessManager as unknown as { cleanupPromise: Promise<void> | null }).cleanupPromise;
+    expect(cleanupState).toBeNull();
+
+    process.exitCode = originalExitCode;
+  });
 });

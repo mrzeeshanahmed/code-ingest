@@ -22,6 +22,7 @@ import { WebviewDebugUtils } from "./debugUtils.js";
 const DEFAULT_STATE = {
   tree: [],
   selection: [],
+  workspaceFolder: undefined,
   preview: {
     title: "Awaiting Selection",
     subtitle: "Select files from the tree to generate a live digest preview.",
@@ -75,6 +76,9 @@ export class WebviewApplication {
     window.performanceMonitor = this.performanceMonitor;
 
     this._initializeBootConfig();
+    this.workspaceRoot = typeof this.initialState.workspaceFolder === "string" && this.initialState.workspaceFolder.length > 0
+      ? this.initialState.workspaceFolder
+      : undefined;
   }
 
   _initializeBootConfig() {
@@ -113,7 +117,7 @@ export class WebviewApplication {
   }
 
   setupRenderer() {
-    this.uiRenderer = new UIRenderer(document);
+    this.uiRenderer = new UIRenderer(document, { workspaceRoot: this.workspaceRoot });
   }
 
   setupHandlers() {
@@ -147,6 +151,14 @@ export class WebviewApplication {
         continue;
       }
       this.registry.register(messageTypes, handler);
+    }
+
+    if (typeof this.store?.markReady === "function") {
+      this.store.markReady();
+    }
+
+    if (typeof this.registry?.setReady === "function") {
+      this.registry.setReady();
     }
   }
 

@@ -8,7 +8,9 @@ import type {
   IntegrityCheck,
   KnownVulnerability,
   LicenseCompliance,
-  MaliciousPackage
+  MaliciousPackage,
+  SecurityPipelineContext,
+  SecurityReportingResult
 } from "./types";
 
 class VulnerabilityDB {
@@ -69,10 +71,7 @@ export class DependencyScanner {
 
   async scanDependencies(): Promise<DependencyVulnerability[]> {
     const dependencies = this.parseDependencies();
-    return dependencies.map((dep) => ({
-      dependency: dep,
-      vulnerabilities: this.vulnerabilityDatabase.findVulnerabilities(dep)
-    }));
+    return this.buildDependencyVulnerabilities(dependencies);
   }
 
   async checkForKnownVulnerabilities(): Promise<KnownVulnerability[]> {
@@ -82,26 +81,27 @@ export class DependencyScanner {
 
   async analyzeLicenseCompliance(): Promise<LicenseCompliance[]> {
     const dependencies = this.parseDependencies();
-    return dependencies.map((dependency) => {
-      const license = this.readLicense(dependency.name) ?? "UNKNOWN";
-      const compatible = !license.includes("GPL");
-      return {
-        dependency,
-        license,
-        compatible,
-        notes: compatible ? "" : "GPL-like licenses require review"
-      } satisfies LicenseCompliance;
-    });
+    return this.buildLicenseCompliance(dependencies);
   }
 
   async detectMaliciousPackages(): Promise<MaliciousPackage[]> {
     const dependencies = this.parseDependencies();
-    const malicious = dependencies.filter((dependency) => dependency.name === "event-stream" && dependency.version === "3.3.6");
-    return malicious.map((dependency) => ({
-      dependency,
-      reason: "Known malicious version detected",
-      evidence: ["Version 3.3.6 contained credential-stealing payload"]
-    } satisfies MaliciousPackage));
+    return this.buildMaliciousPackages(dependencies);
+  }
+
+  async populateReporting(context: SecurityPipelineContext, reporting: SecurityReportingResult): Promise<void> {
+    if (context.stages.staticAnalysis.status !== "COMPLETED" || context.stages.dynamicTesting.status !== "COMPLETED") {
+      throw new Error("Security reporting requires analysis stages to complete");
+    }
+
+    const dependencies = this.parseDependencies();
+    reporting.dependencies = this.buildDependencyVulnerabilities(dependencies);
+    reporting.licenseCompliance = this.buildLicenseCompliance(dependencies);
+    reporting.maliciousPackages = this.buildMaliciousPackages(dependencies);
+
+    const vulnerableCount = reporting.dependencies.filter((entry) => entry.vulnerabilities.length > 0).length;
+    reporting.summary.totalDependencies = dependencies.length;
+    reporting.summary.vulnerableDependencies = vulnerableCount;
   }
 
   private parseDependencies(): Dependency[] {
@@ -130,6 +130,35 @@ export class DependencyScanner {
         }
       ];
     }
+  }
+
+  private buildDependencyVulnerabilities(dependencies: Dependency[]): DependencyVulnerability[] {
+    return dependencies.map((dep) => ({
+      dependency: dep,
+      vulnerabilities: this.vulnerabilityDatabase.findVulnerabilities(dep)
+    }));
+  }
+
+  private buildLicenseCompliance(dependencies: Dependency[]): LicenseCompliance[] {
+    return dependencies.map((dependency) => {
+      const license = this.readLicense(dependency.name) ?? "UNKNOWN";
+      const compatible = !license.includes("GPL");
+      return {
+        dependency,
+        license,
+        compatible,
+        notes: compatible ? "" : "GPL-like licenses require review"
+      } satisfies LicenseCompliance;
+    });
+  }
+
+  private buildMaliciousPackages(dependencies: Dependency[]): MaliciousPackage[] {
+    const malicious = dependencies.filter((dependency) => dependency.name === "event-stream" && dependency.version === "3.3.6");
+    return malicious.map((dependency) => ({
+      dependency,
+      reason: "Known malicious version detected",
+      evidence: ["Version 3.3.6 contained credential-stealing payload"]
+    } satisfies MaliciousPackage));
   }
 
   private readLicense(packageName: string): string | undefined {

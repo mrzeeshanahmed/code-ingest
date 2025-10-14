@@ -25,9 +25,27 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider, vscode
   private sessionToken: string | undefined;
   private disposables: vscode.Disposable[] = [];
 
-  constructor(private readonly extensionUri: vscode.Uri, private readonly panelManager: WebviewPanelManager) {}
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    private readonly panelManager: WebviewPanelManager,
+    private readonly ensureResourcesReady: () => Promise<void>
+  ) {}
 
-  public resolveWebviewView(webviewView: vscode.WebviewView): void {
+  public async resolveWebviewView(
+    webviewView: vscode.WebviewView,
+    _context: vscode.WebviewViewResolveContext,
+    _token: vscode.CancellationToken
+  ): Promise<void> {
+    void _context;
+    void _token;
+    try {
+      await this.ensureResourcesReady();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      webviewView.webview.html = `<!DOCTYPE html><html lang="en"><body><h2>Code Ingest</h2><p>Failed to load dashboard assets: ${message}</p></body></html>`;
+      return;
+    }
+
     this.disposeCurrentSession();
 
     DashboardViewProvider.activeInstance = this;

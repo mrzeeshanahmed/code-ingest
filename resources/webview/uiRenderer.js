@@ -21,9 +21,14 @@ export class UIRenderer {
       throw new TypeError("UIRenderer requires a document-like object");
     }
 
-    this.document = doc;
-    this.vscode = window?.vscode;
-    this.commandExecutor = typeof options.commandExecutor === "function" ? options.commandExecutor : null;
+  this.document = doc;
+  this.vscode = window?.vscode;
+  this.commandExecutor = typeof options.commandExecutor === "function" ? options.commandExecutor : null;
+  this.workspaceRoot = typeof options.workspaceRoot === "string" && options.workspaceRoot.length > 0 ? options.workspaceRoot : undefined;
+  this.workspaceInfo = this.workspaceRoot ? this.buildWorkspaceInfo(this.workspaceRoot) : null;
+  this.selectionDebounceMs = Number.isFinite(options.selectionDebounceMs) && options.selectionDebounceMs >= 0 ? options.selectionDebounceMs : 100;
+  this.selectionUpdateBuffer = new Map();
+  this.selectionFlushTimer = null;
     this.dashboard = doc.querySelector(".layout") ?? doc.body;
     this.statusArea = doc.querySelector(".status-strip") ?? this.dashboard;
 
@@ -138,7 +143,14 @@ export class UIRenderer {
   }
 
   updateTreeSelection(selection) {
-    this.selectionSet = new Set(Array.isArray(selection) ? selection : []);
+    const normalized = Array.isArray(selection)
+      ? selection
+          .map((value) => this.toWorkspaceRelative(value))
+          .filter((value) => typeof value === "string" && value.length > 0)
+      : [];
+
+    this.selectionSet = new Set(normalized);
+    this.cancelSelectionFlush();
     if (this.fileTree) {
       this.fileTree.setSelection(this.selectionSet);
     }
@@ -613,9 +625,22 @@ export class UIRenderer {
       }
 
       const absolutePath = typeof node.uri === "string" ? node.uri : typeof node.path === "string" ? node.path : undefined;
-      const relativePath = typeof node.relPath === "string" && node.relPath.length > 0
-        ? node.relPath
-        : absolutePath ?? node.name ?? `node-${depth}-${result.length}`;
+      let relativePath = typeof node.relPath === "string" && node.relPath.length > 0
+        ? this.toWorkspaceRelative(node.relPath)
+        : undefined;
+
+      if (!relativePath && absolutePath) {
+        relativePath = this.toWorkspaceRelative(absolutePath);
+      }
+
+      if (!relativePath && typeof node.name === "string") {
+        relativePath = node.name;
+      }
+
+      if (!relativePath) {
+        relativePath = `node-${depth}-${result.length}`;
+      }
+
       const children = Array.isArray(node.children) ? this.normalizeTree(node.children, depth + 1) : [];
       const type = node.type ?? (children.length > 0 ? "directory" : "file");
 
@@ -648,7 +673,8 @@ export class UIRenderer {
       if (!node || typeof node !== "object") {
         continue;
       }
-      const path = typeof node.uri === "string" ? node.uri : node.path;
+  const rawPath = typeof node.relPath === "string" ? node.relPath : typeof node.uri === "string" ? node.uri : node.path;
+  const path = this.toWorkspaceRelative(rawPath);
       if (node.expanded && path) {
         acc.add(path);
       }
@@ -660,15 +686,16 @@ export class UIRenderer {
   }
 
   handleToggleSelection(path, selected) {
-    if (!path) {
+    const normalizedPath = this.toWorkspaceRelative(path);
+    if (!normalizedPath) {
       return;
     }
     if (selected) {
-      this.selectionSet.add(path);
+      this.selectionSet.add(normalizedPath);
     } else {
-      this.selectionSet.delete(path);
+      this.selectionSet.delete(normalizedPath);
     }
-    this.postCommand(COMMAND_MAP.WEBVIEW_TO_HOST.UPDATE_SELECTION, { filePath: path, selected });
+    this.enqueueSelectionUpdate(normalizedPath, selected);
   }
 
   handleToggleExpand(path) {
@@ -727,5 +754,119 @@ export class UIRenderer {
       toast?.remove();
       this.toastTimeout = null;
     }, COMPLETION_TOAST_TIMEOUT);
+  }
+
+  normalizeSeparators(value) {
+    return typeof value === "string" ? value.replace(/[\\/]+/g, "/") : value;
+  }
+
+  buildWorkspaceInfo(root) {
+    const normalized = this.normalizeSeparators(root).replace(/\/+$/, "");
+    if (normalized.length === 0) {
+      return null;
+    }
+    return {
+      normalized,
+      normalizedLower: normalized.toLowerCase()
+    };
+  }
+
+  stripDrivePrefix(value) {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+    if (/^\/[a-zA-Z]:/.test(value)) {
+      return value.slice(1);
+    }
+    return value;
+  }
+
+  toWorkspaceRelative(value) {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+    let candidate = value.trim();
+    if (candidate.length === 0) {
+      return undefined;
+    }
+
+    if (candidate.startsWith("file://")) {
+      try {
+        const url = new URL(candidate);
+        candidate = decodeURIComponent(url.pathname ?? "");
+      } catch {
+        candidate = candidate.slice("file://".length);
+      }
+    }
+
+    candidate = this.normalizeSeparators(this.stripDrivePrefix(candidate) ?? candidate);
+
+    if (this.workspaceInfo && candidate) {
+      const candidateLower = candidate.toLowerCase();
+      if (candidateLower.startsWith(this.workspaceInfo.normalizedLower)) {
+        candidate = candidate.slice(this.workspaceInfo.normalized.length);
+        while (candidate.startsWith("/")) {
+          candidate = candidate.slice(1);
+        }
+      }
+    }
+
+    if (candidate.startsWith("/")) {
+      candidate = candidate.replace(/^\/+/, "");
+    }
+
+    if (/^[a-zA-Z]:/.test(candidate)) {
+      return undefined;
+    }
+
+    if (candidate.includes("://")) {
+      return undefined;
+    }
+
+    if (candidate.length === 0 || candidate === ".") {
+      return undefined;
+    }
+
+    return candidate;
+  }
+
+  enqueueSelectionUpdate(path, selected) {
+    this.selectionUpdateBuffer.set(path, Boolean(selected));
+    this.scheduleSelectionFlush();
+  }
+
+  scheduleSelectionFlush() {
+    if (this.selectionDebounceMs === 0) {
+      this.flushSelectionUpdates();
+      return;
+    }
+
+    if (this.selectionFlushTimer) {
+      window.clearTimeout(this.selectionFlushTimer);
+    }
+
+    this.selectionFlushTimer = window.setTimeout(() => {
+      this.selectionFlushTimer = null;
+      this.flushSelectionUpdates();
+    }, this.selectionDebounceMs);
+  }
+
+  flushSelectionUpdates() {
+    if (this.selectionUpdateBuffer.size === 0) {
+      return;
+    }
+    const updates = Array.from(this.selectionUpdateBuffer.entries());
+    this.selectionUpdateBuffer.clear();
+    for (const [path, selected] of updates) {
+      this.postCommand(COMMAND_MAP.WEBVIEW_TO_HOST.UPDATE_SELECTION, { filePath: path, selected });
+    }
+  }
+
+  cancelSelectionFlush() {
+    if (this.selectionFlushTimer) {
+      window.clearTimeout(this.selectionFlushTimer);
+      this.selectionFlushTimer = null;
+    }
+    this.selectionUpdateBuffer.clear();
   }
 }

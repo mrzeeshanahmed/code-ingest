@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, jest } from "@jest/globals
 import type * as vscode from "vscode";
 
 import { OutputWriter, type OutputTarget } from "../../services/outputWriter";
+import type { ErrorReporter } from "../../services/errorReporter";
 import { createCancellationTokenSource, setWorkspaceFolder } from "./testUtils";
 
 type VsModule = typeof import("vscode");
@@ -29,6 +30,8 @@ describe("OutputWriter", () => {
   let mockWorkspace: jest.Mocked<VsWorkspace>;
   let mockClipboard: jest.Mocked<vscode.Clipboard>;
   let currentDocumentText = "";
+  let mockErrorReporter: jest.Mocked<Pick<ErrorReporter, "report">>;
+  let mockErrorChannel: Pick<vscode.OutputChannel, "appendLine">;
 
   beforeEach(async () => {
     tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "ow-tests-"));
@@ -92,10 +95,20 @@ describe("OutputWriter", () => {
       writeText: jest.fn(() => Promise.resolve())
     } as unknown as jest.Mocked<vscode.Clipboard>;
 
+    mockErrorReporter = {
+      report: jest.fn()
+    };
+
+    mockErrorChannel = {
+      appendLine: jest.fn()
+    };
+
     outputWriter = new OutputWriter({
       window: mockWindow,
       workspace: mockWorkspace,
-      clipboard: mockClipboard
+      clipboard: mockClipboard,
+      errorReporter: mockErrorReporter as unknown as ErrorReporter,
+      errorChannel: mockErrorChannel
     });
   });
 
@@ -139,6 +152,11 @@ describe("OutputWriter", () => {
     const fileExists = await fs.stat(result.uri!.fsPath);
     expect(fileExists.isFile()).toBe(true);
     expect(progress).toHaveBeenCalled();
+    expect(progress).toHaveBeenCalledWith(expect.objectContaining({ currentOperation: "Opening digest file…" }));
+    expect(mockWorkspace.openTextDocument).toHaveBeenCalledWith(expect.objectContaining({ fsPath: result.uri!.fsPath }));
+    expect(mockWindow.showTextDocument).toHaveBeenCalled();
+    expect(mockErrorReporter.report).not.toHaveBeenCalled();
+    expect(mockErrorChannel.appendLine).not.toHaveBeenCalled();
   });
 
   it("aborts when cancellation requested during file write", async () => {
@@ -154,6 +172,27 @@ describe("OutputWriter", () => {
 
     expect(result.success).toBe(false);
     await expect(fs.access(path.join(tempRoot, "cancelled.txt"))).rejects.toThrow();
+  });
+
+  it("emits write progress updates and opens the digest file", async () => {
+    const progressEvents: Array<{ phase: string; currentOperation: string }> = [];
+    const destination = path.join(tempRoot, "digest.md");
+
+    const result = await outputWriter.writeOutput({
+      target: { type: "file", path: destination },
+      content: "# Heading\n".repeat(2_000),
+      format: "markdown",
+      progressCallback: (progress) => {
+        progressEvents.push({ phase: progress.phase, currentOperation: progress.currentOperation });
+      }
+    });
+
+    expect(result.success).toBe(true);
+    expect(progressEvents.some((event) => event.currentOperation === "Writing digest file…")).toBe(true);
+    expect(progressEvents.some((event) => event.currentOperation === "Opening digest file…")).toBe(true);
+  expect(progressEvents[progressEvents.length - 1]?.phase).toBe("complete");
+    expect(mockWorkspace.openTextDocument).toHaveBeenCalledWith(expect.objectContaining({ fsPath: destination }));
+    expect(mockWindow.showTextDocument).toHaveBeenCalled();
   });
 
   it("streams text to clipboard and reports completion", async () => {
@@ -194,6 +233,8 @@ describe("OutputWriter", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/Directory does not exist/i);
+    expect(mockErrorReporter.report).toHaveBeenCalledWith(expect.any(Error), expect.objectContaining({ source: "outputWriter.write" }));
+    expect(mockErrorChannel.appendLine).toHaveBeenCalledWith(expect.stringContaining("Failed to write output"));
   });
 
   it("writes stream to file incrementally", async () => {

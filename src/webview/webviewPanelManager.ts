@@ -8,21 +8,29 @@ type PanelState = Record<string, unknown>;
 export class WebviewPanelManager {
   private stateSnapshot: PanelState | undefined;
 
-  constructor(private readonly extensionUri: vscode.Uri) {}
+  constructor(
+    private readonly extensionUri: vscode.Uri,
+    private readonly ensureResourcesReady: () => Promise<void>
+  ) {}
 
-  createAndShowPanel(state?: PanelState): void {
+  async createAndShowPanel(state?: PanelState): Promise<void> {
     if (state) {
       this.setStateSnapshot(state, { emit: false });
     }
+    await this.ensureResourcesReady();
     const focusCommand = `${DashboardViewProvider.viewType}.focus`;
-    void vscode.commands
-      .executeCommand(focusCommand)
-      .then(
-        undefined,
-        () => {
-          void CodeIngestPanel.createOrShow(this.extensionUri);
-        }
-      );
+    try {
+      await vscode.commands.executeCommand(focusCommand);
+    } catch (focusError) {
+      try {
+        await CodeIngestPanel.createOrShow(this.extensionUri);
+      } catch (panelError) {
+        console.error("WebviewPanelManager: failed to show dashboard panel", {
+          focusError,
+          panelError
+        });
+      }
+    }
   }
 
   setStateSnapshot(state: PanelState, options?: { emit?: boolean }): void {

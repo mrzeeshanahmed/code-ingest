@@ -206,7 +206,7 @@ export function registerIngestRemoteRepoCommand(
       }.`
     );
 
-    services.webviewPanelManager.createAndShowPanel();
+    await services.webviewPanelManager.createAndShowPanel();
     services.webviewPanelManager.setStateSnapshot({
       status: "digest-running",
       preview: null,
@@ -246,19 +246,19 @@ export function registerIngestRemoteRepoCommand(
           progress.report({ message: safeMessage });
         };
 
-        throwIfCancelled(cancellationToken);
-        updatePanelProgress("Authenticating with GitHub…");
+  throwIfCancelled(cancellationToken);
+  updatePanelProgress("Authenticating with GitHub…");
         token = await authenticate();
         if (!token) {
           throw new Error("GitHub authentication failed or was cancelled.");
         }
 
-        throwIfCancelled(cancellationToken);
-  updatePanelProgress("Resolving repository reference…");
+    throwIfCancelled(cancellationToken);
+    updatePanelProgress("Resolving repository reference…");
         const sha = await resolveRefToSha(repoSlug, trimmedRef, token);
 
-        throwIfCancelled(cancellationToken);
-  updatePanelProgress("Cloning repository (blobless)…");
+    throwIfCancelled(cancellationToken);
+    updatePanelProgress("Cloning repository (blobless)…");
         const { tempDir: cloneDir } = await partialClone(repoSlug, token);
         tempDir = cloneDir;
 

@@ -2,6 +2,8 @@ import type {
   ComplianceFramework,
   ComplianceRequirement,
   ComplianceResult,
+  SecurityPipelineContext,
+  SecurityReportingResult,
   SecurityRecommendation
 } from "./types";
 
@@ -44,6 +46,21 @@ export class ComplianceChecker {
     }
     const evidence = this.evaluateFramework(framework);
     return this.buildResult(framework, evidence);
+  }
+
+  async populateReporting(context: SecurityPipelineContext, reporting: SecurityReportingResult): Promise<ComplianceResult[]> {
+    if (context.stages.dynamicTesting.status !== "COMPLETED") {
+      throw new Error("Compliance checks require dynamic security testing to complete");
+    }
+
+    const results = [
+      await this.checkOWASPCompliance(),
+      await this.checkCWECompliance(),
+      await this.checkDataProtectionCompliance()
+    ];
+
+    reporting.compliance = results;
+    return results;
   }
 
   private buildResult(framework: ComplianceFramework, evidence: ComplianceEvidence[]): ComplianceResult {

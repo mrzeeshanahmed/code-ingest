@@ -16,13 +16,129 @@ import { WebviewPanelManager } from "./webview/webviewPanelManager";
 import { DEFAULT_CONFIG } from "./config/constants";
 import type { Logger } from "./utils/gitProcessManager";
 import { GitProcessManager } from "./utils/gitProcessManager";
-import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawnSync } from "node:child_process";
+import * as fsPromises from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { spawn } from "node:child_process";
+import { OutputWriter } from "./services/outputWriter";
 
 let errorReporter: ErrorReporter | undefined;
 let outputChannel: vscode.OutputChannel | undefined;
 let activationTelemetry: Telemetry | undefined;
+
+const REQUIRED_WEBVIEW_ASSETS = ["index.html", "main.js", "styles.css", "store.js"] as const;
+
+type EnsureWebviewResourcesFn = () => Promise<void>;
+
+function createWebviewResourceEnsurer(
+  extensionPath: string,
+  logChannel: vscode.OutputChannel,
+  errorChannel: vscode.OutputChannel
+): EnsureWebviewResourcesFn {
+  let inFlight: Promise<void> | undefined;
+
+  const logLines = (lines: string[], target: vscode.OutputChannel, prefix: string): void => {
+    lines.filter(Boolean).forEach((line) => target.appendLine(`${prefix}${line}`));
+  };
+
+  const runCopyScript = async (): Promise<void> => {
+    const script = path.join(extensionPath, "scripts", "copyWebviewResources.js");
+    logChannel.appendLine("[activation] Running webview asset copy script...");
+
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(process.execPath, [script], {
+        cwd: extensionPath,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env }
+      });
+
+      child.stdout?.on("data", (chunk) => {
+        const lines = chunk.toString().split(/\r?\n/);
+        logLines(lines, logChannel, "[copy-webview] ");
+      });
+
+      child.stderr?.on("data", (chunk) => {
+        const lines = chunk.toString().split(/\r?\n/);
+        logLines(lines, errorChannel, "[copy-webview] ");
+      });
+
+      child.on("error", (error) => {
+        reject(error);
+      });
+
+      child.on("close", (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(new Error(`Webview asset copy script exited with code ${code ?? "unknown"}`));
+      });
+    });
+  };
+
+  const getMissingAssets = async (): Promise<string[]> => {
+    const destination = path.join(extensionPath, "out", "resources", "webview");
+    const missing: string[] = [];
+
+    await Promise.all(
+      REQUIRED_WEBVIEW_ASSETS.map(async (asset) => {
+        const assetPath = path.join(destination, asset);
+        try {
+          await fsPromises.access(assetPath, fsConstants.R_OK);
+        } catch (error) {
+          const errno = (error as NodeJS.ErrnoException)?.code;
+          if (errno !== "ENOENT") {
+            errorChannel.appendLine(
+              `[activation] Failed to access required webview asset ${asset}: ${(error as Error).message}`
+            );
+          }
+          missing.push(asset);
+        }
+      })
+    );
+
+    return missing;
+  };
+
+  const ensure = async (): Promise<void> => {
+    const missingBefore = await getMissingAssets();
+    if (missingBefore.length === 0) {
+      logChannel.appendLine("[activation] Webview assets verified.");
+      return;
+    }
+
+    logChannel.appendLine(
+      `[activation] Required webview asset(s) missing: ${missingBefore.join(", ")}. Attempting to regenerate...`
+    );
+
+    try {
+      await runCopyScript();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      errorChannel.appendLine(`[activation] Failed to regenerate webview assets: ${message}`);
+      throw error instanceof Error ? error : new Error(message);
+    }
+
+    const missingAfter = await getMissingAssets();
+    if (missingAfter.length > 0) {
+      const message = `Webview assets are still missing after regeneration: ${missingAfter.join(", ")}`;
+      errorChannel.appendLine(`[activation] ${message}`);
+      throw new Error(message);
+    }
+
+    logChannel.appendLine("[activation] Webview assets regenerated successfully.");
+  };
+
+  return () => {
+    if (!inFlight) {
+      inFlight = ensure().catch((error) => {
+        inFlight = undefined;
+        throw error;
+      });
+    }
+    return inFlight;
+  };
+}
 
 function formatLogContext(context?: Record<string, unknown>): string {
   if (!context) {
@@ -132,23 +248,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(outputChannel, errorChannel);
   outputChannel.appendLine("[activation] Starting Code Ingest activation sequence...");
 
-  // Ensure webview resources are present in out/resources/webview - helpful in development
+  const ensureWebviewResourcesReady = createWebviewResourceEnsurer(
+    context.extensionPath,
+    outputChannel,
+    errorChannel
+  );
+
   try {
-    const webviewOutIndex = path.join(context.extensionPath, "out", "resources", "webview", "index.html");
-    if (!fs.existsSync(webviewOutIndex)) {
-      outputChannel.appendLine("[activation] Webview build artifacts not found. Running webview copy script...");
-      const script = path.join(context.extensionPath, "scripts", "copyWebviewResources.js");
-      const result = spawnSync(process.execPath, [script], { cwd: context.extensionPath, encoding: "utf8" });
-      if (result.error) {
-        errorChannel.appendLine(`[activation] Failed to run webview copy script: ${result.error.message}`);
-      } else if (result.status !== 0) {
-        errorChannel.appendLine(`[activation] Webview copy script exited with code ${result.status}: ${result.stderr}`);
-      } else {
-        outputChannel.appendLine("[activation] Webview assets copied successfully.");
-      }
-    }
-  } catch (err) {
-    errorChannel.appendLine(`[activation] Webview asset check failed: ${(err as Error).message}`);
+    await ensureWebviewResourcesReady();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    errorChannel.appendLine(`[activation] Aborting activation: ${message}`);
+    throw error;
   }
 
   const diagnostics = new Diagnostics();
@@ -213,9 +324,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   processHandlers.push(() => process.off("unhandledRejection", unhandledRejectionHandler));
   context.subscriptions.push({ dispose: () => processHandlers.forEach((dispose) => dispose()) });
 
-  const webviewPanelManager = new WebviewPanelManager(context.extensionUri);
+  const webviewPanelManager = new WebviewPanelManager(context.extensionUri, ensureWebviewResourcesReady);
+  const outputWriter = new OutputWriter({
+    window: vscode.window,
+    workspace: vscode.workspace,
+    clipboard: vscode.env.clipboard,
+    errorReporter: reporter,
+    errorChannel
+  });
 
-  const dashboardViewProvider = new DashboardViewProvider(context.extensionUri, webviewPanelManager);
+  const dashboardViewProvider = new DashboardViewProvider(
+    context.extensionUri,
+    webviewPanelManager,
+    ensureWebviewResourcesReady
+  );
   const dashboardDisposable = vscode.window.registerWebviewViewProvider(
     DashboardViewProvider.viewType,
     dashboardViewProvider
@@ -252,7 +374,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     diagnosticService,
     configurationService,
     errorReporter: reporter,
-    extensionUri: context.extensionUri
+    extensionUri: context.extensionUri,
+    outputWriter
   };
 
   registerAllCommands(context, services);

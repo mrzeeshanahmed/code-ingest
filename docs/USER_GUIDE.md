@@ -22,6 +22,9 @@
 2. Click the **Code Ingest** icon in the Activity Bar (left sidebar).
 3. The Code Ingest panel opens showing your file tree.
 
+### Webview Assets
+- If you are developing or packaging the extension, run `npm run build:webview` (or `npm run build:webview && npm run build`) to ensure all dashboard assets are available before testing or distributing the extension.
+
 ## Basic Usage
 
 ### Selecting Files

@@ -15,6 +15,8 @@ export class HandlerRegistry {
     this.handlers = new Map();
     this.logger = options.logger ?? console;
     this.fallbackHandler = typeof options.fallbackHandler === "function" ? options.fallbackHandler : null;
+    this.ready = false;
+    this.buffer = [];
   }
 
   /**
@@ -30,12 +32,25 @@ export class HandlerRegistry {
       if (!handler || typeof handler.process !== "function") {
         throw new TypeError(`Handler for ${type} must expose a process(messageType, payload) method.`);
       }
+      if (typeof handler.validate !== "function" || typeof handler.handle !== "function") {
+        throw new TypeError(`Handler for ${type} must implement validate(payload) and handle(payload).`);
+      }
+      if (typeof handler.canHandle !== "function") {
+        throw new TypeError(`Handler for ${type} must implement canHandle(messageType).`);
+      }
       this.handlers.set(type, handler);
     }
   }
 
   clear() {
     this.handlers.clear();
+    if (this.buffer.length > 0) {
+      const pending = this.buffer.splice(0);
+      for (const entry of pending) {
+        entry.reject?.(new Error("Handler registry cleared before processing buffered message"));
+      }
+    }
+    this.ready = false;
   }
 
   /**
@@ -54,6 +69,12 @@ export class HandlerRegistry {
     if (!messageType) {
       this.logger.warn("Received message without type.");
       return;
+    }
+
+    if (!this.ready) {
+      return new Promise((resolve, reject) => {
+        this.buffer.push({ messageType, payload, resolve, reject });
+      });
     }
 
     const handler = this.handlers.get(messageType);
@@ -91,6 +112,23 @@ export class HandlerRegistry {
       window.vscode?.postMessage?.({ type: "handler:error", payload });
     } catch (postError) {
       this.logger.error?.("Failed to report handler error", postError);
+    }
+  }
+
+  setReady() {
+    if (this.ready) {
+      return;
+    }
+
+    this.ready = true;
+
+    if (this.buffer.length === 0) {
+      return;
+    }
+
+    const pending = this.buffer.splice(0);
+    for (const entry of pending) {
+      void this.process(entry.messageType, entry.payload).then(entry.resolve, entry.reject);
     }
   }
 }
