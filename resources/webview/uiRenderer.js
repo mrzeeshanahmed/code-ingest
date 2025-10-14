@@ -16,13 +16,14 @@ const PROGRESS_LABELS = Object.freeze({
 });
 
 export class UIRenderer {
-  constructor(doc) {
+  constructor(doc, options = {}) {
     if (!doc || typeof doc.querySelector !== "function") {
       throw new TypeError("UIRenderer requires a document-like object");
     }
 
     this.document = doc;
     this.vscode = window?.vscode;
+    this.commandExecutor = typeof options.commandExecutor === "function" ? options.commandExecutor : null;
     this.dashboard = doc.querySelector(".layout") ?? doc.body;
     this.statusArea = doc.querySelector(".status-strip") ?? this.dashboard;
 
@@ -93,6 +94,10 @@ export class UIRenderer {
     this.configSummary = null;
     this.loadingOverlay = null;
     this.toastTimeout = null;
+  }
+
+  setCommandExecutor(executor) {
+    this.commandExecutor = typeof executor === "function" ? executor : null;
   }
 
   updateTree(nodes, options = {}) {
@@ -689,9 +694,19 @@ export class UIRenderer {
   }
 
   postCommand(commandId, payload) {
+    if (typeof this.commandExecutor === "function") {
+      try {
+        void this.commandExecutor(commandId, payload);
+      } catch (error) {
+        console.error("UIRenderer: command executor failed", commandId, error);
+      }
+      return;
+    }
+
     if (!this.vscode || typeof this.vscode.postMessage !== "function") {
       return;
     }
+
     this.vscode.postMessage({ type: "command", command: commandId, payload });
   }
 

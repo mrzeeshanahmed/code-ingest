@@ -203,6 +203,10 @@ export class WebviewApplication {
         : options;
       this.commandRegistry.register(commandId, undefined, registrationOptions);
     }
+
+    if (this.uiRenderer?.setCommandExecutor) {
+      this.uiRenderer.setCommandExecutor((commandId, payload) => this.commandRegistry.execute(commandId, payload));
+    }
   }
 
   setupMessageHandlers() {

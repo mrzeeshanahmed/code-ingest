@@ -774,9 +774,12 @@ export class GitProcessManager {
       GitProcessManager.cleanupRegistered = true;
       const cleanup = () => GitProcessManager.cleanupAll();
       process.on("exit", cleanup);
-      process.on("SIGINT", () => {
+      process.once("SIGINT", () => {
         cleanup();
-        process.exit(130);
+        process.removeListener("exit", cleanup);
+        if (typeof process.exitCode !== "number") {
+          process.exitCode = 130;
+        }
       });
     }
   }

@@ -198,7 +198,6 @@ export class RemoteRepoService {
     this.progressTrackerFactory =
       dependencies.progressTrackerFactory ?? ((callback, token) => new ProgressTracker(callback, token));
   }
-
   /**
    * Clones a remote repository according to the provided options and returns metadata about the clone.
    */
@@ -948,12 +947,18 @@ export class TemporaryDirectoryManager {
       return;
     }
     this.processCleanupRegistered = true;
-    process.on("exit", () => {
+    const onExit = () => {
       this.cleanupAllSync();
-    });
-    process.on("SIGINT", async () => {
-      await this.cleanupAll();
-      process.exit(0);
+    };
+    process.on("exit", onExit);
+
+    process.once("SIGINT", () => {
+      void this.cleanupAll().catch(() => undefined).finally(() => {
+        process.removeListener("exit", onExit);
+        if (typeof process.exitCode !== "number") {
+          process.exitCode = 130;
+        }
+      });
     });
   }
 

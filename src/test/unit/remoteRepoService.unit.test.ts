@@ -238,3 +238,77 @@ describe("RemoteRepoService", () => {
     expect(cleanup).toHaveBeenCalledWith(tempRoot);
   });
 });
+
+describe("TemporaryDirectoryManager", () => {
+  const originalPid = process.pid;
+
+  let onSpy: jest.SpiedFunction<typeof process.on>;
+  let onceSpy: jest.SpiedFunction<typeof process.once>;
+  let removeSpy: jest.SpiedFunction<typeof process.removeListener>;
+  let killSpy: jest.SpiedFunction<typeof process.kill>;
+  let exitSpy: jest.SpiedFunction<typeof process.exit>;
+
+  beforeEach(() => {
+    onSpy = jest.spyOn(process, "on");
+    onceSpy = jest.spyOn(process, "once");
+    removeSpy = jest.spyOn(process, "removeListener");
+    killSpy = jest.spyOn(process, "kill");
+    exitSpy = jest.spyOn(process, "exit");
+  });
+
+  afterEach(() => {
+    onSpy.mockRestore();
+    onceSpy.mockRestore();
+    removeSpy.mockRestore();
+    killSpy.mockRestore();
+    exitSpy.mockRestore();
+  });
+
+  test("registers cleanup handlers and re-emits SIGINT", async () => {
+    const exitListeners: Array<(...args: unknown[]) => void> = [];
+    const sigintListeners: Array<(...args: unknown[]) => void> = [];
+
+    onSpy.mockImplementation(((event: string, listener: (...args: unknown[]) => void) => {
+      if (event === "exit") {
+        exitListeners.push(listener);
+      }
+      return process;
+    }) as typeof process.on);
+
+    onceSpy.mockImplementation(((event: string, listener: (...args: unknown[]) => void) => {
+      if (event === "SIGINT") {
+        sigintListeners.push(listener);
+      }
+      return process;
+    }) as typeof process.once);
+
+    removeSpy.mockImplementation(((...args: unknown[]) => {
+      void args;
+      return process;
+    }) as typeof process.removeListener);
+
+    killSpy.mockImplementation((() => true) as typeof process.kill);
+    exitSpy.mockImplementation((() => undefined) as typeof process.exit);
+
+    const manager = new TemporaryDirectoryManager();
+    const cleanupAllSpy = jest.spyOn(manager, "cleanupAll").mockResolvedValue(undefined);
+
+    manager.setupProcessCleanup();
+
+    expect(exitListeners).toHaveLength(1);
+    expect(sigintListeners).toHaveLength(1);
+
+    const sigintHandler = sigintListeners[0];
+    expect(sigintHandler).toBeDefined();
+
+    sigintHandler?.();
+
+    expect(cleanupAllSpy).toHaveBeenCalledTimes(1);
+    const cleanupPromise = cleanupAllSpy.mock.results[0]?.value as Promise<void> | undefined;
+    await cleanupPromise;
+
+    expect(removeSpy).toHaveBeenCalledWith("exit", exitListeners[0]);
+    expect(killSpy).toHaveBeenCalledWith(originalPid, "SIGINT");
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+});

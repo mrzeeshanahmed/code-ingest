@@ -15,57 +15,43 @@ import { ComplianceChecker } from "./complianceChecker";
 import { DependencyScanner } from "./dependencyScanner";
 import { DynamicSecurityTester } from "./dynamicTester";
 import { SecurityReportGenerator } from "./reportGenerator";
+import { SecurityPipelineCoordinator, type SecurityPipelineContext, type SecurityPipelineDependencies } from "./pipelineCoordinator";
 import { StaticSecurityAnalyzer } from "./staticAnalyzer";
 
 const CATEGORY_BASELINE_SCORE = 85;
+type CategoryCollection = SecurityAuditResult["categories"];
+
+export interface SecurityAuditDependencies extends SecurityPipelineDependencies {
+  pipelineCoordinator?: SecurityPipelineCoordinator;
+}
 
 export class SecurityAuditService {
   private readonly staticAnalyzer: StaticSecurityAnalyzer;
   private readonly dynamicTester: DynamicSecurityTester;
   private readonly complianceChecker: ComplianceChecker;
   private readonly dependencyScanner: DependencyScanner;
+  private readonly pipelineCoordinator: SecurityPipelineCoordinator;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly configService: ConfigurationService
+    private readonly configService: ConfigurationService,
+    dependencies: SecurityAuditDependencies = {}
   ) {
-    this.staticAnalyzer = new StaticSecurityAnalyzer();
-    this.dynamicTester = new DynamicSecurityTester();
-    this.complianceChecker = new ComplianceChecker();
-    this.dependencyScanner = new DependencyScanner();
+    this.staticAnalyzer = dependencies.staticAnalyzer ?? new StaticSecurityAnalyzer();
+    this.dynamicTester = dependencies.dynamicTester ?? new DynamicSecurityTester();
+    this.complianceChecker = dependencies.complianceChecker ?? new ComplianceChecker();
+    this.dependencyScanner = dependencies.dependencyScanner ?? new DependencyScanner();
+    this.pipelineCoordinator = dependencies.pipelineCoordinator ?? new SecurityPipelineCoordinator({
+      staticAnalyzer: this.staticAnalyzer,
+      dynamicTester: this.dynamicTester,
+      dependencyScanner: this.dependencyScanner,
+      complianceChecker: this.complianceChecker
+    });
   }
 
   async performComprehensiveAudit(): Promise<SecurityAuditResult> {
-    const [
-      dataHandling,
-      inputValidation,
-      processExecution,
-      webviewSecurity,
-      fileSystemAccess,
-      cryptographicSecurity,
-      dependencyVulnerabilities,
-      complianceStatus
-    ] = await Promise.all([
-      this.auditDataHandling(),
-      this.auditInputValidation(),
-      this.auditProcessExecution(),
-      this.auditWebviewSecurity(),
-      this.auditFileSystemAccess(),
-      this.auditCryptographicSecurity(),
-      this.auditDependencies(),
-      this.checkCompliance()
-    ]);
-
-    const categories = {
-      dataHandling,
-      inputValidation,
-      processExecution,
-      webviewSecurity,
-      fileSystemAccess,
-      cryptographicSecurity,
-      dependencyVulnerabilities,
-      complianceStatus
-    };
+    const context = await this.pipelineCoordinator.run();
+  const categories = this.buildCategoryMap(context);
 
     const vulnerabilities = this.collectVulnerabilities(categories);
     const recommendations = this.collectRecommendations(categories);
@@ -82,9 +68,30 @@ export class SecurityAuditService {
     };
   }
 
-  async auditDataHandling(): Promise<CategoryResult> {
-    const findings = await this.staticAnalyzer.scanCodebase();
-    const sensitiveFindings = findings.filter((finding) => finding.category === "DATA_LEAK");
+  private buildCategoryMap(context: SecurityPipelineContext): CategoryCollection {
+    const dataHandling = this.auditDataHandling(context);
+    const inputValidation = this.auditInputValidation(context);
+    const processExecution = this.auditProcessExecution(context);
+    const webviewSecurity = this.auditWebviewSecurity(context);
+    const fileSystemAccess = this.auditFileSystemAccess(context);
+    const cryptographicSecurity = this.auditCryptographicSecurity(context);
+    const dependencyVulnerabilities = this.auditDependencies(context);
+    const complianceStatus = this.checkCompliance(context);
+
+    return {
+      dataHandling,
+      inputValidation,
+      processExecution,
+      webviewSecurity,
+      fileSystemAccess,
+      cryptographicSecurity,
+      dependencyVulnerabilities,
+      complianceStatus
+    } satisfies CategoryCollection;
+  }
+
+  private auditDataHandling(context: SecurityPipelineContext): CategoryResult {
+    const sensitiveFindings = context.staticFindings.filter((finding) => finding.category === "DATA_LEAK");
     const score = this.computeScoreFromFindings(CATEGORY_BASELINE_SCORE, sensitiveFindings);
     return {
       name: "Data Handling",
@@ -96,9 +103,8 @@ export class SecurityAuditService {
     };
   }
 
-  async auditInputValidation(): Promise<CategoryResult> {
-    const dynamicResults = await this.dynamicTester.runSecurityTests();
-    const findings = this.flattenDynamicFindings(dynamicResults, (payload) => payload.includes("<") || payload.includes("'"));
+  private auditInputValidation(context: SecurityPipelineContext): CategoryResult {
+    const findings = this.flattenDynamicFindings(context.dynamicResults, (payload) => payload.includes("<") || payload.includes("'"));
     const score = this.computeScoreFromFindings(CATEGORY_BASELINE_SCORE, findings);
     return {
       name: "Input Validation",
@@ -110,9 +116,8 @@ export class SecurityAuditService {
     };
   }
 
-  async auditProcessExecution(): Promise<CategoryResult> {
-    const findings = await this.staticAnalyzer.scanCodebase();
-    const processFindings = findings.filter((finding) => finding.category === "PROCESS" || finding.category === "INJECTION");
+  private auditProcessExecution(context: SecurityPipelineContext): CategoryResult {
+    const processFindings = context.staticFindings.filter((finding) => finding.category === "PROCESS" || finding.category === "INJECTION");
     const score = this.computeScoreFromFindings(CATEGORY_BASELINE_SCORE, processFindings);
     return {
       name: "Process Execution",
@@ -124,9 +129,8 @@ export class SecurityAuditService {
     };
   }
 
-  async auditWebviewSecurity(): Promise<CategoryResult> {
-    const findings = await this.staticAnalyzer.scanCodebase();
-    const webviewFindings = findings.filter((finding) => finding.category === "WEBVIEW" || finding.category === "XSS");
+  private auditWebviewSecurity(context: SecurityPipelineContext): CategoryResult {
+    const webviewFindings = context.staticFindings.filter((finding) => finding.category === "WEBVIEW" || finding.category === "XSS");
     const score = this.computeScoreFromFindings(CATEGORY_BASELINE_SCORE, webviewFindings);
     return {
       name: "Webview Security",
@@ -138,9 +142,8 @@ export class SecurityAuditService {
     };
   }
 
-  async auditFileSystemAccess(): Promise<CategoryResult> {
-    const findings = await this.staticAnalyzer.scanCodebase();
-    const fsFindings = findings.filter((finding) => finding.category === "FILE_SYSTEM" || finding.category === "PATH_TRAVERSAL");
+  private auditFileSystemAccess(context: SecurityPipelineContext): CategoryResult {
+    const fsFindings = context.staticFindings.filter((finding) => finding.category === "FILE_SYSTEM" || finding.category === "PATH_TRAVERSAL");
     const score = this.computeScoreFromFindings(CATEGORY_BASELINE_SCORE, fsFindings);
     return {
       name: "File System Access",
@@ -152,9 +155,8 @@ export class SecurityAuditService {
     };
   }
 
-  async auditCryptographicSecurity(): Promise<CategoryResult> {
-    const findings = await this.staticAnalyzer.scanCodebase();
-    const cryptoFindings = findings.filter((finding) => finding.category === "CRYPTO");
+  private auditCryptographicSecurity(context: SecurityPipelineContext): CategoryResult {
+    const cryptoFindings = context.staticFindings.filter((finding) => finding.category === "CRYPTO");
     const score = this.computeScoreFromFindings(CATEGORY_BASELINE_SCORE, cryptoFindings);
     return {
       name: "Cryptographic Security",
@@ -166,9 +168,8 @@ export class SecurityAuditService {
     };
   }
 
-  async auditDependencies(): Promise<CategoryResult> {
-    const vulnerabilities = await this.dependencyScanner.scanDependencies();
-    const affected = vulnerabilities.filter((entry) => entry.vulnerabilities.length > 0);
+  private auditDependencies(context: SecurityPipelineContext): CategoryResult {
+    const affected = context.dependencyResults.filter((entry) => entry.vulnerabilities.length > 0);
     const findings: SecurityFinding[] = affected.flatMap((entry) =>
       entry.vulnerabilities.map((vuln) => ({
         id: `${entry.dependency.name}-${vuln.id}`,
@@ -194,21 +195,23 @@ export class SecurityAuditService {
     };
   }
 
-  async checkCompliance(): Promise<CategoryResult> {
-    const [owasp, cwe, dataProtection] = await Promise.all([
-      this.complianceChecker.checkOWASPCompliance(),
-      this.complianceChecker.checkCWECompliance(),
-      this.complianceChecker.checkDataProtectionCompliance()
-    ]);
-
-    const evidence = [owasp, cwe, dataProtection];
+  private checkCompliance(context: SecurityPipelineContext): CategoryResult {
+    const evidence = context.complianceResults;
     const findings = this.buildComplianceFindings(evidence);
     const score = Math.round(evidence.reduce((sum, item) => sum + item.coverage, 0) / evidence.length);
+    const owasp = evidence.find((item) => item.framework === "OWASP");
+    const cwe = evidence.find((item) => item.framework === "CWE");
+    const dataProtection = evidence.find((item) => item.framework === "DATA_PROTECTION");
+    const summaryParts = [
+      owasp ? `OWASP coverage ${owasp.coverage}%` : undefined,
+      cwe ? `CWE coverage ${cwe.coverage}%` : undefined,
+      dataProtection ? `Data protection coverage ${dataProtection.coverage}%` : undefined
+    ].filter((part): part is string => Boolean(part));
     return {
       name: "Compliance",
       status: this.resolveStatus(score, findings),
       score,
-      summary: `OWASP coverage ${owasp.coverage}%, CWE coverage ${cwe.coverage}%, Data protection coverage ${dataProtection.coverage}%`,
+      summary: summaryParts.length > 0 ? summaryParts.join(", ") : "Compliance coverage data unavailable",
       findings,
       recommendations: evidence.flatMap((item) => item.recommendations)
     };
@@ -253,7 +256,7 @@ export class SecurityAuditService {
     return score >= 60 ? "WARNING" : "VULNERABLE";
   }
 
-  private collectVulnerabilities(categories: Record<string, CategoryResult>): Vulnerability[] {
+  private collectVulnerabilities(categories: CategoryCollection): Vulnerability[] {
     const vulnerabilities: Vulnerability[] = [];
     for (const category of Object.values(categories)) {
       for (const finding of category.findings) {
@@ -285,7 +288,7 @@ export class SecurityAuditService {
     return vulnerabilities;
   }
 
-  private collectRecommendations(categories: Record<string, CategoryResult>): SecurityRecommendation[] {
+  private collectRecommendations(categories: CategoryCollection): SecurityRecommendation[] {
     const recommendations: SecurityRecommendation[] = [];
     for (const category of Object.values(categories)) {
       recommendations.push(
@@ -358,7 +361,7 @@ export class SecurityAuditService {
     }
   }
 
-  private calculateOverallScore(categories: Record<string, CategoryResult>): number {
+  private calculateOverallScore(categories: CategoryCollection): number {
     const scores = Object.values(categories).map((category) => category.score);
     const total = scores.reduce((sum, value) => sum + value, 0);
     return Math.round(total / scores.length);
