@@ -49,6 +49,18 @@ export function registerSelectionCommands(
     ], () => applySelection("clear"))
   ];
 
+  const applyPreset = vscode.commands.registerCommand(
+    COMMAND_MAP.WEBVIEW_TO_HOST.APPLY_PRESET,
+    (payload?: { presetId?: string }) => {
+      const presetId = typeof payload?.presetId === "string" && payload.presetId.length > 0 ? payload.presetId : "default";
+      services.diagnostics.add(`Preset request received: ${presetId}. Presets are not yet implemented.`);
+      void vscode.window.showInformationMessage(
+        `Code Ingest: Preset "${presetId}" is not available yet.`,
+        "Dismiss"
+      );
+    }
+  );
+
   const adjustExpansion = (expand: boolean) => {
     if (expand) {
       services.workspaceManager.expandAll();
@@ -72,5 +84,5 @@ export function registerSelectionCommands(
     ], () => adjustExpansion(false))
   ];
 
-  context.subscriptions.push(updateSelection, ...applySelectionCommands, ...expandCommands);
+  context.subscriptions.push(updateSelection, ...applySelectionCommands, ...expandCommands, applyPreset);
 }

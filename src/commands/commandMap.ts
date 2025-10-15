@@ -10,7 +10,6 @@ export const COMMAND_MAP = {
   WEBVIEW_TO_HOST: {
     GENERATE_DIGEST: "codeIngest.generateDigest",
     LOAD_REMOTE_REPO: "codeIngest.loadRemoteRepo",
-    SELECT_ALL_FILES: "codeIngest.selectAllFiles",
     TOGGLE_REDACTION: "codeIngest.toggleRedactionOverride",
     APPLY_PRESET: "codeIngest.applyPreset",
     UPDATE_SELECTION: "codeIngest.updateSelection",
@@ -34,7 +33,12 @@ export const COMMAND_MAP = {
     SELECT_ALL: "codeIngest.selectAll",
     DESELECT_ALL: "codeIngest.deselectAll",
     INGEST_REMOTE_REPO: "codeIngest.ingestRemoteRepo",
-    VIEW_METRICS: "codeIngest.viewMetrics"
+    VIEW_METRICS: "codeIngest.viewMetrics",
+    TREE_LOAD_MORE: "codeIngest.tree.loadMore",
+    TREE_RETRY_DIRECTORY: "codeIngest.tree.retryDirectory",
+    SELECT_NONE: "codeIngest.selectNone",
+    INVERT_SELECTION: "codeIngest.invertSelection",
+    SHOW_PERFORMANCE_DASHBOARD: "codeIngest.showPerformanceDashboard"
   }
 } as const;
 

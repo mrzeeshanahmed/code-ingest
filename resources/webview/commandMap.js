@@ -16,7 +16,6 @@ const HOST_TO_WEBVIEW_BASE = Object.freeze({
 const WEBVIEW_TO_HOST_BASE = Object.freeze({
   GENERATE_DIGEST: "codeIngest.generateDigest",
   LOAD_REMOTE_REPO: "codeIngest.loadRemoteRepo",
-  SELECT_ALL_FILES: "codeIngest.selectAllFiles",
   TOGGLE_REDACTION: "codeIngest.toggleRedactionOverride",
   APPLY_PRESET: "codeIngest.applyPreset",
   UPDATE_SELECTION: "codeIngest.updateSelection",

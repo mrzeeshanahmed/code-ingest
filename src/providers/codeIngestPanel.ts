@@ -9,6 +9,17 @@ import {
 } from "./messageEnvelope";
 import { setWebviewHtml } from "./webviewHelpers";
 
+type CommandPayloadValidator = (
+  commandId: string,
+  payload: unknown
+) => { ok: true; value: unknown } | { ok: false; reason?: string; errors?: unknown } | undefined;
+
+const commandValidatorPromise: Promise<CommandPayloadValidator> = (async () => {
+  // @ts-expect-error command validation helper is provided as a compiled JS asset under resources/
+  const module = await import("../../resources/webview/commandValidation.js");
+  return (module as { validateCommandPayload: CommandPayloadValidator }).validateCommandPayload;
+})();
+
 interface LegacyMessage {
   readonly type: string;
   readonly command?: string;
@@ -138,19 +149,45 @@ export class CodeIngestPanel {
   }
 
   private async executeCommandFromWebview(message: CommandMessage): Promise<void> {
+    const validator = await commandValidatorPromise;
+    const validation = validator(message.command, message.payload) ?? { ok: true, value: message.payload };
+    if (!validation || validation.ok !== true) {
+      const reason = validation?.reason ?? "validation_failed";
+      this.logInboundRejection(message.command, reason);
+      this.sendShowError({
+        title: "Invalid request",
+        message: `Command ${message.command} rejected: ${reason}`
+      });
+      if (message.expectsAck) {
+        this.postResponse(message, { ok: false, reason });
+      }
+      return;
+    }
+
+    const payload = validation.value ?? message.payload;
     try {
-      const result = await vscode.commands.executeCommand(message.command, message.payload);
+      const result = await vscode.commands.executeCommand(message.command, payload);
       if (message.expectsAck) {
         this.postResponse(message, { ok: true, result });
       }
     } catch (error) {
+      const formattedError = this.formatError(error);
       if (message.expectsAck) {
         this.postResponse(message, {
           ok: false,
-          reason: this.formatError(error)
+          reason: formattedError
         });
       }
       console.error("Webview command failed", message.command, error);
+      const handledByHost = this.wasErrorHandledByHost(error);
+      if (handledByHost) {
+        return;
+      }
+      const showError = this.extractShowErrorDetails(error) ?? {
+        title: "Command failed",
+        message: formattedError
+      };
+      this.sendShowError(showError);
     }
   }
 
@@ -182,5 +219,44 @@ export class CodeIngestPanel {
       return error.message.slice(0, 512);
     }
     return String(error).slice(0, 512);
+  }
+
+  private extractShowErrorDetails(error: unknown): { title: string; message: string } | undefined {
+    if (!error || typeof error !== "object") {
+      return undefined;
+    }
+    const details = (error as { showError?: unknown }).showError;
+    if (!details || typeof details !== "object") {
+      return undefined;
+    }
+    const title = (details as { title?: unknown }).title;
+    const message = (details as { message?: unknown }).message;
+    if (typeof title === "string" && typeof message === "string") {
+      return { title, message };
+    }
+    return undefined;
+  }
+
+  private wasErrorHandledByHost(error: unknown): boolean {
+    if (!error || typeof error !== "object") {
+      return false;
+    }
+    return Boolean((error as { handledByHost?: boolean }).handledByHost);
+  }
+
+  private sendShowError(details: { title: string; message: string }): void {
+    const outbound = this.envelope.createMessage(
+      "command",
+      COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR,
+      {
+        title: details.title,
+        message: details.message
+      }
+    );
+    void this.panel.webview.postMessage(outbound);
+  }
+
+  private logInboundRejection(commandId: string, reason: string): void {
+    console.warn("CodeIngestPanel: rejected webview command", { commandId, reason });
   }
 }

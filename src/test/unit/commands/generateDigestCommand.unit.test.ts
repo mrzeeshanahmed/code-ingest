@@ -53,6 +53,7 @@ describe("registerGenerateDigestCommand", () => {
   let setStateSnapshotMock: jest.Mock;
   let showWarningMessageMock: jest.Mock;
   let showInformationMessageMock: jest.Mock;
+  let sendCommandMock: jest.Mock;
   type FsStatFn = (uri: vscode.Uri) => Promise<unknown>;
   let fsStatMock: jest.MockedFunction<FsStatFn>;
 
@@ -70,6 +71,7 @@ describe("registerGenerateDigestCommand", () => {
 
     createPanelMock = jest.fn(async () => {});
     setStateSnapshotMock = jest.fn();
+  sendCommandMock = jest.fn();
 
     fsStatMock = jest.fn(async (uri: vscode.Uri) => {
       void uri;
@@ -102,7 +104,7 @@ describe("registerGenerateDigestCommand", () => {
       webviewPanelManager: {
         createAndShowPanel: createPanelMock,
         setStateSnapshot: setStateSnapshotMock,
-        sendCommand: jest.fn(),
+        sendCommand: sendCommandMock,
         getStateSnapshot: jest.fn(() => ({})),
         tryRestoreState: jest.fn(() => false)
       },
@@ -219,15 +221,17 @@ describe("registerGenerateDigestCommand", () => {
 
     await handler({ selectedFiles: ["/workspace/src/index.ts", "src/index.ts"] });
 
-  expect(setSelectionMock).toHaveBeenCalledWith(["src/index.ts"]);
-  expect(fsStatMock).toHaveBeenCalledTimes(1);
-  const statUri = fsStatMock.mock.calls[0][0] as vscode.Uri;
-  expect(statUri.fsPath).toBe(vscode.Uri.joinPath(vscode.Uri.file("/workspace"), "src", "index.ts").fsPath);
+    expect(setSelectionMock).toHaveBeenCalledWith(["src/index.ts"]);
+    expect(fsStatMock).toHaveBeenCalledTimes(1);
+    const statUri = fsStatMock.mock.calls[0][0] as vscode.Uri;
+    expect(statUri.fsPath).toBe(
+      vscode.Uri.joinPath(vscode.Uri.file("/workspace"), "src", "index.ts").fsPath
+    );
     expect(createPanelMock).toHaveBeenCalledTimes(1);
-  expect(generateDigestMock).toHaveBeenCalledTimes(1);
-  const options = generateDigestMock.mock.calls[0][0] as { selectedFiles: string[] };
-  const expectedAbsolute = vscode.Uri.joinPath(vscode.Uri.file("/workspace"), "src", "index.ts").fsPath;
-  expect(options.selectedFiles).toEqual([expectedAbsolute]);
+    expect(generateDigestMock).toHaveBeenCalledTimes(1);
+    const options = generateDigestMock.mock.calls[0][0] as { selectedFiles: string[] };
+    const expectedAbsolute = vscode.Uri.joinPath(vscode.Uri.file("/workspace"), "src", "index.ts").fsPath;
+    expect(options.selectedFiles).toEqual([expectedAbsolute]);
     expect(services.workspaceManager.getRedactionOverride).toHaveBeenCalled();
     expect(services.outputWriter.writeOutput).toHaveBeenCalled();
     const hasWritingStatus = setStateSnapshotMock.mock.calls.some(([payload]) => {
@@ -243,12 +247,26 @@ describe("registerGenerateDigestCommand", () => {
 
     fsStatMock.mockRejectedValueOnce(new Error("missing"));
 
-    await handler({ selectedFiles: ["/workspace/src/missing.ts"] });
+    const expectedMessage = 'The requested file "src/missing.ts" is not available in this workspace.';
+    await expect(handler({ selectedFiles: ["/workspace/src/missing.ts"] })).rejects.toMatchObject({
+      message: expectedMessage,
+      code: "DIGEST_SELECTION_REJECTED",
+      handledByHost: true
+    });
 
-    expect(showWarningMessageMock).toHaveBeenCalled();
-    expect(showInformationMessageMock).toHaveBeenCalled();
+    expect(showWarningMessageMock).toHaveBeenCalledWith(
+      "Code Ingest: Skipped 1 missing file before generating the digest."
+    );
+    expect(showInformationMessageMock).not.toHaveBeenCalled();
     expect(createPanelMock).not.toHaveBeenCalled();
     expect(generateDigestMock).not.toHaveBeenCalled();
+    expect(sendCommandMock).toHaveBeenCalledWith(
+      COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR,
+      {
+        title: "No files available",
+        message: expectedMessage
+      }
+    );
     expect(workspaceSelection).toEqual([]);
   });
 });

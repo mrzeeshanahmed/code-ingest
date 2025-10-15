@@ -14,6 +14,7 @@ import { createFormatter } from "../formatters/factory";
 import type { WriteProgress } from "../services/outputWriter";
 
 const MAX_PREVIEW_LENGTH = 60_000;
+const DIGEST_SELECTION_REJECTED = "DIGEST_SELECTION_REJECTED";
 
 interface GenerateDigestPayload {
   readonly selectedFiles?: string[];
@@ -186,12 +187,16 @@ export function registerGenerateDigestCommand(
 
     const workspaceFsPath = workspaceRoot.fsPath;
 
-    const payloadSelection = Array.isArray(payload?.selectedFiles)
-      ? normalizeSelectionInput(payload?.selectedFiles, workspaceFsPath)
-      : undefined;
+    let payloadSelection: string[] | undefined;
+    let selectionFromPayload = false;
+    const selectionCandidates = payload?.selectedFiles;
+    if (Array.isArray(selectionCandidates)) {
+      selectionFromPayload = true;
+      payloadSelection = normalizeSelectionInput(selectionCandidates, workspaceFsPath);
+    }
 
     const existingSelection = normalizeSelectionInput(services.workspaceManager.getSelection(), workspaceFsPath);
-    const normalizedSelection = payloadSelection && payloadSelection.length > 0 ? payloadSelection : existingSelection;
+    const normalizedSelection = selectionFromPayload ? payloadSelection ?? [] : existingSelection;
 
     let relativeSelection = services.workspaceManager.setSelection(normalizedSelection);
     services.webviewPanelManager.setStateSnapshot({ selection: relativeSelection }, { emit: false });
@@ -211,10 +216,37 @@ export function registerGenerateDigestCommand(
       void vscode.window.showWarningMessage(
         `Code Ingest: Skipped ${missing.length} missing file${plural} before generating the digest.`
       );
+
+      if (selectionFromPayload && sanitizedSelection.length === 0) {
+        const message = missing.length === 1
+          ? `The requested file "${missing[0]}" is not available in this workspace.`
+          : "None of the requested files are available in this workspace.";
+        services.diagnostics.add(`Digest request rejected: ${message}`);
+        services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
+          title: "No files available",
+          message
+        });
+        const rejectionError = new Error(message);
+  (rejectionError as { code?: string }).code = DIGEST_SELECTION_REJECTED;
+        (rejectionError as { handledByHost?: boolean }).handledByHost = true;
+        throw rejectionError;
+      }
     }
 
     if (relativeSelection.length === 0) {
-      void vscode.window.showInformationMessage("Code Ingest: Select one or more files before generating a digest.");
+      const message = "Select one or more files before generating a digest.";
+      if (selectionFromPayload) {
+        services.diagnostics.add("Digest request rejected: selection empty after normalization.");
+        services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
+          title: "No files selected",
+          message
+        });
+        const rejectionError = new Error(message);
+  (rejectionError as { code?: string }).code = DIGEST_SELECTION_REJECTED;
+        (rejectionError as { handledByHost?: boolean }).handledByHost = true;
+        throw rejectionError;
+      }
+      void vscode.window.showInformationMessage(`Code Ingest: ${message}`);
       return;
     }
 
@@ -386,15 +418,32 @@ export function registerGenerateDigestCommand(
     } catch (error) {
       updateProgress(null);
       const message = error instanceof Error ? error.message : String(error);
-      services.diagnostics.add(`Digest generation failed: ${message}`);
-      services.errorReporter.report(error, { source: "generateDigest" });
-      services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
-        title: "Digest failed",
-        message
-      });
+      const errorCode = typeof error === "object" && error !== null ? (error as { code?: string }).code : undefined;
+
+  if (errorCode !== DIGEST_SELECTION_REJECTED) {
+        services.diagnostics.add(`Digest generation failed: ${message}`);
+        services.errorReporter.report(error, { source: "generateDigest" });
+        if (error instanceof Error) {
+          (error as { showError?: { title: string; message: string } }).showError = {
+            title: "Digest failed",
+            message
+          };
+        }
+      }
+
+      throw error;
     }
   };
 
-  const disposable = vscode.commands.registerCommand(COMMAND_MAP.WEBVIEW_TO_HOST.GENERATE_DIGEST, handler);
-  context.subscriptions.push(disposable);
+  const generateDigestDisposable = vscode.commands.registerCommand(
+    COMMAND_MAP.WEBVIEW_TO_HOST.GENERATE_DIGEST,
+    handler
+  );
+
+  const refreshPreviewDisposable = vscode.commands.registerCommand(
+    COMMAND_MAP.WEBVIEW_TO_HOST.REFRESH_PREVIEW,
+    () => handler()
+  );
+
+  context.subscriptions.push(generateDigestDisposable, refreshPreviewDisposable);
 }

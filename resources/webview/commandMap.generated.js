@@ -4,42 +4,37 @@
 
 /**
  * Command map for CodeIngest webview communication
- * Generated on: 2025-10-09T14:20:47.876Z
+ * Generated on: 2025-10-15T13:29:49.516Z
  */
 
 export const COMMAND_MAP = {
   // Commands sent from extension host to webview
   HOST_TO_WEBVIEW: {
-  "arrowDown": "ArrowDown",
-  "arrowLeft": "ArrowLeft",
-  "arrowRight": "ArrowRight",
-  "arrowUp": "ArrowUp",
-  "enter": "Enter",
-  "array": "array",
-  "boolean": "boolean",
-  "clearSelection": "clear-selection",
-  "enum": "enum",
-  "number": "number",
-  "object": "object",
-  "selectAll": "select-all",
-  "string": "string",
-  "unknown": "unknown"
+  "restoreState": "codeIngest.restoreState",
+  "showError": "codeIngest.showError",
+  "updateConfig": "codeIngest.updateConfig",
+  "updatePreview": "codeIngest.updatePreview",
+  "updateProgress": "codeIngest.updateProgress",
+  "updateTreeData": "codeIngest.updateTreeData"
 },
 
   // Commands sent from webview to extension host
   WEBVIEW_TO_HOST: {
+  "applyPreset": "codeIngest.applyPreset",
+  "collapseAll": "codeIngest.collapseAll",
+  "deselectAll": "codeIngest.deselectAll",
+  "expandAll": "codeIngest.expandAll",
   "flushErrorReports": "codeIngest.flushErrorReports",
   "generateDigest": "codeIngest.generateDigest",
-  "invertSelection": "codeIngest.invertSelection",
   "loadRemoteRepo": "codeIngest.loadRemoteRepo",
   "openDashboardPanel": "codeIngest.openDashboardPanel",
+  "refreshPreview": "codeIngest.refreshPreview",
   "refreshTree": "codeIngest.refreshTree",
   "selectAll": "codeIngest.selectAll",
-  "selectNone": "codeIngest.selectNone",
   "toggleRedactionOverride": "codeIngest.toggleRedactionOverride",
-  "treeLoadMore": "codeIngest.tree.loadMore",
-  "treeRetryDirectory": "codeIngest.tree.retryDirectory",
-  "viewMetrics": "codeIngest.viewMetrics"
+  "updateSelection": "codeIngest.updateSelection",
+  "viewMetrics": "codeIngest.viewMetrics",
+  "webviewReady": "codeIngest.webviewReady"
 }
 };
 

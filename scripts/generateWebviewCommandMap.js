@@ -15,10 +15,17 @@ class WebviewCommandMapGenerator {
     this.webviewDir = options.webviewDir || path.join(__dirname, '..', 'resources', 'webview');
     this.outputFile = options.outputFile || path.join(this.webviewDir, 'commandMap.generated.js');
     this.packageJsonPath = options.packageJsonPath || path.join(__dirname, '..', 'package.json');
+    this.hostCommandMapPath = options.hostCommandMapPath || path.join(this.srcDir, 'commands', 'commandMap.ts');
 
     this.commands = {
       hostToWebview: new Map(),
       webviewToHost: new Map(),
+    };
+
+    this.hostCommandMap = {
+      HOST_TO_WEBVIEW: new Map(),
+      WEBVIEW_TO_HOST: new Map(),
+      EXTENSION_ONLY: new Map(),
     };
   }
 
@@ -26,18 +33,88 @@ class WebviewCommandMapGenerator {
     console.log('🔄 Generating webview command map...');
 
     try {
+      await this.loadHostCommandMap();
       await this.extractPackageJsonCommands();
       await this.scanSourceFiles();
       await this.scanWebviewFiles();
       await this.generateCommandMapFile();
       await this.generateTypeDefinitions();
-      console.log('✅ Command map generated successfully');
+      await this.validateHostParity();
       await this.validateCommandSync();
+      console.log('✅ Command map generated successfully');
       this.printSummary();
     } catch (error) {
       console.error('❌ Failed to generate command map:', error);
       process.exit(1);
     }
+  }
+
+  async loadHostCommandMap() {
+    const buffer = await fsp.readFile(this.hostCommandMapPath, 'utf8');
+    const sourceFile = ts.createSourceFile(this.hostCommandMapPath, buffer, ts.ScriptTarget.Latest, true);
+
+    const setMap = (section, key, value, location) => {
+      if (!value) {
+        return;
+      }
+      const target = this.hostCommandMap[section];
+      if (!target) {
+        return;
+      }
+      const record = target.get(value) ?? { keys: new Set(), locations: [] };
+      record.keys.add(key);
+      if (location) {
+        record.locations.push(location);
+      }
+      target.set(value, record);
+    };
+
+    const parseSection = (node, sectionName) => {
+      if (!ts.isObjectLiteralExpression(node)) {
+        return;
+      }
+      for (const property of node.properties) {
+        if (!ts.isPropertyAssignment(property)) {
+          continue;
+        }
+        const propName = this.getPropertyName(property.name);
+        if (!propName) {
+          continue;
+        }
+        const literalValue = this.extractStringLiteral(property.initializer);
+        if (typeof literalValue === 'string') {
+          const location = this.getLocation(sourceFile, property, this.hostCommandMapPath);
+          setMap(sectionName, propName, literalValue, location);
+        }
+      }
+    };
+
+    const visit = (node) => {
+      if (ts.isVariableDeclaration(node) && node.name && node.name.getText() === 'COMMAND_MAP') {
+        let initializer = node.initializer;
+        if (initializer && ts.isAsExpression(initializer)) {
+          initializer = initializer.expression;
+        }
+        if (initializer && ts.isObjectLiteralExpression(initializer)) {
+          for (const property of initializer.properties) {
+            if (!ts.isPropertyAssignment(property)) {
+              continue;
+            }
+            const sectionName = this.getPropertyName(property.name);
+            if (!sectionName) {
+              continue;
+            }
+            if (sectionName === 'HOST_TO_WEBVIEW' || sectionName === 'WEBVIEW_TO_HOST' || sectionName === 'EXTENSION_ONLY') {
+              parseSection(property.initializer, sectionName);
+            }
+          }
+        }
+      }
+
+      ts.forEachChild(node, visit);
+    };
+
+    visit(sourceFile);
   }
 
   async extractPackageJsonCommands() {
@@ -249,7 +326,7 @@ class WebviewCommandMapGenerator {
     while ((match = messageHandlerPattern.exec(content)) !== null) {
       const messageType = match[1];
       const normalized = typeof messageType === 'string' ? messageType.trim() : '';
-      if (normalized) {
+      if (normalized && normalized.startsWith('codeIngest.')) {
         this.upsertCommand(this.commands.hostToWebview, normalized, {
           id: normalized,
           file: path.relative(this.webviewDir, filePath),
@@ -260,23 +337,31 @@ class WebviewCommandMapGenerator {
   }
 
   async generateCommandMapFile() {
-    const hostToWebviewKeys = [...this.commands.hostToWebview.keys()].sort();
-    const webviewToHostKeys = [...this.commands.webviewToHost.keys()].sort();
+    const hostSourceValues = new Set(
+      this.hostCommandMap.HOST_TO_WEBVIEW ? Array.from(this.hostCommandMap.HOST_TO_WEBVIEW.keys()) : []
+    );
+    const webviewSourceValues = new Set(
+      this.hostCommandMap.WEBVIEW_TO_HOST ? Array.from(this.hostCommandMap.WEBVIEW_TO_HOST.keys()) : []
+    );
 
-    const hostToWebview = hostToWebviewKeys.reduce((accumulator, key) => {
-      const baseKey = this.derivePropertyKey(key, 'hostCommand');
-      const prop = this.ensureUniqueKey(accumulator, baseKey);
-      accumulator[prop] = key;
-      return accumulator;
-    }, {});
+    const hostToWebview = Array.from(hostSourceValues)
+      .sort()
+      .reduce((accumulator, commandId) => {
+        const baseKey = this.derivePropertyKey(commandId, 'hostCommand');
+        const prop = this.ensureUniqueKey(accumulator, baseKey);
+        accumulator[prop] = commandId;
+        return accumulator;
+      }, {});
 
-    const webviewToHost = webviewToHostKeys.reduce((accumulator, key) => {
-      const trimmed = key.startsWith('codeIngest.') ? key.substring('codeIngest.'.length) : key;
-      const baseKey = this.derivePropertyKey(trimmed, 'webviewCommand');
-      const prop = this.ensureUniqueKey(accumulator, baseKey);
-      accumulator[prop] = key;
-      return accumulator;
-    }, {});
+    const webviewToHost = Array.from(webviewSourceValues)
+      .sort()
+      .reduce((accumulator, commandId) => {
+        const trimmed = commandId.startsWith('codeIngest.') ? commandId.substring('codeIngest.'.length) : commandId;
+        const baseKey = this.derivePropertyKey(trimmed, 'webviewCommand');
+        const prop = this.ensureUniqueKey(accumulator, baseKey);
+        accumulator[prop] = commandId;
+        return accumulator;
+      }, {});
 
     this.generatedHostMap = hostToWebview;
     this.generatedWebviewMap = webviewToHost;
@@ -462,38 +547,105 @@ class WebviewCommandMapGenerator {
   async validateCommandSync() {
     const issues = [];
 
+    const hostRegisteredCommands = new Set(
+      this.hostCommandMap.WEBVIEW_TO_HOST ? Array.from(this.hostCommandMap.WEBVIEW_TO_HOST.keys()) : []
+    );
+    const extensionOnlyCommands = new Set(
+      this.hostCommandMap.EXTENSION_ONLY ? Array.from(this.hostCommandMap.EXTENSION_ONLY.keys()) : []
+    );
+    const hostInboundCommands = new Set(
+      this.hostCommandMap.HOST_TO_WEBVIEW ? Array.from(this.hostCommandMap.HOST_TO_WEBVIEW.keys()) : []
+    );
+
     for (const [commandId, info] of this.commands.webviewToHost.entries()) {
+      if (!hostRegisteredCommands.has(commandId)) {
+        if (extensionOnlyCommands.has(commandId)) {
+          continue;
+        }
+        issues.push({ severity: 'error', message: `Command '${commandId}' used in webview but not declared in src/commands/commandMap.ts` });
+        continue;
+      }
       if (info.sources.has('webview-usage') && !this.hasCommandRegistration(info.sources)) {
-        issues.push(`❌ Command '${commandId}' used in webview but not registered`);
+        issues.push({ severity: 'error', message: `Command '${commandId}' used in webview but no matching registration detected` });
       }
     }
 
-    for (const [commandId, info] of this.commands.webviewToHost.entries()) {
-      if ((info.sources.has('registration') || info.sources.has('package.json')) && !info.sources.has('webview-usage')) {
-        issues.push(`⚠️  Command '${commandId}' registered but not used in webview`);
+    for (const registeredId of hostRegisteredCommands) {
+      if (!this.commands.webviewToHost.has(registeredId)) {
+        issues.push({ severity: 'warn', message: `Command '${registeredId}' registered but no webview usage detected` });
       }
     }
 
     for (const [commandId, info] of this.commands.hostToWebview.entries()) {
+      if (!hostInboundCommands.has(commandId)) {
+        issues.push({ severity: 'error', message: `Command '${commandId}' sent from host but not declared in src/commands/commandMap.ts` });
+        continue;
+      }
       if (!info.sources.has('webview-handler')) {
-        issues.push(`⚠️  Command '${commandId}' sent from host but no handler detected in webview`);
+        issues.push({ severity: 'warn', message: `Command '${commandId}' sent from host but no handler detected in webview` });
       }
     }
 
     if (issues.length > 0) {
       console.log('\n🔍 Validation Issues:');
       for (const issue of issues) {
-        console.log(`  ${issue}`);
+        const prefix = issue.severity === 'error' ? '❌' : '⚠️ ';
+        console.log(`  ${prefix} ${issue.message}`);
       }
     } else {
       console.log('\n✅ All commands appear synchronized');
     }
 
-    return issues;
+    const hasErrors = issues.some((issue) => issue.severity === 'error');
+    if (hasErrors) {
+      throw new Error('Command validation failed. See issues above.');
+    }
   }
 
   hasCommandRegistration(sourceSet) {
     return sourceSet.has('registration') || sourceSet.has('package.json');
+  }
+
+  async validateHostParity() {
+    const hostHostCommands = new Set(
+      this.hostCommandMap.HOST_TO_WEBVIEW ? Array.from(this.hostCommandMap.HOST_TO_WEBVIEW.keys()) : []
+    );
+    const hostWebviewCommands = new Set(
+      this.hostCommandMap.WEBVIEW_TO_HOST ? Array.from(this.hostCommandMap.WEBVIEW_TO_HOST.keys()) : []
+    );
+
+    const generatedHostCommands = new Set(Object.values(this.generatedHostMap || {}));
+    const generatedWebviewCommands = new Set(Object.values(this.generatedWebviewMap || {}));
+
+    const issues = [];
+
+    for (const commandId of hostHostCommands) {
+      if (!generatedHostCommands.has(commandId)) {
+        issues.push(`Missing host→webview command in generated map: ${commandId}`);
+      }
+    }
+
+    for (const commandId of generatedHostCommands) {
+      if (!hostHostCommands.has(commandId)) {
+        issues.push(`Generated host→webview command not declared in host map: ${commandId}`);
+      }
+    }
+
+    for (const commandId of hostWebviewCommands) {
+      if (!generatedWebviewCommands.has(commandId)) {
+        issues.push(`Missing webview→host command in generated map: ${commandId}`);
+      }
+    }
+
+    for (const commandId of generatedWebviewCommands) {
+      if (!hostWebviewCommands.has(commandId)) {
+        issues.push(`Generated webview→host command not declared in host map: ${commandId}`);
+      }
+    }
+
+    if (issues.length > 0) {
+      throw new Error(`Generated command map is out of sync with src/commands/commandMap.ts:\n - ${issues.join('\n - ')}`);
+    }
   }
 }
 

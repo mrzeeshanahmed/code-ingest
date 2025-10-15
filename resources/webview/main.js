@@ -37,6 +37,37 @@ const DEFAULT_STATE = {
   config: {}
 };
 
+const ACTION_COMMAND_BINDINGS = Object.freeze([
+  { actions: ["refresh", "refresh-tree"], commandKey: "REFRESH_TREE" },
+  {
+    actions: ["generate"],
+    commandKey: "GENERATE_DIGEST",
+    payloadFactory: (app) => app.getGenerateDigestPayload()
+  },
+  { actions: ["expand-all"], commandKey: "EXPAND_ALL" },
+  { actions: ["collapse-all"], commandKey: "COLLAPSE_ALL" },
+  { actions: ["refresh-preview"], commandKey: "REFRESH_PREVIEW" },
+  { actions: ["load-remote"], commandKey: "LOAD_REMOTE_REPO" },
+  { actions: ["toggle-redaction"], commandKey: "TOGGLE_REDACTION" },
+  { actions: ["select-all"], commandKey: "SELECT_ALL" },
+  { actions: ["select-none"], commandKey: "DESELECT_ALL" },
+  { actions: ["view-metrics"], commandKey: "VIEW_METRICS" },
+  { actions: ["flush-errors"], commandKey: "FLUSH_ERROR_REPORTS" },
+  { actions: ["open-dashboard"], commandKey: "OPEN_DASHBOARD_PANEL" },
+  {
+    actions: ["apply-preset"],
+    commandKey: "APPLY_PRESET",
+    event: "change",
+    payloadFactory: (_app, event) => {
+      const target = event?.target;
+      if (target instanceof HTMLSelectElement) {
+        return { presetId: target.value ?? "default" };
+      }
+      return { presetId: "default" };
+    }
+  }
+]);
+
 export class WebviewApplication {
   constructor() {
     this.vscode = acquireVsCodeApi();
@@ -245,48 +276,31 @@ export class WebviewApplication {
   }
 
   setupActionButtons() {
-    const clickBindings = [
-      { action: "refresh", key: "REFRESH_TREE" },
-      { action: "refresh-tree", key: "REFRESH_TREE" },
-      { action: "generate", key: "GENERATE_DIGEST", payload: () => this.getGenerateDigestPayload() },
-      { action: "expand-all", key: "EXPAND_ALL" },
-      { action: "collapse-all", key: "COLLAPSE_ALL" },
-      { action: "refresh-preview", key: "REFRESH_PREVIEW" },
-      { action: "load-remote", key: "LOAD_REMOTE_REPO" },
-      { action: "toggle-redaction", key: "TOGGLE_REDACTION" },
-      { action: "select-all", key: "SELECT_ALL" },
-      { action: "select-none", key: "DESELECT_ALL" },
-      { action: "view-metrics", key: "VIEW_METRICS" },
-      { action: "flush-errors", key: "FLUSH_ERROR_REPORTS" },
-      { action: "open-dashboard", key: "OPEN_DASHBOARD_PANEL" }
-    ];
+    const app = this;
 
-    for (const binding of clickBindings) {
-      const commandId = COMMAND_MAP.WEBVIEW_TO_HOST?.[binding.key];
+    for (const binding of ACTION_COMMAND_BINDINGS) {
+      const commandId = COMMAND_MAP.WEBVIEW_TO_HOST?.[binding.commandKey];
       if (!commandId) {
         this.logger.warn("No command mapping for action", binding);
         continue;
       }
-      const elements = document.querySelectorAll(`[data-action="${binding.action}"]`);
-      elements.forEach((element) => {
-        element.addEventListener("click", () => {
-          const payload = typeof binding.payload === "function" ? binding.payload() : binding.payload;
-          void this.executeOutbound(commandId, payload);
-        });
-      });
-    }
 
-    const presetSelect = document.querySelector('[data-action="apply-preset"]');
-    if (presetSelect instanceof HTMLSelectElement) {
-      presetSelect.addEventListener("change", () => {
-        const commandId = COMMAND_MAP.WEBVIEW_TO_HOST?.APPLY_PRESET;
-        if (!commandId) {
-          this.logger.warn("Preset command unavailable");
-          return;
-        }
-        const presetId = presetSelect.value ?? "default";
-        void this.executeOutbound(commandId, { presetId });
-      });
+      const actions = Array.isArray(binding.actions) ? binding.actions : [binding.actions];
+      for (const action of actions) {
+        const elements = document.querySelectorAll(`[data-action="${action}"]`);
+        elements.forEach((element) => {
+          element.addEventListener(binding.event ?? "click", (event) => {
+            try {
+              const payload = typeof binding.payloadFactory === "function"
+                ? binding.payloadFactory(app, event, element)
+                : binding.payload;
+              void app.executeOutbound(commandId, payload);
+            } catch (error) {
+              app.logger.error("Failed to execute action binding", { action, commandId, error });
+            }
+          });
+        });
+      }
     }
   }
 
