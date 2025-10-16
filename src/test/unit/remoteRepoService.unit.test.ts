@@ -324,6 +324,17 @@ describe("TemporaryDirectoryManager", () => {
   let onceSpy: jest.SpiedFunction<typeof process.once>;
   let exitSpy: jest.SpiedFunction<typeof process.exit>;
 
+  const createTempLogger = (): Logger => ({
+    debug: jest.fn(),
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn()
+  });
+
+  const createTempErrorReporter = (): ErrorReporter => ({
+    report: jest.fn()
+  }) as unknown as ErrorReporter;
+
   beforeEach(() => {
     onceSpy = jest.spyOn(process, "once");
     exitSpy = jest.spyOn(process, "exit");
@@ -347,7 +358,9 @@ describe("TemporaryDirectoryManager", () => {
     const originalExitCode = process.exitCode;
     process.exitCode = undefined;
 
-    const manager = new TemporaryDirectoryManager();
+    const logger = createTempLogger();
+    const reporter = createTempErrorReporter();
+    const manager = new TemporaryDirectoryManager(logger, reporter);
     const order: string[] = [];
     const beforeCleanup = jest.fn(async () => {
       order.push("before");
@@ -373,5 +386,36 @@ describe("TemporaryDirectoryManager", () => {
 
     // restore exit code
     process.exitCode = originalExitCode;
+  });
+  
+  test("reports cleanup handler failures", async () => {
+    const logger = createTempLogger();
+    const reporter = createTempErrorReporter();
+    const manager = new TemporaryDirectoryManager(logger, reporter);
+
+    const dir = await manager.createTempDir("temp-dir-failure-");
+
+    const internals = manager as unknown as { cleanupHandlers: Map<string, () => Promise<void>> };
+    internals.cleanupHandlers.set(dir, async () => {
+      throw new Error("rm failure");
+    });
+
+    await expect(manager.cleanup(dir)).rejects.toThrow("rm failure");
+
+    const reportMock = reporter.report as jest.MockedFunction<ErrorReporter["report"]>;
+    const failureReport = reportMock.mock.calls.find(([, context]) =>
+      (context as { source?: string } | undefined)?.source === "remoteRepo.tempDir.cleanup.handler"
+    );
+    expect(failureReport).toBeDefined();
+
+    const warnMock = logger.warn as jest.Mock;
+    expect(warnMock.mock.calls).toEqual(
+      expect.arrayContaining([
+        [
+          "remoteRepo.tempDir.cleanup_failed",
+          expect.objectContaining({ path: dir, phase: "handler" })
+        ]
+      ])
+    );
   });
 });

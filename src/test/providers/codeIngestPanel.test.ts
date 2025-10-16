@@ -49,11 +49,12 @@ describe("CodeIngestPanel", () => {
       { expectsAck: true }
     );
 
-    await listener(message);
+  await listener(message);
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(vscode.commands.executeCommand).toHaveBeenCalledWith(
       COMMAND_MAP.WEBVIEW_TO_HOST.GENERATE_DIGEST,
-      { selectedFiles: [] }
+      expect.objectContaining({ selectedFiles: [] })
     );
 
     expect(harness.webview.postMessage).toHaveBeenCalledTimes(1);
@@ -93,7 +94,7 @@ describe("CodeIngestPanel", () => {
     expect(harness.webview.postMessage).not.toHaveBeenCalled();
   });
 
-  it("sends restore state commands via the envelope", async () => {
+  it("queues restore state messages until the webview is ready", async () => {
     const harness = createPanelHarness();
     await CodeIngestPanel.createOrShow(vscode.Uri.file(path.resolve("./")));
 
@@ -102,6 +103,10 @@ describe("CodeIngestPanel", () => {
 
     harness.webview.postMessage.mockClear();
     instance.updateState({ tree: [] });
+
+    expect(harness.webview.postMessage).not.toHaveBeenCalled();
+
+    CodeIngestPanel.notifyWebviewReady();
 
     expect(harness.webview.postMessage).toHaveBeenCalledTimes(1);
     const message = harness.webview.postMessage.mock.calls[0][0] as {
@@ -114,6 +119,29 @@ describe("CodeIngestPanel", () => {
     expect(message.command).toBe(COMMAND_MAP.HOST_TO_WEBVIEW.RESTORE_STATE);
     expect(message.token).toBe("test-token");
     expect(message.payload).toEqual({ state: { tree: [] } });
+  });
+
+  it("queues arbitrary host commands until the webview signals readiness", async () => {
+    const harness = createPanelHarness();
+    await CodeIngestPanel.createOrShow(vscode.Uri.file(path.resolve("./")));
+
+    harness.webview.postMessage.mockClear();
+    const result = CodeIngestPanel.postCommand(COMMAND_MAP.HOST_TO_WEBVIEW.UPDATE_PROGRESS, { phase: "scan" });
+
+    expect(result).toBe(true);
+    expect(harness.webview.postMessage).not.toHaveBeenCalled();
+
+    CodeIngestPanel.notifyWebviewReady();
+
+    expect(harness.webview.postMessage).toHaveBeenCalledTimes(1);
+    const message = harness.webview.postMessage.mock.calls[0][0] as {
+      type: string;
+      command: string;
+      token: string;
+      payload: unknown;
+    };
+    expect(message.command).toBe(COMMAND_MAP.HOST_TO_WEBVIEW.UPDATE_PROGRESS);
+    expect(message.payload).toEqual({ phase: "scan" });
   });
 });
 

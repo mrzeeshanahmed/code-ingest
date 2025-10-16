@@ -202,7 +202,8 @@ export class RemoteRepoService {
     this.authenticator = dependencies.authenticator ?? new GitAuthenticator(configService, logger);
     this.gitOperations = dependencies.gitOperations ?? new AdvancedGitOperations(logger);
     this.validator = dependencies.validator ?? new RepositoryValidator(logger);
-    this.tempDirectoryManager = dependencies.tempDirectoryManager ?? new TemporaryDirectoryManager();
+    this.tempDirectoryManager =
+      dependencies.tempDirectoryManager ?? new TemporaryDirectoryManager(logger, errorReporter);
     this.tempDirectoryManager.setupProcessCleanup({
       beforeCleanup: () => this.cancelActiveOperations()
     });
@@ -1073,6 +1074,8 @@ export class TemporaryDirectoryManager {
   private cleanupPromise: Promise<void> | null = null;
   private cleanupCompleted = false;
 
+  constructor(private readonly logger?: Logger, private readonly errorReporter?: ErrorReporter) {}
+
   async createTempDir(prefix = "code-ingest-"): Promise<string> {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
     this.activeDirs.add(tmpDir);
@@ -1086,11 +1089,31 @@ export class TemporaryDirectoryManager {
     if (!this.activeDirs.has(dirPath) && !force) {
       return;
     }
+
     const handler = this.cleanupHandlers.get(dirPath);
     if (handler) {
-      await handler();
-      this.cleanupHandlers.delete(dirPath);
+      try {
+        await handler();
+        this.cleanupHandlers.delete(dirPath);
+        this.activeDirs.delete(dirPath);
+        return;
+      } catch (error) {
+        throw this.createCleanupError(error, { path: dirPath, force, phase: "handler" });
+      }
     }
+
+    if (force) {
+      try {
+        await fs.rm(dirPath, { recursive: true, force: true });
+        this.cleanupHandlers.delete(dirPath);
+        this.activeDirs.delete(dirPath);
+        return;
+      } catch (error) {
+        throw this.createCleanupError(error, { path: dirPath, force, phase: "force" });
+      }
+    }
+
+    this.cleanupHandlers.delete(dirPath);
     this.activeDirs.delete(dirPath);
   }
 
@@ -1156,13 +1179,41 @@ export class TemporaryDirectoryManager {
   private cleanupAllSync(): void {
     for (const dir of this.activeDirs) {
       try {
-        fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
-      } catch {
-        // Ignore sync cleanup failures.
+        void fs
+          .rm(dir, { recursive: true, force: true })
+          .catch((error) => {
+            this.createCleanupError(error, { path: dir, force: true, phase: "sync" });
+          });
+      } catch (error) {
+        this.createCleanupError(error, { path: dir, force: true, phase: "sync" });
       }
     }
     this.activeDirs.clear();
     this.cleanupHandlers.clear();
+  }
+
+  private createCleanupError(
+    error: unknown,
+    context: { path: string; force: boolean; phase: "handler" | "force" | "sync" }
+  ): Error {
+    const metadata = {
+      path: context.path,
+      force: context.force,
+      phase: context.phase
+    } as const;
+    const wrapped = wrapError(error, {
+      scope: `remoteRepo.tempDir.cleanup.${context.phase}`,
+      ...metadata
+    });
+    this.logger?.warn("remoteRepo.tempDir.cleanup_failed", {
+      ...metadata,
+      message: wrapped.message
+    });
+    this.errorReporter?.report(wrapped, {
+      source: `remoteRepo.tempDir.cleanup.${context.phase}`,
+      metadata: { ...metadata }
+    });
+    return wrapped;
   }
 }
 

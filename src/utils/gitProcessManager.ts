@@ -281,11 +281,14 @@ interface ProcessControllerOptions {
 }
 
 class ProcessController {
+  private currentCommandLabel: string | null = null;
+
   constructor(
     private readonly process: ChildProcess,
     private readonly timeout: number,
     private readonly scrubber: CredentialScrubber,
-    private readonly options: ProcessControllerOptions
+    private readonly options: ProcessControllerOptions,
+    private readonly errorReporter: ErrorReporter
   ) {}
 
   async executeWithTimeout(commandLabel: string, retryCount: number): Promise<GitCommandResult> {
@@ -293,8 +296,9 @@ class ProcessController {
     const stdoutChunks: string[] = [];
     const stderrChunks: string[] = [];
     const maxBuffer = this.resolveMaxBuffer();
+    this.currentCommandLabel = commandLabel;
 
-    return new Promise<GitCommandResult>((resolve, reject) => {
+    const execution = new Promise<GitCommandResult>((resolve, reject) => {
       let finished = false;
       let stdoutBytes = 0;
       let stderrBytes = 0;
@@ -389,6 +393,10 @@ class ProcessController {
         reject(new Error(this.scrubber.scrubOutput(message)));
       });
     });
+
+    return execution.finally(() => {
+      this.currentCommandLabel = null;
+    });
   }
 
   private resolveMaxBuffer(): number {
@@ -409,13 +417,34 @@ class ProcessController {
   }
 
   private killProcess(signal: NodeJS.Signals): void {
+    const pid = this.process.pid;
+    if (!pid || this.process.killed) {
+      return;
+    }
+
     try {
-      if (this.process.pid && !this.process.killed) {
-        process.kill(this.process.pid, signal);
-      }
+      process.kill(pid, signal);
     } catch (error) {
-      const err = error as Error;
-      this.options.logger.warn("git.process.kill_failed", { message: err.message });
+      const wrapped = wrapError(error, {
+        scope: "gitProcessManager.processController.kill",
+        signal,
+        pid,
+        command: this.currentCommandLabel ?? "unknown"
+      });
+      this.options.logger.warn("git.process.kill_failed", {
+        message: wrapped.message,
+        signal,
+        pid,
+        command: this.currentCommandLabel ?? "unknown"
+      });
+      this.errorReporter.report(wrapped, {
+        source: "gitProcessManager.processController.kill",
+        metadata: {
+          signal,
+          pid,
+          command: this.currentCommandLabel ?? "unknown"
+        }
+      });
     }
   }
 }
@@ -529,8 +558,8 @@ export class GitProcessManager {
         return;
       }
       this.logger.warn("git.process.stream.timeout", { command: scrubbedCommand, timeout });
-      this.safeKill(child, "SIGTERM");
-      setTimeout(() => this.safeKill(child, "SIGKILL"), 5_000).unref?.();
+      this.safeKill(child, "SIGTERM", "stream.timeout");
+      setTimeout(() => this.safeKill(child, "SIGKILL", "stream.timeout.force"), 5_000).unref?.();
     };
 
     if (timeout > 0) {
@@ -541,8 +570,8 @@ export class GitProcessManager {
       if (finished) {
         return;
       }
-      this.logger.warn("git.process.stream.cancelled", { command: scrubbedCommand });
-      this.safeKill(child, "SIGTERM");
+  this.logger.warn("git.process.stream.cancelled", { command: scrubbedCommand });
+  this.safeKill(child, "SIGTERM", "stream.cancelled");
     });
 
     child.stderr?.on("data", (chunk) => {
@@ -664,7 +693,8 @@ export class GitProcessManager {
           child,
           options.timeout ?? DEFAULT_TIMEOUT,
           this.credentialScrubber,
-          controllerOptions
+          controllerOptions,
+          this.errorReporter
         );
 
         const commandLabel = this.buildCommandLabel(args);
@@ -790,14 +820,26 @@ export class GitProcessManager {
     });
   }
 
-  private safeKill(child: ChildProcess, signal: NodeJS.Signals): void {
+  private safeKill(child: ChildProcess, signal: NodeJS.Signals, context: string): void {
+    const pid = child.pid;
+    if (!pid || child.killed) {
+      return;
+    }
+
     try {
-      if (child.pid && !child.killed) {
-        process.kill(child.pid, signal);
-      }
+      process.kill(pid, signal);
     } catch (error) {
-      const err = error as Error;
-      this.logger.warn("git.process.kill_failed", { message: err.message, signal });
+      const wrapped = wrapError(error, {
+        scope: "gitProcessManager.safeKill",
+        signal,
+        pid,
+        context
+      });
+      this.logger.warn("git.process.kill_failed", { message: wrapped.message, signal, pid, context });
+      this.errorReporter.report(wrapped, {
+        source: "gitProcessManager.safeKill",
+        metadata: { signal, pid, context }
+      });
     }
   }
 
@@ -847,8 +889,8 @@ export class GitProcessManager {
 
   private forceKillActiveProcesses(): void {
     for (const child of this.activeProcesses.values()) {
-      this.safeKill(child, "SIGTERM");
-      this.safeKill(child, "SIGKILL");
+      this.safeKill(child, "SIGTERM", "forceTerminate");
+      this.safeKill(child, "SIGKILL", "forceTerminate.force");
     }
     this.activeProcesses.clear();
   }
@@ -882,11 +924,11 @@ export class GitProcessManager {
       }
 
       timer = setTimeout(() => {
-        this.safeKill(child, "SIGKILL");
+        this.safeKill(child, "SIGKILL", "terminate.timeout");
       }, 5_000);
       timer.unref?.();
 
-      this.safeKill(child, "SIGTERM");
+      this.safeKill(child, "SIGTERM", "terminate.process");
 
       const exitCode = (child as unknown as { exitCode?: number | null }).exitCode;
       if (child.killed || (exitCode !== undefined && exitCode !== null)) {

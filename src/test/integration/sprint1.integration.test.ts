@@ -248,7 +248,8 @@ describe("Sprint 1 Integration: Scanning Pipeline", () => {
     });
 
     expandState = new ExpandState();
-    treeProvider = new CodeIngestTreeProvider(workspaceUri, fileScanner, selectionManager, expandState, {
+    const registerCommand = jest.fn(() => new vscode.Disposable(() => undefined));
+    treeProvider = new CodeIngestTreeProvider(workspaceUri, fileScanner, selectionManager, expandState, registerCommand, {
       filterService,
       gitignoreService,
       paginationSize: 20,

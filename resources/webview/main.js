@@ -13,7 +13,7 @@ import { RestoredStateHandler } from "./handlers/restoredStateHandler.js";
 import { StateHandler } from "./handlers/stateHandler.js";
 import { PreviewDeltaHandler } from "./handlers/previewDeltaHandler.js";
 import { MessageEnvelope } from "./messageEnvelope.js";
-import { COMMAND_MAP } from "./commandMap.js";
+import { COMMAND_MAP, COMMAND_POLICIES } from "./commandMap.js";
 import { WebviewLogger } from "./logger.js";
 import { WebviewErrorReporter } from "./errorReporter.js";
 import { WebviewPerformanceMonitor } from "./performanceMonitor.js";
@@ -106,6 +106,7 @@ export class WebviewApplication {
     window.errorReporter = this.errorReporter;
     window.performanceMonitor = this.performanceMonitor;
 
+    this.hasSignaledReady = false;
     this._initializeBootConfig();
     this.workspaceRoot = typeof this.initialState.workspaceFolder === "string" && this.initialState.workspaceFolder.length > 0
       ? this.initialState.workspaceFolder
@@ -126,20 +127,23 @@ export class WebviewApplication {
     this.sessionToken = typeof bootConfig.sessionToken === "string" && bootConfig.sessionToken.length > 0 ? bootConfig.sessionToken : undefined;
   }
 
-  initialize() {
+  async initialize() {
     this.logger.info("Webview application initializing");
-    return this.performanceMonitor.measureOperation("initialization", () => {
-      this.setupStore();
-      this.setupRenderer();
-      this.setupHandlers();
-      this.setupCommandRegistry();
-      this.setupMessageHandlers();
-      this.setupActionButtons();
-      this.setupLifecycleEvents();
-    }).catch((error) => {
+    try {
+      await this.performanceMonitor.measureOperation("initialization", async () => {
+        this.setupStore();
+        this.setupRenderer();
+        this.setupHandlers();
+        this.setupCommandRegistry();
+        this.setupMessageHandlers();
+        this.setupActionButtons();
+        this.setupLifecycleEvents();
+      });
+      await this._signalReady();
+    } catch (error) {
       this.errorReporter.reportError(error, { type: "initialization_failure" });
       throw error;
-    });
+    }
   }
 
   setupStore() {
@@ -219,7 +223,6 @@ export class WebviewApplication {
     const outboundRegistrations = [
       { key: "GENERATE_DIGEST", options: { requiresAck: true } },
       { key: "LOAD_REMOTE_REPO", options: { requiresAck: true } },
-      { key: "SELECT_ALL_FILES" },
       { key: "TOGGLE_REDACTION" },
       { key: "APPLY_PRESET" },
       { key: "UPDATE_SELECTION" },
@@ -242,9 +245,11 @@ export class WebviewApplication {
         continue;
       }
       const registrationOptions = this.isTestEnvironment
-        ? { ...options, requiresAck: false }
-        : options;
-      this.commandRegistry.register(commandId, undefined, registrationOptions);
+        ? { ...(options ?? {}), requiresAck: false }
+        : { ...(options ?? {}) };
+      const policy = COMMAND_POLICIES?.[key];
+      const fullOptions = policy ? { ...registrationOptions, policy } : registrationOptions;
+      this.commandRegistry.register(commandId, undefined, fullOptions);
     }
 
     if (this.uiRenderer?.setCommandExecutor) {
@@ -305,8 +310,10 @@ export class WebviewApplication {
   }
 
   setupLifecycleEvents() {
-    window.addEventListener("DOMContentLoaded", () => {
-      void this.executeOutbound(COMMAND_MAP.WEBVIEW_TO_HOST.WEBVIEW_READY);
+    window.addEventListener("visibilitychange", () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        this.logger.debug?.("Webview document became visible");
+      }
     });
   }
 
@@ -349,6 +356,32 @@ export class WebviewApplication {
         this.errorReporter.reportError(normalizedError, { type: "message_processing_failure", messageType });
         return undefined;
       });
+  }
+
+  async _signalReady() {
+    if (this.hasSignaledReady) {
+      return;
+    }
+
+    const readyCommand = COMMAND_MAP.WEBVIEW_TO_HOST?.WEBVIEW_READY;
+    if (!readyCommand) {
+      this.logger.warn("No WEBVIEW_READY command mapping available; skipping ready signal");
+      return;
+    }
+
+    this.hasSignaledReady = true;
+
+    try {
+      await this.executeOutbound(readyCommand);
+      this.logger.info("Webview reported readiness to host");
+    } catch (error) {
+      const normalizedError = error instanceof Error ? error : new Error(String(error));
+      this.logger.error("Failed to notify host that webview is ready", normalizedError);
+      this.errorReporter.reportError(normalizedError, {
+        type: "webview_ready_failed",
+        commandId: readyCommand
+      });
+    }
   }
 }
 

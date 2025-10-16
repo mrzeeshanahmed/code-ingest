@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import * as path from "node:path";
 import * as vscode from "vscode";
@@ -168,6 +168,78 @@ function injectInitialState(html: string, serializedState: string | null, nonce?
   return `${html}\n<body>${scriptTag}</body>`;
 }
 
+function extractRequiredResources(html: string): string[] {
+  const required = new Set<string>();
+
+  const metaPattern = /<meta[^>]+name=("|')code-ingest:required-resources\1[^>]*>/gi;
+  const contentPattern = /content=("|')([^"']*)(\1)/i;
+  let metaMatch: RegExpExecArray | null;
+  while ((metaMatch = metaPattern.exec(html))) {
+    const tag = metaMatch[0];
+    const contentMatch = contentPattern.exec(tag);
+    if (!contentMatch) {
+      continue;
+    }
+    const entries = contentMatch[2]
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    entries.forEach((entry) => required.add(entry));
+  }
+
+  if (required.size === 0) {
+    const attributePattern = /(src|href)=("|')([^"']+)(\2)/gi;
+    let attributeMatch: RegExpExecArray | null;
+    while ((attributeMatch = attributePattern.exec(html))) {
+      const value = attributeMatch[3];
+      if (/^(https?:|vscode-resource:|vscode-webview-resource:|data:|#|\{|\/\/)/i.test(value)) {
+        continue;
+      }
+      const cleanValue = value.split(/[?#]/)[0]?.trim();
+      if (!cleanValue) {
+        continue;
+      }
+      required.add(cleanValue);
+    }
+  }
+
+  return Array.from(required);
+}
+
+function validateRequiredResources(baseDirUri: vscode.Uri, html: string): string[] {
+  const baseDir = baseDirUri.fsPath;
+  const missing: string[] = [];
+  const requiredResources = extractRequiredResources(html);
+
+  for (const candidate of requiredResources) {
+    const relativePath = candidate.replace(/^\.\//, "");
+    const absolutePath = path.resolve(baseDir, relativePath);
+    const relative = path.relative(baseDir, absolutePath);
+
+    if (relative.startsWith("..") || path.isAbsolute(relative)) {
+      console.warn("webviewHelpers: Skipping validation for out-of-bundle resource", candidate);
+      continue;
+    }
+
+    try {
+      const stats = statSync(absolutePath);
+      if (!stats.isFile() || stats.size === 0) {
+        missing.push(candidate);
+      }
+    } catch (error) {
+      const errno = (error as NodeJS.ErrnoException)?.code;
+      if (errno === "ENOENT") {
+        missing.push(candidate);
+      } else {
+        console.error("webviewHelpers: Failed to stat resource", { candidate, error });
+        missing.push(candidate);
+      }
+    }
+  }
+
+  return missing;
+}
+
 function buildFallbackHtml(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return `<!DOCTYPE html>
@@ -206,6 +278,16 @@ export function setWebviewHtml(
   }
 
   try {
+    const missingResources = validateRequiredResources(baseDirUri, rawHtml);
+    if (missingResources.length > 0) {
+      const missingList = missingResources.join(", ");
+      const message = `Missing webview asset(s): ${missingList}. Run \"npm run build:webview\" to regenerate resources.`;
+      console.error("webviewHelpers: Missing required resources", { missing: missingResources });
+      const fallback = buildFallbackHtml(new Error(message));
+      webview.html = fallback;
+      return fallback;
+    }
+
     let html = ensureHtmlStructure(rawHtml);
     const serializedState = safeSerializeInitialState(initialState);
     const nonce = serializedState ? randomBytes(16).toString("base64") : undefined;

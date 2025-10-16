@@ -2,7 +2,7 @@
  * Follow instructions in copilot-instructions.md exactly.
  */
 
-const REQUIRED_OVERRIDES = ["validate", "handle", "canHandle"];
+const REQUIRED_OVERRIDES = ["validate", "handle"];
 
 /**
  * @typedef {import("../types").HandlerValidationResult} HandlerValidationResult
@@ -39,6 +39,9 @@ export class BaseHandler {
     this.messageTypes = new Set(options.messageTypes ?? []);
     this.postMessage = typeof options.postMessage === "function" ? options.postMessage : () => undefined;
     this.log = options.log ?? console;
+    this.handlerName = typeof options.handlerName === "string" && options.handlerName.length > 0
+      ? options.handlerName
+      : this.constructor?.name ?? "BaseHandler";
 
     this._verifyOverrides();
   }
@@ -50,9 +53,10 @@ export class BaseHandler {
    */
   _verifyOverrides() {
     const proto = Object.getPrototypeOf(this);
+    const handlerName = this.handlerName;
     for (const methodName of REQUIRED_OVERRIDES) {
       if (proto?.[methodName] === BaseHandler.prototype[methodName]) {
-        throw new Error(`BaseHandler subclass must implement \`${methodName}()\`.`);
+        throw new Error(`${handlerName} must override ${methodName}().`);
       }
     }
   }
@@ -62,7 +66,13 @@ export class BaseHandler {
    * @returns {boolean}
    */
   canHandle(messageType) {
-    throw new Error("canHandle() must be implemented");
+    if (typeof messageType !== "string" || messageType.length === 0) {
+      return true;
+    }
+    if (this.messageTypes.size === 0) {
+      return true;
+    }
+    return this.messageTypes.has(messageType);
   }
 
   /**
@@ -108,7 +118,7 @@ export class BaseHandler {
    * @returns {HandlerValidationResult | boolean}
    */
   validate(payload, _messageType) {
-    throw new Error("validate() must be implemented");
+    throw new Error(`${this.handlerName}.validate(payload, messageType) must be implemented by the subclass.`);
   }
 
   /**
@@ -116,9 +126,8 @@ export class BaseHandler {
    * @param {string} [messageType]
    * @returns {Promise<void> | void}
    */
-  // eslint-disable-next-line no-unused-vars
   handle(payload, _messageType) {
-    throw new Error("handle() must be implemented");
+    throw new Error(`${this.handlerName}.handle(payload, messageType) must be implemented by the subclass.`);
   }
 
   /**

@@ -52,4 +52,41 @@ describe("HandlerRegistry readiness", () => {
 
     expect(processed).toEqual([{ value: 1 }, { value: 2 }, { value: 3 }]);
   });
+
+  it("throws and reports when handler registration is malformed", () => {
+    const errorSpy = jest.fn();
+    const postMessage = jest.fn();
+    window.vscode = { postMessage };
+
+    const registry = new HandlerRegistry({ logger: { info: jest.fn(), warn: jest.fn(), error: errorSpy } });
+    const malformedHandler = {
+      process: jest.fn()
+    };
+
+    expect(() => registry.register("bad", malformedHandler)).toThrow(/validate/);
+    expect(errorSpy).toHaveBeenCalled();
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "handler:error" }));
+    delete window.vscode;
+  });
+
+  it("propagates and reports errors when flushing buffered messages", async () => {
+    const postMessage = jest.fn();
+    window.vscode = { postMessage };
+    const registry = new HandlerRegistry({ logger: console });
+    registry.register("error", {
+      canHandle: () => true,
+      validate: () => ({ ok: true }),
+      handle: jest.fn(),
+      async process() {
+        throw new Error("flush-fail");
+      }
+    });
+
+    const pending = registry.process("error", { foo: "bar" });
+
+    registry.setReady();
+    await expect(pending).rejects.toThrow("flush-fail");
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "handler:error" }));
+    delete window.vscode;
+  });
 });

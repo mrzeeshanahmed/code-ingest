@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { COMMAND_MAP } from "./commandMap";
-import type { CommandServices } from "./types";
+import type { CommandRegistrar, CommandServices } from "./types";
 import type { WorkspaceManager } from "../services/workspaceManager";
 
 const REDACTION_STATE_KEY = "codeIngest.redactionOverride";
@@ -11,7 +11,8 @@ type TogglePayload = {
 
 export function registerRedactionCommands(
   context: vscode.ExtensionContext,
-  services: CommandServices
+  services: CommandServices,
+  registerCommand: CommandRegistrar
 ): void {
   const pushStateToWebview = (override: boolean) => {
     const configSnapshot = { ...services.configurationService.getConfig(), redactionOverride: override };
@@ -55,11 +56,12 @@ export function registerRedactionCommands(
     "codeIngest.toggleRedactionOverride"
   ]);
 
-  const subscriptions = Array.from(toggleCommandIds, (commandId) =>
-    vscode.commands.registerCommand(commandId, handlePayload)
-  );
-
-  context.subscriptions.push(...subscriptions);
+  toggleCommandIds.forEach((commandId) => {
+    registerCommand(commandId, async (...args: unknown[]) => {
+      const payload = (args[0] ?? undefined) as TogglePayload | undefined;
+      return handlePayload(payload);
+    });
+  });
 
   // Ensure the webview receives the initial state when commands are registered.
   pushStateToWebview(services.workspaceManager.getRedactionOverride());

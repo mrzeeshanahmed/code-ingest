@@ -5,6 +5,7 @@ import { hydrateRedactionOverride } from "./commands/redactionCommands";
 import type { CommandServices } from "./commands/types";
 import { COMMAND_MAP } from "./commands/commandMap";
 import { DashboardViewProvider } from "./providers/dashboardViewProvider";
+import { CodeIngestPanel } from "./providers/codeIngestPanel";
 import { ConfigurationService } from "./services/configurationService";
 import { Diagnostics } from "./services/diagnostics";
 import { ErrorReporter } from "./services/errorReporter";
@@ -199,36 +200,44 @@ function createCommandWrapper(
       return result;
     } catch (error) {
       const err = error as Error;
-      errorChannel.report(err, { command: commandId });
+      const handledByHost = Boolean((err as { handledByHost?: boolean }).handledByHost);
 
-      const actions = ["Details", "Report"] as const;
-      const selection = await vscode.window.showErrorMessage(
-        `Code Ingest: Command failed (${commandId}). ${err.message}`,
-        ...actions
-      );
+      if (!handledByHost) {
+        errorChannel.report(err, { command: commandId });
 
-      if (selection === "Details") {
-        outputChannel?.show(true);
-      } else if (selection === "Report") {
-        const payload = {
-          command: commandId,
-          message: err.message,
-          stack: err.stack,
-          time: new Date().toISOString()
-        };
-        try {
-          await vscode.env.clipboard.writeText(JSON.stringify(payload, null, 2));
-          const openIssue = await vscode.window.showInformationMessage(
-            "Error report copied to clipboard. Open issue page?",
-            "Open Issue",
-            "Cancel"
-          );
-          if (openIssue === "Open Issue") {
-            void vscode.env.openExternal(vscode.Uri.parse("https://github.com/mrzeeshanahmed/code-ingest/issues/new"));
+        const actions = ["Details", "Report"] as const;
+        const selection = await vscode.window.showErrorMessage(
+          `Code Ingest: Command failed (${commandId}). ${err.message}`,
+          ...actions
+        );
+
+        if (selection === "Details") {
+          outputChannel?.show(true);
+        } else if (selection === "Report") {
+          const payload = {
+            command: commandId,
+            message: err.message,
+            stack: err.stack,
+            time: new Date().toISOString()
+          };
+          try {
+            await vscode.env.clipboard.writeText(JSON.stringify(payload, null, 2));
+            const openIssue = await vscode.window.showInformationMessage(
+              "Error report copied to clipboard. Open issue page?",
+              "Open Issue",
+              "Cancel"
+            );
+            if (openIssue === "Open Issue") {
+              void vscode.env.openExternal(vscode.Uri.parse("https://github.com/mrzeeshanahmed/code-ingest/issues/new"));
+            }
+          } catch (e) {
+            outputChannel?.appendLine(`[report-failed] Failed to copy report: ${(e as Error).message}`);
           }
-        } catch (e) {
-          outputChannel?.appendLine(`[report-failed] Failed to copy report: ${(e as Error).message}`);
         }
+      } else {
+        outputChannel?.appendLine(
+          `[command] ${commandId} rejected by handler: ${err.message || "handled without message"}`
+        );
       }
       throw error;
     }
@@ -259,6 +268,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     errorChannel.appendLine(`[activation] Aborting activation: ${message}`);
+    const selection = await vscode.window.showErrorMessage(
+      `Code Ingest failed to prepare required webview assets: ${message}`,
+      "View Logs"
+    );
+    if (selection === "View Logs") {
+      errorChannel.show(true);
+    }
     throw error;
   }
 
@@ -378,7 +394,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     outputWriter
   };
 
-  registerAllCommands(context, services);
+  registerAllCommands(context, services, (commandId, handler) =>
+    createCommandWrapper(context, commandId, handler, reporter)
+  );
 
   webviewPanelManager.setStateSnapshot(buildPanelState(), { emit: false });
 
@@ -386,6 +404,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     [
       COMMAND_MAP.WEBVIEW_TO_HOST.WEBVIEW_READY,
       async () => {
+        CodeIngestPanel.notifyWebviewReady();
         if (!webviewPanelManager.tryRestoreState()) {
           webviewPanelManager.setStateSnapshot(buildPanelState());
           webviewPanelManager.tryRestoreState();

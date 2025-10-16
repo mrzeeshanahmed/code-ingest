@@ -26,6 +26,7 @@ describe("HandlerRegistry", () => {
     };
 
     registry.register("foo", handler);
+    registry.setReady();
     await registry.process("foo", { value: 1 });
 
     expect(handler.process).toHaveBeenCalledWith("foo", { value: 1 });
@@ -35,6 +36,7 @@ describe("HandlerRegistry", () => {
     const fallback = jest.fn();
     const registry = new HandlerRegistry({ fallbackHandler: fallback });
 
+    registry.setReady();
     await registry.process("unknown", {});
 
     expect(fallback).toHaveBeenCalledWith("unknown", {});
@@ -52,7 +54,8 @@ describe("HandlerRegistry", () => {
     };
 
     registry.register("boom", handler);
-    await registry.process("boom", {});
+    registry.setReady();
+    await expect(registry.process("boom", {})).rejects.toThrow("boom");
 
     expect(window.vscode.postMessage).toHaveBeenCalledWith(
       expect.objectContaining({ type: "handler:error" })
@@ -73,11 +76,22 @@ describe("HandlerRegistry", () => {
       canHandle: jest.fn(),
       validate: jest.fn()
     })).toThrow(/must implement validate/);
+  });
 
-    expect(() => registry.register("missingCanHandle", {
+  it("defaults canHandle when missing", () => {
+    const warn = jest.fn();
+    const registry = new HandlerRegistry({ logger: { info: jest.fn(), warn, error: jest.fn() } });
+    const handler = {
       process: jest.fn(),
       validate: jest.fn(),
       handle: jest.fn()
-    })).toThrow(/must implement canHandle/);
+    };
+
+    expect(() => registry.register("missingCanHandle", handler)).not.toThrow();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("does not implement canHandle"));
+
+    const registered = registry.getHandler("missingCanHandle");
+    expect(typeof registered.canHandle).toBe("function");
+    expect(registered.canHandle("missingCanHandle")).toBe(true);
   });
 });

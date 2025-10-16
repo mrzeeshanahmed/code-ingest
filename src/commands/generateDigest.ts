@@ -2,7 +2,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 
 import { COMMAND_MAP } from "./commandMap";
-import type { CommandServices } from "./types";
+import type { CommandHandler, CommandRegistrar, CommandServices } from "./types";
 import { DigestGenerator, type DigestResult, type GenerationProgress } from "../services/digestGenerator";
 import { ContentProcessor } from "../services/contentProcessor";
 import { TokenAnalyzer } from "../services/tokenAnalyzer";
@@ -176,9 +176,11 @@ async function validateSelection(
 
 export function registerGenerateDigestCommand(
   context: vscode.ExtensionContext,
-  services: CommandServices
+  services: CommandServices,
+  registerCommand: CommandRegistrar
 ): void {
-  const handler = async (payload?: GenerateDigestPayload) => {
+  const handler: CommandHandler = async (...args: unknown[]) => {
+    const payload = (args[0] ?? undefined) as GenerateDigestPayload | undefined;
     const workspaceRoot = services.workspaceManager.getWorkspaceRoot();
     if (!workspaceRoot) {
       void vscode.window.showWarningMessage("Code Ingest: Open a workspace folder before generating a digest.");
@@ -189,7 +191,7 @@ export function registerGenerateDigestCommand(
 
     let payloadSelection: string[] | undefined;
     let selectionFromPayload = false;
-    const selectionCandidates = payload?.selectedFiles;
+  const selectionCandidates = payload?.selectedFiles;
     if (Array.isArray(selectionCandidates)) {
       selectionFromPayload = true;
       payloadSelection = normalizeSelectionInput(selectionCandidates, workspaceFsPath);
@@ -226,10 +228,10 @@ export function registerGenerateDigestCommand(
           title: "No files available",
           message
         });
-        const rejectionError = new Error(message);
-  (rejectionError as { code?: string }).code = DIGEST_SELECTION_REJECTED;
-        (rejectionError as { handledByHost?: boolean }).handledByHost = true;
-        throw rejectionError;
+    const rejectionError = new Error(message);
+    (rejectionError as { code?: string }).code = DIGEST_SELECTION_REJECTED;
+    (rejectionError as { handledByHost?: boolean }).handledByHost = true;
+    throw rejectionError;
       }
     }
 
@@ -242,7 +244,7 @@ export function registerGenerateDigestCommand(
           message
         });
         const rejectionError = new Error(message);
-  (rejectionError as { code?: string }).code = DIGEST_SELECTION_REJECTED;
+        (rejectionError as { code?: string }).code = DIGEST_SELECTION_REJECTED;
         (rejectionError as { handledByHost?: boolean }).handledByHost = true;
         throw rejectionError;
       }
@@ -420,7 +422,7 @@ export function registerGenerateDigestCommand(
       const message = error instanceof Error ? error.message : String(error);
       const errorCode = typeof error === "object" && error !== null ? (error as { code?: string }).code : undefined;
 
-  if (errorCode !== DIGEST_SELECTION_REJECTED) {
+      if (errorCode !== DIGEST_SELECTION_REJECTED) {
         services.diagnostics.add(`Digest generation failed: ${message}`);
         services.errorReporter.report(error, { source: "generateDigest" });
         if (error instanceof Error) {
@@ -435,15 +437,6 @@ export function registerGenerateDigestCommand(
     }
   };
 
-  const generateDigestDisposable = vscode.commands.registerCommand(
-    COMMAND_MAP.WEBVIEW_TO_HOST.GENERATE_DIGEST,
-    handler
-  );
-
-  const refreshPreviewDisposable = vscode.commands.registerCommand(
-    COMMAND_MAP.WEBVIEW_TO_HOST.REFRESH_PREVIEW,
-    () => handler()
-  );
-
-  context.subscriptions.push(generateDigestDisposable, refreshPreviewDisposable);
+  registerCommand(COMMAND_MAP.WEBVIEW_TO_HOST.GENERATE_DIGEST, handler);
+  registerCommand(COMMAND_MAP.WEBVIEW_TO_HOST.REFRESH_PREVIEW, () => handler());
 }

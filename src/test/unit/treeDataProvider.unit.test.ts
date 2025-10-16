@@ -142,8 +142,9 @@ function createProvider(root: string, responses: ScanResponses, options: CreateP
     validatePathExists: () => true
   });
   const expandState = new ExpandState();
+  const registerCommand = jest.fn(() => ({ dispose: jest.fn() }) as unknown as vscode.Disposable);
 
-  const provider = new CodeIngestTreeProvider(workspaceUri, scanner, selectionManager, expandState, {
+  const provider = new CodeIngestTreeProvider(workspaceUri, scanner, selectionManager, expandState, registerCommand, {
     paginationSize: options.paginationSize ?? 200,
     filterService,
     gitignoreService

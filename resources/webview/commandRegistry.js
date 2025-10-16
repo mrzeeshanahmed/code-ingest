@@ -9,6 +9,91 @@ import { AcknowledgmentSystem } from "./acknowledgmentSystem.js";
 import { validateCommandPayload } from "./commandValidation.js";
 
 const DEFAULT_ACK_TIMEOUT = 5000;
+const DEFAULT_POLICY = Object.freeze({ strategy: "parallel" });
+
+function stableSerialize(value, seen = new WeakSet()) {
+  if (value === null) {
+    return "null";
+  }
+  const type = typeof value;
+  if (type === "string") {
+    return JSON.stringify(value);
+  }
+  if (type === "number") {
+    return Number.isFinite(value) ? String(value) : `"__number__:${value}"`;
+  }
+  if (type === "boolean") {
+    return value ? "true" : "false";
+  }
+  if (type === "undefined") {
+    return "\"__undefined__\"";
+  }
+  if (type === "bigint") {
+    return `"__bigint__:${value.toString()}"`;
+  }
+  if (type === "symbol") {
+    return `"__symbol__:${String(value)}"`;
+  }
+  if (type === "function") {
+    return "\"__function__\"";
+  }
+  if (value instanceof Date) {
+    return `"__date__:${value.toISOString()}"`;
+  }
+  if (Array.isArray(value)) {
+    if (seen.has(value)) {
+      return "\"__circular__\"";
+    }
+    seen.add(value);
+    const serialized = value.map((entry) => stableSerialize(entry, seen));
+    seen.delete(value);
+    return `[${serialized.join(",")}]`;
+  }
+  if (type === "object") {
+    if (seen.has(value)) {
+      return "\"__circular__\"";
+    }
+    seen.add(value);
+    const keys = Object.keys(value).sort();
+    const serialized = keys.map((key) => `${JSON.stringify(key)}:${stableSerialize(value[key], seen)}`);
+    seen.delete(value);
+    return `{${serialized.join(",")}}`;
+  }
+  return JSON.stringify(String(value));
+}
+
+function hashString(subject) {
+  const input = typeof subject === "string" ? subject : stableSerialize(subject);
+  let hash = 0;
+  for (let index = 0; index < input.length; index += 1) {
+    hash = (hash * 131 + input.charCodeAt(index)) % 4_294_967_295;
+  }
+  return Math.abs(hash).toString(16);
+}
+
+function deriveDedupeKey(commandId, payload, policy) {
+  if (!policy || policy.strategy !== "dedupe") {
+    return undefined;
+  }
+
+  try {
+    if (typeof policy.dedupeKey === "function") {
+      const key = policy.dedupeKey(payload);
+      if (typeof key === "string" && key.length > 0) {
+        return `${commandId}|${hashString(key)}`;
+      }
+      if (typeof key === "number" && Number.isFinite(key)) {
+        return `${commandId}|${key.toString(16)}`;
+      }
+    }
+
+    const signature = hashString(payload);
+    return `${commandId}|${signature}`;
+  } catch (error) {
+    console.warn?.("CommandRegistry: failed to derive dedupe key", { commandId, error });
+    return undefined;
+  }
+}
 
 function resolveDirection(commandId) {
   const outbound = Object.values(COMMAND_MAP.WEBVIEW_TO_HOST ?? {});
@@ -57,6 +142,7 @@ export class CommandRegistry {
     this.commands = new Map();
     this.pendingCommands = new Map();
     this.commandQueues = new Map();
+    this.dedupeInFlight = new Map();
   }
 
   register(commandId, handler, options = {}) {
@@ -74,6 +160,7 @@ export class CommandRegistry {
     const rateLimitMs = typeof options.rateLimitMs === "number" ? options.rateLimitMs : 100;
     const requiresAck = Boolean(options.requiresAck);
     const validation = normaliseValidation(options.validation, commandId);
+    const policy = this._normalisePolicy(options.policy, { requiresAck });
 
     this.commands.set(commandId, {
       handler,
@@ -81,7 +168,8 @@ export class CommandRegistry {
       requiresAck,
       validation,
       direction,
-      lastInvocation: 0
+      lastInvocation: 0,
+      policy
     });
 
     return () => {
@@ -112,11 +200,33 @@ export class CommandRegistry {
       return await entry.handler(normalisedPayload, this._buildContext(commandId));
     }
 
-    if (entry.direction === "outbound" && entry.requiresAck) {
-      return this._enqueueCommand(entry, commandId, normalisedPayload);
+    const policy = entry.policy ?? DEFAULT_POLICY;
+    const dedupeKey = deriveDedupeKey(commandId, normalisedPayload, policy);
+
+    if (dedupeKey) {
+      const existing = this.dedupeInFlight.get(dedupeKey);
+      if (existing) {
+        this.log.debug?.("CommandRegistry: deduping outbound command", { commandId, dedupeKey });
+        return existing;
+      }
     }
 
-    return this._executeOutbound(entry, commandId, normalisedPayload);
+    let executionPromise;
+
+    if (policy.strategy === "queue" || entry.requiresAck) {
+      executionPromise = this._enqueueCommand(entry, commandId, normalisedPayload);
+    } else {
+      executionPromise = this._executeOutbound(entry, commandId, normalisedPayload);
+    }
+
+    if (dedupeKey) {
+      const trackedPromise = Promise.resolve(executionPromise).finally(() => {
+        this.dedupeInFlight.delete(dedupeKey);
+      });
+      this.dedupeInFlight.set(dedupeKey, trackedPromise);
+      return trackedPromise;
+    }
+    return executionPromise;
   }
 
   async handleIncoming(message) {
@@ -300,6 +410,33 @@ export class CommandRegistry {
       message,
       postMessage: this.postMessage,
       logger: this.log
+    };
+  }
+
+  _normalisePolicy(policyOptions, context) {
+    const baseStrategy = context.requiresAck ? "queue" : "parallel";
+    if (!policyOptions || typeof policyOptions !== "object") {
+      return { strategy: baseStrategy };
+    }
+
+    const strategy = (() => {
+      if (policyOptions.strategy === "dedupe") {
+        return "dedupe";
+      }
+      if (policyOptions.strategy === "queue") {
+        return "queue";
+      }
+      if (policyOptions.strategy === "parallel") {
+        return "parallel";
+      }
+      return baseStrategy;
+    })();
+
+    const dedupeKey = typeof policyOptions.dedupeKey === "function" ? policyOptions.dedupeKey : undefined;
+
+    return {
+      strategy,
+      dedupeKey
     };
   }
 }

@@ -26,10 +26,19 @@ interface LegacyMessage {
   readonly payload?: unknown;
 }
 
+interface PendingHostMessage {
+  readonly command: string;
+  readonly payload: unknown;
+  readonly options?: { expectsAck?: boolean };
+}
+
 export class CodeIngestPanel {
   private static instance: CodeIngestPanel | undefined;
   private readonly envelope: WebviewMessageEnvelope;
   private readonly sessionToken: string;
+  private readonly pendingMessages: PendingHostMessage[] = [];
+  private isWebviewReady = false;
+  private flushRetryTimer: NodeJS.Timeout | undefined;
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
@@ -87,31 +96,21 @@ export class CodeIngestPanel {
     return true;
   }
 
+  static notifyWebviewReady(): void {
+    CodeIngestPanel.instance?.markWebviewReady();
+  }
+
   static postCommand(command: string, payload: unknown, options?: { expectsAck?: boolean }): boolean {
     const instance = CodeIngestPanel.instance;
     if (!instance) {
       return false;
     }
 
-    try {
-      const messageOptions =
-        typeof options?.expectsAck === "boolean" ? { expectsAck: options.expectsAck } : undefined;
-      const message = instance.envelope.createMessage("command", command, payload, messageOptions);
-      void instance.panel.webview.postMessage(message);
-      return true;
-    } catch (error) {
-      console.error("CodeIngestPanel: failed to post command", command, error);
-      return false;
-    }
+    return instance.queueOrPostCommand(command, payload, options);
   }
 
   updateState(state: unknown): void {
-    const message = this.envelope.createMessage(
-      "command",
-      COMMAND_MAP.HOST_TO_WEBVIEW.RESTORE_STATE,
-      { state }
-    );
-    void this.panel.webview.postMessage(message);
+    this.queueOrPostCommand(COMMAND_MAP.HOST_TO_WEBVIEW.RESTORE_STATE, { state });
   }
 
   private async handleMessage(message: EnvelopeMessage | LegacyMessage): Promise<void> {
@@ -141,6 +140,12 @@ export class CodeIngestPanel {
   private dispose(): void {
     if (CodeIngestPanel.instance === this) {
       CodeIngestPanel.instance = undefined;
+    }
+    this.pendingMessages.splice(0, this.pendingMessages.length);
+    this.isWebviewReady = false;
+    if (this.flushRetryTimer) {
+      clearTimeout(this.flushRetryTimer);
+      this.flushRetryTimer = undefined;
     }
   }
 
@@ -245,18 +250,104 @@ export class CodeIngestPanel {
   }
 
   private sendShowError(details: { title: string; message: string }): void {
-    const outbound = this.envelope.createMessage(
-      "command",
-      COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR,
-      {
-        title: details.title,
-        message: details.message
-      }
-    );
-    void this.panel.webview.postMessage(outbound);
+    this.queueOrPostCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
+      title: details.title,
+      message: details.message
+    });
   }
 
   private logInboundRejection(commandId: string, reason: string): void {
     console.warn("CodeIngestPanel: rejected webview command", { commandId, reason });
+  }
+
+  private queueOrPostCommand(command: string, payload: unknown, options?: { expectsAck?: boolean }): boolean {
+    const normalizedOptions = typeof options?.expectsAck === "boolean" ? { expectsAck: options.expectsAck } : undefined;
+
+    if (!this.isWebviewReady) {
+      const pending: PendingHostMessage = normalizedOptions
+        ? { command, payload, options: normalizedOptions }
+        : { command, payload };
+      this.pendingMessages.push(pending);
+      this.schedulePendingFlush();
+      return true;
+    }
+
+    const posted = this.postCommandInternal(command, payload, normalizedOptions);
+    if (!posted) {
+      const pending: PendingHostMessage = normalizedOptions
+        ? { command, payload, options: normalizedOptions }
+        : { command, payload };
+      this.pendingMessages.push(pending);
+      this.schedulePendingFlush();
+    }
+    return posted;
+  }
+
+  private postCommandInternal(command: string, payload: unknown, options?: { expectsAck?: boolean }): boolean {
+    try {
+      const message = this.envelope.createMessage("command", command, payload, options);
+      void this.panel.webview.postMessage(message);
+      return true;
+    } catch (error) {
+      console.error("CodeIngestPanel: failed to post command", command, error);
+      return false;
+    }
+  }
+
+  private markWebviewReady(): void {
+    if (this.isWebviewReady) {
+      return;
+    }
+
+    this.isWebviewReady = true;
+
+    if (this.pendingMessages.length === 0) {
+      return;
+    }
+
+    const queued = this.pendingMessages.splice(0, this.pendingMessages.length);
+    for (const message of queued) {
+      const success = this.postCommandInternal(message.command, message.payload, message.options);
+      if (!success) {
+        this.pendingMessages.push(message);
+      }
+    }
+
+    if (this.pendingMessages.length > 0) {
+      this.schedulePendingFlush();
+    }
+  }
+
+  private schedulePendingFlush(delay = 500): void {
+    if (this.flushRetryTimer || this.pendingMessages.length === 0) {
+      return;
+    }
+
+    this.flushRetryTimer = setTimeout(() => {
+      this.flushRetryTimer = undefined;
+
+      if (!this.isWebviewReady) {
+        this.schedulePendingFlush(Math.min(delay * 2, 4000));
+        return;
+      }
+
+      if (this.pendingMessages.length === 0) {
+        return;
+      }
+
+      const pending = this.pendingMessages.splice(0, this.pendingMessages.length);
+      const failed: PendingHostMessage[] = [];
+      for (const message of pending) {
+        const success = this.postCommandInternal(message.command, message.payload, message.options);
+        if (!success) {
+          failed.push(message);
+        }
+      }
+
+      if (failed.length > 0) {
+        this.pendingMessages.unshift(...failed);
+        this.schedulePendingFlush(Math.min(delay * 2, 4000));
+      }
+    }, delay);
   }
 }

@@ -45,13 +45,13 @@ export class ProgressHandler extends BaseHandler {
       }
     });
 
-    this.uiRenderer.updateProgress(payload);
+    this.uiRenderer?.updateProgress?.(payload);
 
     if (payload.overlayMessage || payload.phase === "ingest") {
       const showOverlay = payload.cancelled !== true && payload.percent !== 100;
-      this.uiRenderer.toggleLoadingOverlay(showOverlay, payload.overlayMessage ?? payload.message);
+      this.uiRenderer?.toggleLoadingOverlay?.(showOverlay, payload.overlayMessage ?? payload.message);
     } else if (payload.percent === 100) {
-      this.uiRenderer.toggleLoadingOverlay(false);
+      this.uiRenderer?.toggleLoadingOverlay?.(false);
     }
   }
 }

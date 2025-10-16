@@ -118,8 +118,9 @@ describe("CodeIngestTreeProvider", () => {
     const gitignoreService = {
       isIgnored: jest.fn(async () => false)
     } as unknown as GitignoreService;
+    const registerCommand = jest.fn(() => new vscode.Disposable(() => undefined));
 
-    const provider = new CodeIngestTreeProvider(workspaceUri, scanner, selectionManager, expandState, {
+    const provider = new CodeIngestTreeProvider(workspaceUri, scanner, selectionManager, expandState, registerCommand, {
       gitignoreService,
       includeGlobs: [],
       excludeGlobs: [],

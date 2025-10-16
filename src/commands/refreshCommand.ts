@@ -1,10 +1,11 @@
 import * as vscode from "vscode";
 import { COMMAND_MAP } from "./commandMap";
-import type { CommandServices } from "./types";
+import type { CommandRegistrar, CommandServices } from "./types";
 
 export function registerRefreshCommand(
   context: vscode.ExtensionContext,
-  services: CommandServices
+  services: CommandServices,
+  registerCommand: CommandRegistrar
 ): void {
   const handler = async () => {
     services.diagnostics.add("Refreshing workspace tree...");
@@ -43,8 +44,6 @@ export function registerRefreshCommand(
   ]);
 
   for (const commandId of commandIds) {
-    const disposable = vscode.commands.registerCommand(commandId, handler);
-    context.subscriptions.push(disposable);
-    // Only register once per unique command id; duplicate strings collapse via Set.
+    registerCommand(commandId, handler);
   }
 }

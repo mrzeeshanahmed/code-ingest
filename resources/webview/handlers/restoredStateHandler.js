@@ -85,15 +85,15 @@ export class RestoredStateHandler extends BaseHandler {
     }
 
     if (Array.isArray(payload.state.tree)) {
-      this.uiRenderer.updateTree(payload.state.tree, {
+      this.uiRenderer?.updateTree?.(payload.state.tree, {
         expandState: payload.state.expandState
       });
     }
 
-    this.uiRenderer.restoreState(payload.state);
+    this.uiRenderer?.restoreState?.(payload.state);
 
     if (payload.migrated) {
-      this.uiRenderer.showRecoverableError({
+      this.uiRenderer?.showRecoverableError?.({
         title: "State updated",
         message: "Your previous settings were migrated to the new format."
       });

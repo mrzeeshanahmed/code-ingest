@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
+import type { CommandRegistrar } from "../commands/types";
 import { FilterService, type FilterOptions } from "../services/filterService";
 import type { GitignoreService } from "../services/gitignoreService";
 import {
@@ -130,6 +131,7 @@ export class CodeIngestTreeProvider implements vscode.TreeDataProvider<FileNode>
     private readonly fileScanner: FileScanner,
     private readonly selectionManager: SelectionManager,
     private readonly expandState: ExpandState,
+    private readonly registerCommand: CommandRegistrar,
     options: TreeDataProviderOptions = {}
   ) {
     this.includeGlobs = options.includeGlobs ?? [];
@@ -144,11 +146,13 @@ export class CodeIngestTreeProvider implements vscode.TreeDataProvider<FileNode>
 
     this.selectionListenerDisposable = this.selectionManager.onDidChangeSelection((event) => this.handleSelectionChange(event));
     this.commandDisposables.push(
-      vscode.commands.registerCommand("codeIngest.tree.loadMore", async (target: vscode.Uri | string) => {
+      this.registerCommand("codeIngest.tree.loadMore", async (...args: unknown[]) => {
+        const [target] = args;
         const uri = this.resolveToUri(target);
         await this.expandDirectory(uri);
       }),
-      vscode.commands.registerCommand("codeIngest.tree.retryDirectory", async (target: vscode.Uri | string) => {
+      this.registerCommand("codeIngest.tree.retryDirectory", async (...args: unknown[]) => {
+        const [target] = args;
         const uri = this.resolveToUri(target);
         this.directoryCache.delete(uri.toString());
         await this.loadDirectory(uri, { reset: true, emitProgress: true });
@@ -731,10 +735,13 @@ export class CodeIngestTreeProvider implements vscode.TreeDataProvider<FileNode>
     return process.platform === "win32" ? normalized.toLowerCase() : normalized;
   }
 
-  private resolveToUri(target: vscode.Uri | string): vscode.Uri {
+  private resolveToUri(target: unknown): vscode.Uri {
     if (target instanceof vscode.Uri) {
       return target;
     }
-    return typeof target === "string" ? vscode.Uri.parse(target) : this.workspaceFolderUri;
+    if (typeof target === "string") {
+      return vscode.Uri.parse(target);
+    }
+    return this.workspaceFolderUri;
   }
 }

@@ -55,16 +55,16 @@ export class StateHandler extends BaseHandler {
     }
 
     if (payload?.tree) {
-      this.uiRenderer.updateTree(payload.tree);
+      this.uiRenderer?.updateTree?.(payload.tree);
     }
     if (payload?.selection) {
-      this.uiRenderer.updateTreeSelection(payload.selection);
+      this.uiRenderer?.updateTreeSelection?.(payload.selection);
     }
     if (payload?.preview) {
-      this.uiRenderer.updatePreview(payload.preview);
+      this.uiRenderer?.updatePreview?.(payload.preview);
     }
     if (payload?.progress) {
-      this.uiRenderer.updateProgress(payload.progress);
+      this.uiRenderer?.updateProgress?.(payload.progress);
     }
   }
 }

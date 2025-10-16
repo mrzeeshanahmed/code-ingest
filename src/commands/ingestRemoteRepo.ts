@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { readdir, rm, stat } from "node:fs/promises";
 
 import { COMMAND_MAP } from "./commandMap";
-import type { CommandServices } from "./types";
+import type { CommandRegistrar, CommandServices } from "./types";
 import { authenticate, partialClone, resolveRefToSha } from "../services/githubService";
 import { spawnGitPromise } from "../utils/procRedact";
 import { DigestGenerator } from "../services/digestGenerator";
@@ -145,11 +145,13 @@ interface IngestOutcome {
 
 export function registerIngestRemoteRepoCommand(
   context: vscode.ExtensionContext,
-  services: CommandServices
+  services: CommandServices,
+  registerCommand: CommandRegistrar
 ): void {
-  const disposable = vscode.commands.registerCommand(
+  registerCommand(
     COMMAND_MAP.EXTENSION_ONLY.INGEST_REMOTE_REPO,
-    async () => {
+    async (..._args: unknown[]) => {
+      void _args;
     const repoUrl = await vscode.window.showInputBox({
       title: "Ingest Remote Repository",
       prompt: "Enter the full GitHub repository URL (e.g. https://github.com/owner/repo).",
@@ -489,6 +491,4 @@ export function registerIngestRemoteRepoCommand(
     );
     }
   );
-
-  context.subscriptions.push(disposable);
 }

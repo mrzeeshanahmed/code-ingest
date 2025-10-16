@@ -9,6 +9,10 @@ import type { ErrorReporter } from "../services/errorReporter";
 import type * as vscode from "vscode";
 import type { OutputWriter } from "../services/outputWriter";
 
+export type CommandHandler = (...args: unknown[]) => unknown | Promise<unknown>;
+
+export type CommandRegistrar = (commandId: string, handler: CommandHandler) => vscode.Disposable;
+
 export interface CommandServices {
 	diagnostics: Diagnostics;
 	gitignoreService: GitignoreService;

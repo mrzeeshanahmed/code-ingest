@@ -1,22 +1,22 @@
 import * as vscode from "vscode";
 import { COMMAND_MAP } from "./commandMap";
-import type { CommandServices } from "./types";
+import type { CommandRegistrar, CommandServices } from "./types";
 
 export function registerSelectionCommands(
   context: vscode.ExtensionContext,
-  services: CommandServices
+  services: CommandServices,
+  registerCommand: CommandRegistrar
 ): void {
-  const updateSelection = vscode.commands.registerCommand(
-    COMMAND_MAP.WEBVIEW_TO_HOST.UPDATE_SELECTION,
-    (payload?: { filePath?: string; selected?: boolean }) => {
-      if (!payload || typeof payload.filePath !== "string") {
-        return;
-      }
-      services.workspaceManager.updateSelection(payload.filePath, Boolean(payload.selected));
-      const selection = services.workspaceManager.getSelection();
-      services.webviewPanelManager.setStateSnapshot({ selection }, { emit: false });
+  registerCommand(COMMAND_MAP.WEBVIEW_TO_HOST.UPDATE_SELECTION, (...args: unknown[]) => {
+    const [maybePayload] = args;
+    const payload = maybePayload as { filePath?: string; selected?: boolean } | undefined;
+    if (!payload || typeof payload.filePath !== "string") {
+      return;
     }
-  );
+    services.workspaceManager.updateSelection(payload.filePath, Boolean(payload.selected));
+    const selection = services.workspaceManager.getSelection();
+    services.webviewPanelManager.setStateSnapshot({ selection }, { emit: false });
+  });
 
   const applySelection = async (action: "select" | "clear") => {
     if (action === "select") {
@@ -30,36 +30,38 @@ export function registerSelectionCommands(
     }
   };
 
-  const registerUniqueCommands = <T extends (...args: never[]) => unknown>(
+  const registerUniqueCommands = (
     ids: string[],
-    handler: T
-  ): vscode.Disposable[] => {
+    handler: () => unknown | Promise<unknown>
+  ): void => {
     const uniqueIds = Array.from(new Set(ids));
-    return uniqueIds.map((commandId) => vscode.commands.registerCommand(commandId, handler));
+    uniqueIds.forEach((commandId) => {
+      registerCommand(commandId, async (...commandArgs: unknown[]) => {
+        void commandArgs;
+        return handler();
+      });
+    });
   };
 
-  const applySelectionCommands = [
-    ...registerUniqueCommands([
-      COMMAND_MAP.WEBVIEW_TO_HOST.SELECT_ALL,
-      COMMAND_MAP.EXTENSION_ONLY.SELECT_ALL
-    ], () => applySelection("select")),
-    ...registerUniqueCommands([
-      COMMAND_MAP.WEBVIEW_TO_HOST.DESELECT_ALL,
-      COMMAND_MAP.EXTENSION_ONLY.DESELECT_ALL
-    ], () => applySelection("clear"))
-  ];
+  registerUniqueCommands([
+    COMMAND_MAP.WEBVIEW_TO_HOST.SELECT_ALL,
+    COMMAND_MAP.EXTENSION_ONLY.SELECT_ALL
+  ], () => applySelection("select"));
+  registerUniqueCommands([
+    COMMAND_MAP.WEBVIEW_TO_HOST.DESELECT_ALL,
+    COMMAND_MAP.EXTENSION_ONLY.DESELECT_ALL
+  ], () => applySelection("clear"));
 
-  const applyPreset = vscode.commands.registerCommand(
-    COMMAND_MAP.WEBVIEW_TO_HOST.APPLY_PRESET,
-    (payload?: { presetId?: string }) => {
-      const presetId = typeof payload?.presetId === "string" && payload.presetId.length > 0 ? payload.presetId : "default";
-      services.diagnostics.add(`Preset request received: ${presetId}. Presets are not yet implemented.`);
-      void vscode.window.showInformationMessage(
-        `Code Ingest: Preset "${presetId}" is not available yet.`,
-        "Dismiss"
-      );
-    }
-  );
+  registerCommand(COMMAND_MAP.WEBVIEW_TO_HOST.APPLY_PRESET, (...args: unknown[]) => {
+    const [maybePayload] = args;
+    const payload = maybePayload as { presetId?: string } | undefined;
+    const presetId = typeof payload?.presetId === "string" && payload.presetId.length > 0 ? payload.presetId : "default";
+    services.diagnostics.add(`Preset request received: ${presetId}. Presets are not yet implemented.`);
+    void vscode.window.showInformationMessage(
+      `Code Ingest: Preset "${presetId}" is not available yet.`,
+      "Dismiss"
+    );
+  });
 
   const adjustExpansion = (expand: boolean) => {
     if (expand) {
@@ -73,16 +75,12 @@ export function registerSelectionCommands(
     });
   };
 
-  const expandCommands = [
-    ...registerUniqueCommands([
-      COMMAND_MAP.WEBVIEW_TO_HOST.EXPAND_ALL,
-      COMMAND_MAP.EXTENSION_ONLY.EXPAND_ALL
-    ], () => adjustExpansion(true)),
-    ...registerUniqueCommands([
-      COMMAND_MAP.WEBVIEW_TO_HOST.COLLAPSE_ALL,
-      COMMAND_MAP.EXTENSION_ONLY.COLLAPSE_ALL
-    ], () => adjustExpansion(false))
-  ];
-
-  context.subscriptions.push(updateSelection, ...applySelectionCommands, ...expandCommands, applyPreset);
+  registerUniqueCommands([
+    COMMAND_MAP.WEBVIEW_TO_HOST.EXPAND_ALL,
+    COMMAND_MAP.EXTENSION_ONLY.EXPAND_ALL
+  ], () => adjustExpansion(true));
+  registerUniqueCommands([
+    COMMAND_MAP.WEBVIEW_TO_HOST.COLLAPSE_ALL,
+    COMMAND_MAP.EXTENSION_ONLY.COLLAPSE_ALL
+  ], () => adjustExpansion(false));
 }

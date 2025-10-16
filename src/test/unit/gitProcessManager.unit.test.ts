@@ -258,4 +258,61 @@ describe("GitProcessManager", () => {
 
     process.exitCode = originalExitCode;
   });
+
+  test("reports kill failure when timeout-triggered termination throws", async () => {
+    jest.useFakeTimers();
+    try {
+      const { child } = createMockChildProcess();
+      spawnMock.mockReturnValueOnce(child);
+
+      const logger = createLogger();
+      const { instance: reporter, mock: reporterMock } = createErrorReporter();
+      const manager = new GitProcessManager(logger, reporter);
+
+      killSpy.mockImplementation(() => {
+        throw new Error("kill failed");
+      });
+
+      const execution = manager.executeGitCommand(["status"], { cwd: "/repo", timeout: 5 });
+
+      await Promise.resolve();
+      jest.advanceTimersByTime(10);
+
+      await expect(execution).rejects.toThrow("Git command timed out after 5ms");
+
+      const killReport = reporterMock.report.mock.calls.find(([, context]) =>
+        (context as { source?: string } | undefined)?.source === "gitProcessManager.processController.kill"
+      );
+      expect(killReport).toBeDefined();
+      const killReportContext = killReport?.[1] as { metadata?: Record<string, unknown> } | undefined;
+      expect(killReportContext?.metadata).toMatchObject({ signal: "SIGTERM" });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("safeKill reports errors when process.kill throws", () => {
+    const { child } = createMockChildProcess();
+    const logger = createLogger();
+    const { instance: reporter, mock: reporterMock } = createErrorReporter();
+    const manager = new GitProcessManager(logger, reporter);
+
+    killSpy.mockImplementation(() => {
+      throw new Error("kill failure");
+    });
+
+    const invoke = manager as unknown as {
+      safeKill(target: ChildProcess, signal: NodeJS.Signals, context: string): void;
+    };
+
+    invoke.safeKill(child, "SIGTERM", "unit-test");
+
+    const killReport = reporterMock.report.mock.calls.find(([, context]) =>
+      (context as { source?: string } | undefined)?.source === "gitProcessManager.safeKill"
+    );
+    expect(killReport).toBeDefined();
+    const killReportContext = killReport?.[1] as { metadata?: Record<string, unknown> } | undefined;
+    expect(killReportContext?.metadata).toMatchObject({ signal: "SIGTERM", context: "unit-test" });
+    expect((logger.warn as jest.Mock).mock.calls.some(([event]) => event === "git.process.kill_failed")).toBe(true);
+  });
 });

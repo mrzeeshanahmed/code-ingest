@@ -31,6 +31,13 @@ const WEBVIEW_TO_HOST_BASE = Object.freeze({
   OPEN_DASHBOARD_PANEL: "codeIngest.openDashboardPanel"
 });
 
+const COMMAND_POLICY_BASE = Object.freeze({
+  GENERATE_DIGEST: { strategy: "dedupe", rationale: "Prevent duplicate digest runs for identical selections." },
+  LOAD_REMOTE_REPO: { strategy: "queue", rationale: "Ensure remote loads run sequentially." },
+  WEBVIEW_READY: { strategy: "dedupe", rationale: "Ready signal should only be emitted once per session." },
+  REFRESH_TREE: { strategy: "queue", rationale: "Avoid overlapping refreshes that fight over tree state." }
+});
+
 function isUppercaseKey(key) {
   return /^[A-Z0-9_]+$/.test(key);
 }
@@ -75,6 +82,8 @@ export const COMMAND_MAP = Object.freeze({
   WEBVIEW_TO_HOST: webviewToHostSection
 });
 
+export const COMMAND_POLICIES = Object.freeze(COMMAND_POLICY_BASE);
+
 export const HOST_TO_WEBVIEW_REVERSE = Object.freeze(
   Object.fromEntries(
     Object.entries(COMMAND_MAP.HOST_TO_WEBVIEW).map(([key, value]) => [value, key])
@@ -93,6 +102,17 @@ export function isValidHostToWebviewCommand(command) {
 
 export function isValidWebviewToHostCommand(command) {
   return Object.values(COMMAND_MAP.WEBVIEW_TO_HOST).includes(command);
+}
+
+export function getCommandPolicy(commandId) {
+  if (typeof commandId !== "string" || commandId.length === 0) {
+    return undefined;
+  }
+  const key = WEBVIEW_TO_HOST_REVERSE[commandId];
+  if (!key) {
+    return undefined;
+  }
+  return COMMAND_POLICIES[key] ?? undefined;
 }
 
 export function getAllCommands() {

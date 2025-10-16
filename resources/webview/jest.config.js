@@ -39,5 +39,8 @@ export default {
       statements: 80
     }
   },
-  testMatch: ["<rootDir>/test/**/*.test.js"]
+  testMatch: [
+    "<rootDir>/test/**/*.test.js",
+    "<rootDir>/handlers/__tests__/**/*.unit.test.js"
+  ]
 };

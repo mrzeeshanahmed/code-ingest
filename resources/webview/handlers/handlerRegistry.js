@@ -26,19 +26,28 @@ export class HandlerRegistry {
   register(messageType, handler) {
     const types = Array.isArray(messageType) ? messageType : [messageType];
     for (const type of types) {
-      if (typeof type !== "string" || !type) {
-        throw new TypeError("Message type must be a non-empty string.");
+      try {
+        if (typeof type !== "string" || !type) {
+          throw new TypeError("Message type must be a non-empty string.");
+        }
+        if (!handler || typeof handler.process !== "function") {
+          throw new TypeError(`Handler for ${type} must expose a process(messageType, payload) method.`);
+        }
+        if (typeof handler.validate !== "function" || typeof handler.handle !== "function") {
+          throw new TypeError(`Handler for ${type} must implement validate(payload) and handle(payload).`);
+        }
+        if (typeof handler.canHandle !== "function") {
+          this.logger.warn?.(`Handler for ${type} does not implement canHandle(messageType); defaulting to permissive handler.`);
+          handler.canHandle = () => true;
+        }
+
+        this.handlers.set(type, handler);
+      } catch (error) {
+        const normalizedError = error instanceof Error ? error : new Error(String(error));
+        this.logger.error?.("Failed to register handler", { type, error: normalizedError.message });
+        this._reportError(`registry:register:${type ?? "unknown"}`, normalizedError);
+        throw normalizedError;
       }
-      if (!handler || typeof handler.process !== "function") {
-        throw new TypeError(`Handler for ${type} must expose a process(messageType, payload) method.`);
-      }
-      if (typeof handler.validate !== "function" || typeof handler.handle !== "function") {
-        throw new TypeError(`Handler for ${type} must implement validate(payload) and handle(payload).`);
-      }
-      if (typeof handler.canHandle !== "function") {
-        throw new TypeError(`Handler for ${type} must implement canHandle(messageType).`);
-      }
-      this.handlers.set(type, handler);
     }
   }
 
@@ -100,6 +109,14 @@ export class HandlerRegistry {
     } catch (error) {
       this.logger.error?.(`Failed to process message: ${messageType}`, error);
       this._reportError(messageType, error);
+      if (error instanceof Error) {
+        Object.defineProperty(error, "__handlerReported", {
+          value: true,
+          enumerable: false,
+          configurable: true
+        });
+      }
+      throw error;
     }
   }
 
@@ -128,7 +145,17 @@ export class HandlerRegistry {
 
     const pending = this.buffer.splice(0);
     for (const entry of pending) {
-      void this.process(entry.messageType, entry.payload).then(entry.resolve, entry.reject);
+      void this.process(entry.messageType, entry.payload)
+        .then((result) => {
+          entry.resolve?.(result);
+        })
+        .catch((error) => {
+          const reportableError = error instanceof Error ? error : new Error(String(error));
+          if (!(reportableError instanceof Error && reportableError.__handlerReported === true)) {
+            this._reportError(entry.messageType, reportableError);
+          }
+          entry.reject?.(error);
+        });
     }
   }
 }

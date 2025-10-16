@@ -55,22 +55,22 @@ export class TreeDataHandler extends BaseHandler {
 
     this.store.setState(statePatch);
 
-    this.uiRenderer.updateTree(payload.tree, {
+    this.uiRenderer?.updateTree?.(payload.tree, {
       scanId: payload.scanId,
       expandState: payload.expandState
     });
 
     if (payload.selection) {
-      this.uiRenderer.updateTreeSelection(payload.selection);
+      this.uiRenderer?.updateTreeSelection?.(payload.selection);
     }
 
     if (payload.warnings && payload.warnings.length > 0) {
-      this.uiRenderer.showRecoverableError({
+      this.uiRenderer?.showRecoverableError?.({
         title: "Tree scan warnings",
         message: payload.warnings.join(" · ")
       });
     } else {
-      this.uiRenderer.clearRecoverableError();
+      this.uiRenderer?.clearRecoverableError?.();
     }
   }
 }

@@ -3,7 +3,7 @@ import * as vscode from "vscode";
 
 import { registerGenerateDigestCommand } from "../../../commands/generateDigest";
 import { COMMAND_MAP } from "../../../commands/commandMap";
-import type { CommandServices } from "../../../commands/types";
+import type { CommandRegistrar, CommandServices } from "../../../commands/types";
 import type { DigestResult } from "../../../services/digestGenerator";
 import type { WriteProgress } from "../../../services/outputWriter";
 
@@ -163,7 +163,14 @@ describe("registerGenerateDigestCommand", () => {
   };
 
   const registerAndGetHandler = (services: ReturnType<typeof buildServices>) => {
-    registerGenerateDigestCommand(context, services as unknown as CommandServices);
+    const registrar: CommandRegistrar = (commandId, handler) =>
+      vscode.commands.registerCommand(commandId, handler);
+
+    registerGenerateDigestCommand(
+      context,
+      services as unknown as CommandServices,
+      registrar
+    );
     const commandApi = vscode.commands as unknown as {
       __getRegisteredCommands(): Map<string, (...args: unknown[]) => unknown>;
     };
