@@ -4,25 +4,45 @@ import * as vscode from "vscode";
 import { COMMAND_MAP } from "../../commands/commandMap";
 import { CodeIngestPanel } from "../../providers/codeIngestPanel";
 import { WebviewMessageEnvelope } from "../../providers/messageEnvelope";
-import { setWebviewHtml } from "../../providers/webviewHelpers";
+import { detectFallbackHtml, setWebviewHtml } from "../../providers/webviewHelpers";
+import { loadCommandValidator } from "../../providers/commandValidator";
 
 jest.mock("../../providers/webviewHelpers", () => ({
-  setWebviewHtml: jest.fn()
+  setWebviewHtml: jest.fn(),
+  detectFallbackHtml: jest.fn(() => ({ isFallback: false }))
 }));
+
+jest.mock("../../providers/commandValidator", () => {
+  const validator = (_commandId: string, payload: unknown) => ({ ok: true as const, value: payload });
+  return {
+    loadCommandValidator: jest.fn(() => Promise.resolve(validator))
+  };
+});
+
+const mockLoadCommandValidator = loadCommandValidator as jest.MockedFunction<typeof loadCommandValidator>;
 
 type MessageListener = (message: unknown) => unknown;
 
 describe("CodeIngestPanel", () => {
   let tokenSpy: jest.SpiedFunction<() => string>;
+  let handlerChannel: { appendLine: jest.Mock };
+  const mockDetectFallback = detectFallbackHtml as jest.MockedFunction<typeof detectFallbackHtml>;
 
   beforeEach(() => {
     tokenSpy = jest.spyOn(WebviewMessageEnvelope, "generateToken").mockReturnValue("test-token");
+    handlerChannel = { appendLine: jest.fn() };
+    CodeIngestPanel.registerHandlerErrorChannel(handlerChannel as unknown as vscode.OutputChannel);
+    (setWebviewHtml as jest.Mock).mockReturnValue("<!DOCTYPE html><html lang=\"en\"><body></body></html>");
+    mockDetectFallback.mockReturnValue({ isFallback: false });
   });
 
   afterEach(() => {
     tokenSpy.mockRestore();
     (vscode.window.createWebviewPanel as jest.Mock).mockReset();
     (setWebviewHtml as jest.Mock).mockReset();
+    mockDetectFallback.mockReset();
+    mockLoadCommandValidator.mockClear();
+    CodeIngestPanel.registerHandlerErrorChannel(undefined);
     Reflect.set(CodeIngestPanel as unknown as Record<string, unknown>, "instance", undefined);
     jest.clearAllMocks();
   });
@@ -49,8 +69,8 @@ describe("CodeIngestPanel", () => {
       { expectsAck: true }
     );
 
-  await listener(message);
-  await new Promise((resolve) => setTimeout(resolve, 0));
+    await listener(message);
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(vscode.commands.executeCommand).toHaveBeenCalledWith(
       COMMAND_MAP.WEBVIEW_TO_HOST.GENERATE_DIGEST,
@@ -75,7 +95,7 @@ describe("CodeIngestPanel", () => {
 
   it("rejects messages with invalid session tokens", async () => {
     const harness = createPanelHarness();
-    await CodeIngestPanel.createOrShow(vscode.Uri.file(path.resolve("./")));
+  await CodeIngestPanel.createOrShow(vscode.Uri.file(path.resolve("./")));
 
     const listener = harness.messageListeners[0];
     const message = {
@@ -142,6 +162,41 @@ describe("CodeIngestPanel", () => {
     };
     expect(message.command).toBe(COMMAND_MAP.HOST_TO_WEBVIEW.UPDATE_PROGRESS);
     expect(message.payload).toEqual({ phase: "scan" });
+  });
+
+  it("logs handler registration failures to the error channel", async () => {
+    const harness = createPanelHarness();
+    await CodeIngestPanel.createOrShow(vscode.Uri.file(path.resolve("./")));
+
+    const listener = harness.messageListeners[0];
+    listener({
+      type: "handler:registrationFailed",
+      payload: { type: "restoredState", reason: "missing handle" }
+    });
+
+    expect(handlerChannel.appendLine).toHaveBeenCalledWith(
+      expect.stringContaining("restoredState")
+    );
+  });
+
+  it("records fallback renders to the error channel once", async () => {
+    (setWebviewHtml as jest.Mock).mockReturnValueOnce(
+      '<!DOCTYPE html><html><body data-code-ingest-fallback="missing-assets"></body></html>'
+    );
+    mockDetectFallback.mockReturnValueOnce({ isFallback: true, reason: "missing-assets" }).mockReturnValue({ isFallback: false });
+
+    const harness = createPanelHarness();
+    await CodeIngestPanel.createOrShow(vscode.Uri.file(path.resolve("./")));
+
+    expect(handlerChannel.appendLine).toHaveBeenCalledWith(
+      expect.stringContaining("missing-assets")
+    );
+
+    handlerChannel.appendLine.mockClear();
+    CodeIngestPanel.notifyWebviewReady();
+
+    expect(handlerChannel.appendLine).not.toHaveBeenCalled();
+    expect(harness.webview.postMessage).not.toHaveBeenCalled();
   });
 });
 

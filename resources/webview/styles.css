@@ -441,6 +441,31 @@ input[type="range"] {
   padding: 0;
 }
 
+.file-tree-status {
+  margin-top: var(--spacing-xs);
+  padding: 4px 8px;
+  border-radius: 3px;
+  font-size: 0.78rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  transition: transform 0.2s ease, opacity 0.2s ease;
+}
+
+.file-tree-status--info {
+  color: var(--text-primary);
+  border-color: rgba(242, 196, 91, 0.35);
+  background: rgba(242, 196, 91, 0.12);
+}
+
+.file-tree-status--success {
+  color: #9fe7c5;
+  border-color: rgba(111, 214, 168, 0.45);
+  background: rgba(111, 214, 168, 0.14);
+}
+
 .file-node {
   display: flex;
   flex-direction: column;

@@ -1,6 +1,8 @@
 import * as vscode from "vscode";
 import { CodeIngestPanel } from "../providers/codeIngestPanel";
 import { DashboardViewProvider } from "../providers/dashboardViewProvider";
+import type { Diagnostics } from "../services/diagnostics";
+import type { PerformanceMonitor } from "../services/performanceMonitor";
 import type { HostCommandId } from "../commands/commandMap";
 
 type PanelState = Record<string, unknown>;
@@ -10,7 +12,9 @@ export class WebviewPanelManager {
 
   constructor(
     private readonly extensionUri: vscode.Uri,
-    private readonly ensureResourcesReady: () => Promise<void>
+    private readonly ensureResourcesReady: () => Promise<void>,
+    private readonly diagnostics: Diagnostics,
+    private readonly performanceMonitor: PerformanceMonitor
   ) {}
 
   async createAndShowPanel(state?: PanelState): Promise<void> {
@@ -34,19 +38,40 @@ export class WebviewPanelManager {
   }
 
   setStateSnapshot(state: PanelState, options?: { emit?: boolean }): void {
-    const nextState = this.stateSnapshot ? { ...this.stateSnapshot, ...state } : { ...state };
-    this.stateSnapshot = nextState;
+    const incomingState = state ?? {};
+    const emit = options?.emit !== false;
+    const metadata = {
+      emit,
+      selectionCount: Array.isArray((incomingState as { selection?: unknown }).selection)
+        ? ((incomingState as { selection: unknown[] }).selection.length)
+        : undefined,
+      treeRoots: Array.isArray((incomingState as { tree?: unknown[] }).tree)
+        ? ((incomingState as { tree: unknown[] }).tree.length)
+        : undefined
+    };
 
-    if (options?.emit === false) {
-      return;
-    }
-    const snapshot = { ...nextState };
-    const delivered = DashboardViewProvider.restoreState(snapshot);
-    if (!delivered) {
+    const applySnapshot = () => {
+      const nextState = this.stateSnapshot ? { ...this.stateSnapshot, ...incomingState } : { ...incomingState };
+      this.stateSnapshot = nextState;
+
+      if (!emit) {
+        return;
+      }
+      const snapshot = { ...nextState };
+      const delivered = DashboardViewProvider.restoreState(snapshot);
+      if (!delivered) {
+        CodeIngestPanel.restoreState({ ...snapshot });
+        return;
+      }
       CodeIngestPanel.restoreState({ ...snapshot });
-      return;
-    }
-    CodeIngestPanel.restoreState({ ...snapshot });
+    };
+
+    const { metrics } = this.performanceMonitor.measureSync("webview.setStateSnapshot", () => applySnapshot(), metadata);
+    const durationMs = Math.round(metrics.duration);
+    const selectionCount = metadata.selectionCount ?? 0;
+    this.diagnostics.add(
+      `[trace] stateSnapshot emit=${emit} selectionCount=${selectionCount} duration=${durationMs}ms.`
+    );
   }
 
   getStateSnapshot(): PanelState | undefined {

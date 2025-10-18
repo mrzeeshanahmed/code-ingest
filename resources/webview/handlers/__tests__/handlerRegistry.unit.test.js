@@ -65,7 +65,17 @@ describe("HandlerRegistry readiness", () => {
 
     expect(() => registry.register("bad", malformedHandler)).toThrow(/validate/);
     expect(errorSpy).toHaveBeenCalled();
-    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "handler:error" }));
+    const messageArgs = postMessage.mock.calls.map(([arg]) => arg);
+    expect(messageArgs).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "handler:error" }),
+        expect.objectContaining({ type: "handler:registrationFailed" })
+      ])
+    );
+    const registrationEvent = messageArgs.find((entry) => entry.type === "handler:registrationFailed");
+    expect(registrationEvent?.payload).toEqual(
+      expect.objectContaining({ type: "bad", reason: expect.stringMatching(/validate/) })
+    );
     delete window.vscode;
   });
 

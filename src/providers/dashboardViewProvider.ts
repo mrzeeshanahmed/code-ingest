@@ -6,8 +6,11 @@ import {
   type EnvelopeMessage,
   type ResponseMessage
 } from "./messageEnvelope";
-import { setWebviewHtml } from "./webviewHelpers";
+import { detectFallbackHtml, setWebviewHtml } from "./webviewHelpers";
+import { loadCommandValidator, type CommandPayloadValidator } from "./commandValidator";
 import type { WebviewPanelManager } from "../webview/webviewPanelManager";
+import type { ErrorReporter } from "../services/errorReporter";
+import { wrapError } from "../utils/errorHandling";
 
 interface LegacyMessage {
   readonly type: string;
@@ -24,11 +27,13 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider, vscode
   private envelope: WebviewMessageEnvelope | undefined;
   private sessionToken: string | undefined;
   private disposables: vscode.Disposable[] = [];
+  private hasRenderedFallback = false;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly panelManager: WebviewPanelManager,
-    private readonly ensureResourcesReady: () => Promise<void>
+    private readonly ensureResourcesReady: () => Promise<void>,
+    private readonly errorReporter: ErrorReporter
   ) {}
 
   public async resolveWebviewView(
@@ -66,7 +71,8 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider, vscode
     };
 
     try {
-      setWebviewHtml(webview, this.extensionUri, "out/resources/webview/index.html", initialState);
+      const html = setWebviewHtml(webview, this.extensionUri, "out/resources/webview/index.html", initialState);
+      this.handleInitialRender(html);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       webview.html = `<!DOCTYPE html><html lang="en"><body><h2>Code Ingest</h2><p>Failed to load dashboard: ${message}</p></body></html>`;
@@ -149,6 +155,7 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider, vscode
     this.webviewView = undefined;
     this.envelope = undefined;
     this.sessionToken = undefined;
+    this.hasRenderedFallback = false;
   }
 
   private async handleMessage(message: EnvelopeMessage | LegacyMessage): Promise<void> {
@@ -184,17 +191,29 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider, vscode
   }
 
   private async executeCommandFromWebview(message: CommandMessage): Promise<void> {
+    const validator = await this.getCommandValidator();
+    const validation = validator?.(message.command, message.payload) ?? { ok: true, value: message.payload };
+    if (!validation || validation.ok !== true) {
+      const reason = validation?.reason ?? "validation_failed";
+      console.warn("DashboardViewProvider: rejected command", { commandId: message.command, reason });
+      this.panelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
+        title: "Invalid request",
+        message: `Command ${message.command} rejected: ${reason}`
+      });
+      if (message.expectsAck) {
+        this.postResponse(message, { ok: false, reason });
+      }
+      return;
+    }
+
+    const payload = validation.value ?? message.payload;
     try {
-      const result = await vscode.commands.executeCommand(message.command, message.payload);
+      const result = await vscode.commands.executeCommand(message.command, payload);
       if (message.expectsAck) {
         this.postResponse(message, { ok: true, result });
       }
     } catch (error) {
-      if (message.expectsAck) {
-        const reason = error instanceof Error ? error.message : String(error);
-        this.postResponse(message, { ok: false, reason });
-      }
-      console.error("DashboardViewProvider: command execution failed", message.command, error);
+      this.handleCommandFailure(message, error);
     }
   }
 
@@ -223,5 +242,53 @@ export class DashboardViewProvider implements vscode.WebviewViewProvider, vscode
     }
     const response = this.envelope.createResponse(reference, payload);
     void this.webviewView.webview.postMessage(response);
+  }
+
+  private async getCommandValidator(): Promise<CommandPayloadValidator | undefined> {
+    try {
+      return await loadCommandValidator();
+    } catch (error) {
+      console.error("DashboardViewProvider: failed to load command validator", error);
+      return undefined;
+    }
+  }
+
+  private handleCommandFailure(message: CommandMessage, error: unknown): void {
+    const wrapped = wrapError(error, { command: message.command, source: "dashboard" });
+    this.errorReporter.report(wrapped, {
+      command: message.command,
+      source: "dashboard",
+      metadata: { expectsAck: Boolean(message.expectsAck) }
+    });
+
+    const reason = wrapped.message ?? "command_failed";
+    this.panelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
+      title: "Command failed",
+      message: reason
+    });
+
+    if (message.expectsAck) {
+      this.postResponse(message, { ok: false, reason });
+    }
+
+    console.error("DashboardViewProvider: command execution failed", message.command, wrapped);
+  }
+
+  private handleInitialRender(html: string): void {
+    const detection = detectFallbackHtml(html);
+    if (!detection.isFallback) {
+      this.hasRenderedFallback = false;
+      return;
+    }
+
+    if (this.hasRenderedFallback) {
+      return;
+    }
+
+    this.hasRenderedFallback = true;
+    const reason = detection.reason ?? "unknown";
+    const error = new Error(`Dashboard webview rendered fallback UI (${reason}).`);
+    this.errorReporter.report(error, { source: "dashboard-webview", metadata: { reason } });
+    console.error("DashboardViewProvider: Webview rendered fallback UI", { reason });
   }
 }

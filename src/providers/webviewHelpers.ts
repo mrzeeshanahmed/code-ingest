@@ -4,6 +4,18 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 
 const MAX_INITIAL_STATE_SIZE = 50 * 1024; // 50KB
+const FALLBACK_META_NAME = "code-ingest:fallback";
+const FALLBACK_BODY_ATTRIBUTE = "data-code-ingest-fallback";
+const FALLBACK_META_PATTERN = new RegExp(`<meta[^>]+name=("|')${FALLBACK_META_NAME}\\1[^>]*>`, "i");
+const FALLBACK_BODY_PATTERN = new RegExp(`<body[^>]*${FALLBACK_BODY_ATTRIBUTE}=("|')([^"']+)\\1`, "i");
+const META_CONTENT_PATTERN = /content=("|')([^"']*)\\1/i;
+
+export interface FallbackDetectionResult {
+  readonly isFallback: boolean;
+  readonly reason?: string | undefined;
+}
+
+type FallbackReason = "missing-assets" | "read-error" | "unexpected-error";
 
 function ensureHtmlStructure(html: string): string {
   let output = html.trim();
@@ -240,20 +252,102 @@ function validateRequiredResources(baseDirUri: vscode.Uri, html: string): string
   return missing;
 }
 
-function buildFallbackHtml(error: unknown): string {
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function unescapeHtml(value: string): string {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+}
+
+function buildFallbackHtml(error: unknown, reason: FallbackReason = "unexpected-error", suggestion?: string): string {
   const message = error instanceof Error ? error.message : String(error);
+  const escapedReason = escapeHtml(reason);
+  const suggestionHtml = suggestion
+    ? `<p class="code-ingest-fallback__suggestion">${escapeHtml(suggestion)}</p>`
+    : "";
+
   return `<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none';">
+    <meta name="${FALLBACK_META_NAME}" content="${escapedReason}">
     <title>Code Ingest</title>
   </head>
-  <body>
+  <body class="code-ingest-fallback" data-code-ingest-fallback="${escapedReason}">
     <h1>Unable to load webview</h1>
-    <p>${message.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>
+    <p>${escapeHtml(message)}</p>
+    ${suggestionHtml}
+    <style>
+      body.code-ingest-fallback {
+        font-family: var(--vscode-font-family, system-ui, sans-serif);
+        color: var(--vscode-editor-foreground, #d4d4d4);
+        background: var(--vscode-editor-background, #1e1e1e);
+        margin: 0;
+        padding: 24px;
+        line-height: 1.5;
+      }
+      body.code-ingest-fallback h1 {
+        margin: 0 0 12px;
+        font-size: 1.5rem;
+      }
+      body.code-ingest-fallback p {
+        margin: 8px 0;
+      }
+      .code-ingest-fallback__suggestion {
+        font-weight: 600;
+      }
+    </style>
   </body>
 </html>`;
+}
+
+export function detectFallbackHtml(html: string | undefined): FallbackDetectionResult {
+  if (typeof html !== "string" || html.trim() === "") {
+    return { isFallback: false };
+  }
+
+  const metaMatch = FALLBACK_META_PATTERN.exec(html);
+  if (metaMatch) {
+    const contentMatch = META_CONTENT_PATTERN.exec(metaMatch[0]);
+    if (contentMatch?.[2]) {
+      return { isFallback: true, reason: unescapeHtml(contentMatch[2]) };
+    }
+  }
+
+  const bodyMatch = FALLBACK_BODY_PATTERN.exec(html);
+  if (bodyMatch && bodyMatch[2]) {
+    return { isFallback: true, reason: unescapeHtml(bodyMatch[2]) };
+  }
+
+  if (metaMatch) {
+    return { isFallback: true, reason: undefined };
+  }
+
+  return { isFallback: false };
+}
+
+function notifyWebviewFallback(reason: FallbackReason, details?: string): void {
+  const baseMessage = reason === "missing-assets"
+    ? "Webview assets are missing."
+    : reason === "read-error"
+      ? "Webview resources could not be loaded."
+      : "The webview failed to render.";
+
+  const detailSuffix = details ? ` ${details}` : "";
+  const guidance = ' Run "npm run build:webview" to regenerate the assets and reopen Code Ingest.';
+  void vscode.window.showErrorMessage(`Code Ingest: ${baseMessage}${detailSuffix}${guidance}`.trim());
 }
 
 export function setWebviewHtml(
@@ -272,8 +366,9 @@ export function setWebviewHtml(
     rawHtml = readFileSync(htmlFilePath, "utf8");
   } catch (error) {
     console.error(`webviewHelpers: Failed to read HTML file at ${htmlFilePath}`, error);
-    const fallback = buildFallbackHtml(error);
+    const fallback = buildFallbackHtml(error, "read-error");
     webview.html = fallback;
+    notifyWebviewFallback("read-error");
     return fallback;
   }
 
@@ -283,8 +378,9 @@ export function setWebviewHtml(
       const missingList = missingResources.join(", ");
       const message = `Missing webview asset(s): ${missingList}. Run \"npm run build:webview\" to regenerate resources.`;
       console.error("webviewHelpers: Missing required resources", { missing: missingResources });
-      const fallback = buildFallbackHtml(new Error(message));
+      const fallback = buildFallbackHtml(new Error(message), "missing-assets", 'Run "npm run build:webview" to regenerate the webview bundle.');
       webview.html = fallback;
+      notifyWebviewFallback("missing-assets", `(Missing: ${missingList})`);
       return fallback;
     }
 
@@ -299,8 +395,9 @@ export function setWebviewHtml(
     return html;
   } catch (error) {
     console.error("webviewHelpers: Unexpected error while preparing webview HTML", error);
-    const fallback = buildFallbackHtml(error);
+    const fallback = buildFallbackHtml(error, "unexpected-error");
     webview.html = fallback;
+    notifyWebviewFallback("unexpected-error");
     return fallback;
   }
 }

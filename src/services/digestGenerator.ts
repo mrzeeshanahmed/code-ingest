@@ -20,7 +20,7 @@ const PACKAGE_VERSION = (() => {
 })();
 import type { BinaryFilePolicy, ProcessedContent } from "./contentProcessor";
 import type { FileNode as ScannerFileNode } from "./fileScanner";
-import type { TokenBudgetOptions } from "./tokenAnalyzer";
+import type { TokenBudgetOptions, CancelToken, AnalyzeOptions } from "./tokenAnalyzer";
 import type { NotebookProcessingOptions, ProcessedNotebook } from "./notebookProcessor";
 import type { FilterResult } from "./filterService";
 import { FileScanner } from "./fileScanner";
@@ -48,6 +48,7 @@ export interface DigestOptions {
   redactionOverride?: boolean;
   binaryFilePolicy?: BinaryFilePolicy;
   progressCallback?: (progress: GenerationProgress) => void;
+  cancellationToken?: vscode.CancellationToken;
 }
 
 export interface GenerationProgress {
@@ -156,6 +157,7 @@ interface PipelineContext {
   binaryPolicy: BinaryFilePolicy;
   includeMetadata: boolean;
   shouldRedact: boolean;
+  cancellationToken?: vscode.CancellationToken;
 }
 
 interface ScannerResult {
@@ -183,9 +185,12 @@ export class DigestGenerator {
     this.telemetry?.trackFeatureUsage("digest.pipeline", { format: options.outputFormat });
     const emitProgress = this.createProgressEmitter(options.progressCallback, startedAt);
 
+    this.ensureNotCancelled(options.cancellationToken);
+
     try {
       const config = this.configService.loadConfig();
       const context = this.resolvePipelineContext(options, config);
+      this.ensureNotCancelled(context.cancellationToken);
 
       emitProgress("scanning", {
         filesProcessed: 0,
@@ -194,8 +199,10 @@ export class DigestGenerator {
       });
 
       const scannerResult = await this.scanWorkspace(emitProgress, context);
+      this.ensureNotCancelled(context.cancellationToken);
 
       const candidates = await this.filterCandidates(scannerResult.nodes, context, options, emitProgress);
+      this.ensureNotCancelled(context.cancellationToken);
       const sortedCandidates = this.sortCandidatesByPriority(candidates);
 
       const limitedCandidates = sortedCandidates.slice(0, context.maxFiles);
@@ -211,7 +218,15 @@ export class DigestGenerator {
       let truncationApplied = truncationByCount;
 
       const tasks = limitedCandidates.map((candidate) => async () => {
-        const outcome = await this.processFileCandidate(candidate, context, tokensProcessed, emitProgress);
+        this.ensureNotCancelled(context.cancellationToken);
+        const outcome = await this.processFileCandidate(
+          candidate,
+          context,
+          tokensProcessed,
+          emitProgress,
+          context.cancellationToken
+        );
+        this.ensureNotCancelled(context.cancellationToken);
         if (outcome.file) {
           processedFiles.push(outcome.file);
           filesProcessed += 1;
@@ -227,7 +242,12 @@ export class DigestGenerator {
         errors.push(...outcome.errors);
       });
 
-      await asyncPool(tasks, 1);
+      await asyncPool(
+        tasks,
+        1,
+        context.cancellationToken ? { cancellationToken: context.cancellationToken } : {}
+      );
+  this.ensureNotCancelled(context.cancellationToken);
 
       emitProgress("generating", {
         filesProcessed,
@@ -254,6 +274,7 @@ export class DigestGenerator {
         totalFiles: limitedCandidates.length,
         tokensProcessed
       });
+      this.ensureNotCancelled(context.cancellationToken);
 
       const metadata: DigestMetadata = {
         generatedAt: new Date(),
@@ -370,7 +391,7 @@ export class DigestGenerator {
     const includeMetadata = options.includeMetadata ?? true;
     const shouldRedact = options.redactionOverride ? false : options.applyRedaction ?? true;
 
-    return {
+    const context: PipelineContext = {
       config,
       workspaceRoot,
       maxFiles,
@@ -379,6 +400,12 @@ export class DigestGenerator {
       includeMetadata,
       shouldRedact
     } satisfies PipelineContext;
+
+    if (options.cancellationToken) {
+      context.cancellationToken = options.cancellationToken;
+    }
+
+    return context;
   }
 
   private resolveWorkspaceRoot(config: DigestConfig, selectedFiles: string[]): string {
@@ -399,13 +426,16 @@ export class DigestGenerator {
     emitProgress: ReturnType<typeof DigestGenerator.prototype.createProgressEmitter>,
     context: PipelineContext
   ): Promise<ScannerResult> {
+    this.ensureNotCancelled(context.cancellationToken);
     const collected: ScannerFileNode[] = [];
     let total = 0;
     let lastEmit = 0;
 
     const nodes = await this.fileScanner.scan({
       maxEntries: context.maxFiles * 10,
+      token: context.cancellationToken,
       onProgress: (processed, totalCount, currentPath) => {
+        this.ensureNotCancelled(context.cancellationToken);
         total = totalCount ?? total;
         const now = performance.now();
         if (now - lastEmit >= DEFAULT_PROGRESS_SAMPLE_INTERVAL) {
@@ -431,6 +461,7 @@ export class DigestGenerator {
       tokensProcessed: 0
     });
 
+    this.ensureNotCancelled(context.cancellationToken);
     return { totalFiles, nodes: collected } satisfies ScannerResult;
   }
 
@@ -440,6 +471,7 @@ export class DigestGenerator {
     options: DigestOptions,
     emitProgress: ReturnType<typeof DigestGenerator.prototype.createProgressEmitter>
   ): Promise<FileCandidate[]> {
+    this.ensureNotCancelled(context.cancellationToken);
     const files = nodes.filter((node) => node.type === "file");
     const absolutePaths = files.map((node) => vscode.Uri.parse(node.uri).fsPath);
 
@@ -457,6 +489,7 @@ export class DigestGenerator {
     const candidates: FileCandidate[] = [];
 
     files.forEach((node, index) => {
+      this.ensureNotCancelled(context.cancellationToken);
       const absolutePath = absolutePaths[index];
       const filterResult = filterResults.get(absolutePath);
       if (!this.shouldIncludeFile(filterResult)) {
@@ -532,11 +565,13 @@ export class DigestGenerator {
     candidate: FileCandidate,
     context: PipelineContext,
     tokensProcessedSoFar: number,
-    emitProgress: ReturnType<typeof DigestGenerator.prototype.createProgressEmitter>
+    emitProgress: ReturnType<typeof DigestGenerator.prototype.createProgressEmitter>,
+    cancellationToken?: vscode.CancellationToken
   ): Promise<FileProcessingOutcome> {
     const warnings: string[] = [];
     const errors: string[] = [];
 
+    this.ensureNotCancelled(cancellationToken);
     emitProgress("processing", {
       filesProcessed: 0,
       totalFiles: 0,
@@ -552,11 +587,13 @@ export class DigestGenerator {
         binaryFilePolicy: context.binaryPolicy,
         detectLanguage: true
       });
+      this.ensureNotCancelled(cancellationToken);
 
       if (candidate.absolutePath.toLowerCase().endsWith(".ipynb")) {
         notebookDetails = await this.notebookProcessor.processNotebook(candidate.absolutePath, this.resolveNotebookOptions(context.config));
         warnings.push(...notebookDetails.warnings.map((message) => `${candidate.relativePath}: ${message}`));
       }
+      this.ensureNotCancelled(cancellationToken);
     } catch (error) {
       const normalizedError = error instanceof Error ? error : new Error(this.stringifyError(error));
       const message = normalizedError.message;
@@ -576,7 +613,17 @@ export class DigestGenerator {
       } satisfies FileProcessingOutcome;
     }
 
-    const analysis = await this.analyzeContent(candidate, processedContent.content, context, tokensProcessedSoFar, warnings, errors, emitProgress);
+    this.ensureNotCancelled(cancellationToken);
+    const analysis = await this.analyzeContent(
+      candidate,
+      processedContent.content,
+      context,
+      tokensProcessedSoFar,
+      warnings,
+      errors,
+      emitProgress,
+      cancellationToken
+    );
     const finalContent = context.shouldRedact ? redactSecrets(analysis.content) : analysis.content;
 
     const metadata: ProcessedFileContent["metadata"] = {};
@@ -658,8 +705,10 @@ export class DigestGenerator {
     tokensProcessedSoFar: number,
     warnings: string[],
     errors: string[],
-    emitProgress: ReturnType<typeof DigestGenerator.prototype.createProgressEmitter>
+    emitProgress: ReturnType<typeof DigestGenerator.prototype.createProgressEmitter>,
+    cancellationToken?: vscode.CancellationToken
   ): Promise<{ content: string; tokens: number; truncated: boolean }> {
+    this.ensureNotCancelled(cancellationToken);
     emitProgress("analyzing", {
       filesProcessed: 0,
       totalFiles: 0,
@@ -670,13 +719,20 @@ export class DigestGenerator {
     const remainingBudget = Math.max(context.maxTokens - tokensProcessedSoFar, 0);
 
     try {
-      const analysis = await this.tokenAnalyzer.analyze(content, {
+      const analyzerOptions: AnalyzeOptions = {
         metadata: { path: candidate.relativePath },
         budget: this.buildBudgetOptions(context.maxTokens)
-      });
+      };
+      const analyzerCancelToken = this.toAnalyzerCancelToken(cancellationToken);
+      if (analyzerCancelToken) {
+        analyzerOptions.cancelToken = analyzerCancelToken;
+      }
+
+      const analysis = await this.tokenAnalyzer.analyze(content, analyzerOptions);
 
       warnings.push(...analysis.warnings.map((warning) => `${candidate.relativePath}: ${warning}`));
 
+      this.ensureNotCancelled(cancellationToken);
       if (remainingBudget <= 0) {
         warnings.push(`${candidate.relativePath}: token budget exhausted before processing.`);
         return {
@@ -687,6 +743,7 @@ export class DigestGenerator {
       }
 
       if (tokensProcessedSoFar + analysis.tokens <= context.maxTokens) {
+        this.ensureNotCancelled(cancellationToken);
         return {
           content,
           tokens: analysis.tokens,
@@ -694,7 +751,7 @@ export class DigestGenerator {
         };
       }
 
-      return this.truncateToBudget(content, candidate, context, remainingBudget, warnings);
+  return this.truncateToBudget(content, candidate, context, remainingBudget, warnings, cancellationToken);
     } catch (error) {
       const normalizedError = error instanceof Error ? error : new Error(this.stringifyError(error));
       const message = normalizedError.message;
@@ -728,8 +785,10 @@ export class DigestGenerator {
     candidate: FileCandidate,
     context: PipelineContext,
     remainingTokens: number,
-    warnings: string[]
+    warnings: string[],
+    cancellationToken?: vscode.CancellationToken
   ): Promise<{ content: string; tokens: number; truncated: boolean }> {
+    this.ensureNotCancelled(cancellationToken);
     if (remainingTokens <= 0) {
       warnings.push(`${candidate.relativePath}: excluded due to token budget.`);
       return {
@@ -744,19 +803,28 @@ export class DigestGenerator {
     let iterations = 0;
 
     while (iterations < MAX_TRUNCATION_ITERATIONS && estimatedTokens > remainingTokens && truncatedContent.length > MIN_TRUNCATED_CONTENT_LENGTH) {
+      this.ensureNotCancelled(cancellationToken);
       const ratio = Math.max(0.1, remainingTokens / estimatedTokens);
       const nextLength = Math.max(MIN_TRUNCATED_CONTENT_LENGTH, Math.floor(truncatedContent.length * ratio));
       truncatedContent = truncatedContent.slice(0, nextLength);
 
-      const analysis = await this.tokenAnalyzer.analyze(truncatedContent, {
+      const analysisOptions: AnalyzeOptions = {
         metadata: { path: candidate.relativePath, truncated: true },
         budget: this.buildBudgetOptions(remainingTokens),
         skipCache: true
-      });
+      };
+      const analyzerCancelToken = this.toAnalyzerCancelToken(cancellationToken);
+      if (analyzerCancelToken) {
+        analysisOptions.cancelToken = analyzerCancelToken;
+      }
+
+      const analysis = await this.tokenAnalyzer.analyze(truncatedContent, analysisOptions);
+      this.ensureNotCancelled(cancellationToken);
       estimatedTokens = analysis.tokens;
       iterations += 1;
     }
 
+    this.ensureNotCancelled(cancellationToken);
     const tokens = Math.min(estimatedTokens, remainingTokens);
     warnings.push(`${candidate.relativePath}: truncated to fit token budget.`);
 
@@ -774,6 +842,24 @@ export class DigestGenerator {
       "",
       `[[TRUNCATED]] ${relativePath}: token budget limit reached. Remaining allowance: ${remainingTokens} tokens.`
     ].join("\n");
+  }
+
+  private ensureNotCancelled(token?: vscode.CancellationToken): void {
+    if (token?.isCancellationRequested) {
+      throw new vscode.CancellationError();
+    }
+  }
+
+  private toAnalyzerCancelToken(token?: vscode.CancellationToken): CancelToken | undefined {
+    if (!token) {
+      return undefined;
+    }
+    return {
+      isCancelled: () => token.isCancellationRequested,
+      onCancel: (callback: () => void) => {
+        token.onCancellationRequested(callback);
+      }
+    };
   }
 
   private stringifyError(error: unknown): string {

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from "@jest/globals";
 import * as vscode from "vscode";
 
-import { registerGenerateDigestCommand } from "../../../commands/generateDigest";
+import { registerGenerateDigestCommand, __testing as generateDigestTesting } from "../../../commands/generateDigest";
 import { COMMAND_MAP } from "../../../commands/commandMap";
 import type { CommandRegistrar, CommandServices } from "../../../commands/types";
 import type { DigestResult } from "../../../services/digestGenerator";
@@ -44,6 +44,44 @@ const { createFormatter: createFormatterMock } = jest.requireMock("../../../form
   createFormatter: jest.Mock;
 };
 
+const createDigestResult = (): DigestResult => ({
+  content: {
+    files: [],
+    summary: {
+      overview: {
+        totalFiles: 1,
+        includedFiles: 1,
+        skippedFiles: 0,
+        binaryFiles: 0,
+        totalTokens: 150
+      },
+      tableOfContents: [],
+      notes: []
+    },
+    metadata: {
+      generatedAt: new Date(),
+      workspaceRoot: "/workspace",
+      totalFiles: 1,
+      includedFiles: 1,
+      skippedFiles: 0,
+      binaryFiles: 0,
+      tokenEstimate: 150,
+      processingTime: 0,
+      redactionApplied: false,
+      generatorVersion: "test"
+    }
+  },
+  statistics: {
+    filesProcessed: 1,
+    totalTokens: 150,
+    processingTime: 0,
+    warnings: [],
+    errors: []
+  },
+  redactionApplied: false,
+  truncationApplied: false
+});
+
 describe("registerGenerateDigestCommand", () => {
   const context = { subscriptions: [] as vscode.Disposable[] } as unknown as vscode.ExtensionContext;
   let workspaceSelection: string[];
@@ -56,11 +94,18 @@ describe("registerGenerateDigestCommand", () => {
   let sendCommandMock: jest.Mock;
   type FsStatFn = (uri: vscode.Uri) => Promise<unknown>;
   let fsStatMock: jest.MockedFunction<FsStatFn>;
+  const withProgressMock = vscode.window.withProgress as unknown as jest.MockedFunction<typeof vscode.window.withProgress>;
 
   beforeEach(() => {
+    generateDigestTesting.clearInFlightDigests();
     workspaceSelection = [];
     generateDigestMock.mockReset();
     createFormatterMock.mockClear();
+
+    withProgressMock.mockImplementation(async (_options, task) => {
+      const source = new vscode.CancellationTokenSource();
+      return task({ report: jest.fn() }, source.token);
+    });
 
     const setSelectionImpl: SetSelectionFn = (paths: Iterable<string>) => {
       const next = Array.from(paths);
@@ -71,7 +116,7 @@ describe("registerGenerateDigestCommand", () => {
 
     createPanelMock = jest.fn(async () => {});
     setStateSnapshotMock = jest.fn();
-  sendCommandMock = jest.fn();
+    sendCommandMock = jest.fn();
 
     fsStatMock = jest.fn(async (uri: vscode.Uri) => {
       void uri;
@@ -88,6 +133,7 @@ describe("registerGenerateDigestCommand", () => {
   afterEach(() => {
     context.subscriptions.splice(0, context.subscriptions.length);
     generateDigestMock.mockReset();
+    generateDigestTesting.clearInFlightDigests();
   });
 
   const buildServices = () => {
@@ -98,6 +144,8 @@ describe("registerGenerateDigestCommand", () => {
         getWorkspaceRoot: jest.fn(() => vscode.Uri.file("/workspace")),
         getSelection: jest.fn(() => workspaceSelection),
         setSelection: setSelectionMock,
+        withSelectionLock: jest.fn(async (operation: () => unknown) => operation()),
+        waitForSelectionIdle: jest.fn(async () => undefined),
         getRedactionOverride: jest.fn(() => false),
         setRedactionOverride: jest.fn()
       },
@@ -186,43 +234,7 @@ describe("registerGenerateDigestCommand", () => {
     const services = buildServices();
     const handler = registerAndGetHandler(services);
 
-    const digestResult: DigestResult = {
-      content: {
-        files: [],
-        summary: {
-          overview: {
-            totalFiles: 1,
-            includedFiles: 1,
-            skippedFiles: 0,
-            binaryFiles: 0,
-            totalTokens: 150
-          },
-          tableOfContents: [],
-          notes: []
-        },
-        metadata: {
-          generatedAt: new Date(),
-          workspaceRoot: "/workspace",
-          totalFiles: 1,
-          includedFiles: 1,
-          skippedFiles: 0,
-          binaryFiles: 0,
-          tokenEstimate: 150,
-          processingTime: 0,
-          redactionApplied: false,
-          generatorVersion: "test"
-        }
-      },
-      statistics: {
-        filesProcessed: 1,
-        totalTokens: 150,
-        processingTime: 0,
-        warnings: [],
-        errors: []
-      },
-      redactionApplied: false,
-      truncationApplied: false
-    };
+    const digestResult = createDigestResult();
 
     generateDigestMock.mockResolvedValueOnce(digestResult);
 
@@ -275,5 +287,36 @@ describe("registerGenerateDigestCommand", () => {
       }
     );
     expect(workspaceSelection).toEqual([]);
+  });
+
+  it("reuses in-flight digest runs for duplicate host invocations", async () => {
+    const services = buildServices();
+    workspaceSelection = ["src/index.ts"];
+    const handler = registerAndGetHandler(services);
+
+    const digestResult = createDigestResult();
+
+    let releaseDigest!: () => void;
+    const inFlight = new Promise<DigestResult>((resolve) => {
+      releaseDigest = () => resolve(digestResult);
+    });
+
+    generateDigestMock.mockImplementation(() => inFlight);
+
+    const firstInvoke = handler();
+    const secondInvoke = handler();
+    await Promise.resolve();
+
+    releaseDigest();
+    await Promise.all([firstInvoke, secondInvoke]);
+
+    expect(generateDigestMock).toHaveBeenCalledTimes(1);
+    expect(createPanelMock).toHaveBeenCalledTimes(1);
+    expect(generateDigestTesting.getInFlightDigestCount()).toBe(0);
+
+    // Subsequent invocation after completion should trigger a fresh run.
+    generateDigestMock.mockResolvedValueOnce(digestResult);
+    await handler();
+    expect(generateDigestMock).toHaveBeenCalledTimes(2);
   });
 });

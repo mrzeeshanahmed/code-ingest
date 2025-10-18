@@ -12,7 +12,8 @@ const PROGRESS_LABELS = Object.freeze({
   filter: "Filtering selections",
   tokenize: "Tokenizing content",
   ingest: "Ingesting",
-  write: "Writing output"
+  write: "Writing output",
+  select: "Selecting files"
 });
 
 export class UIRenderer {
@@ -21,14 +22,15 @@ export class UIRenderer {
       throw new TypeError("UIRenderer requires a document-like object");
     }
 
-  this.document = doc;
-  this.vscode = window?.vscode;
-  this.commandExecutor = typeof options.commandExecutor === "function" ? options.commandExecutor : null;
-  this.workspaceRoot = typeof options.workspaceRoot === "string" && options.workspaceRoot.length > 0 ? options.workspaceRoot : undefined;
-  this.workspaceInfo = this.workspaceRoot ? this.buildWorkspaceInfo(this.workspaceRoot) : null;
-  this.selectionDebounceMs = Number.isFinite(options.selectionDebounceMs) && options.selectionDebounceMs >= 0 ? options.selectionDebounceMs : 100;
-  this.selectionUpdateBuffer = new Map();
-  this.selectionFlushTimer = null;
+    this.document = doc;
+    this.vscode = window?.vscode;
+    this.commandExecutor = typeof options.commandExecutor === "function" ? options.commandExecutor : null;
+    this.workspaceRoot = typeof options.workspaceRoot === "string" && options.workspaceRoot.length > 0 ? options.workspaceRoot : undefined;
+    this.workspaceInfo = this.workspaceRoot ? this.buildWorkspaceInfo(this.workspaceRoot) : null;
+    this.selectionDebounceMs = Number.isFinite(options.selectionDebounceMs) && options.selectionDebounceMs >= 0 ? options.selectionDebounceMs : 100;
+    this.selectionUpdateBuffer = new Map();
+    this.selectionFlushTimer = null;
+    this.performanceMonitor = options.performanceMonitor ?? null;
     this.dashboard = doc.querySelector(".layout") ?? doc.body;
     this.statusArea = doc.querySelector(".status-strip") ?? this.dashboard;
 
@@ -50,7 +52,8 @@ export class UIRenderer {
     this.treeHost = doc.getElementById("file-tree-host");
     this.treePlaceholder = doc.querySelector('[data-element="tree-placeholder"]');
 
-    this.selectionSet = new Set();
+  this.selectionSet = new Set();
+  this.selectionSynced = false;
     this.expandedPaths = new Set();
     this.treeModel = [];
 
@@ -62,7 +65,8 @@ export class UIRenderer {
           onToggleSelection: ({ path, selected }) => this.handleToggleSelection(path, selected),
           onToggleExpand: ({ path }) => this.handleToggleExpand(path),
           onSelectionCommand: (action) => this.handleTreeAction(action),
-          onOpen: () => {}
+          onOpen: () => {},
+          performanceMonitor: this.performanceMonitor
         })
       : null;
 
@@ -148,12 +152,31 @@ export class UIRenderer {
           .map((value) => this.toWorkspaceRelative(value))
           .filter((value) => typeof value === "string" && value.length > 0)
       : [];
+    const previousCount = this.selectionSet.size;
+    const applySelection = () => {
+      this.selectionSet = new Set(normalized);
+      if (normalized.length > 0) {
+        this.selectionSynced = true;
+      }
+      this.cancelSelectionFlush();
+      if (this.fileTree) {
+        this.fileTree.setSelection(this.selectionSet);
+      }
+    };
 
-    this.selectionSet = new Set(normalized);
-    this.cancelSelectionFlush();
-    if (this.fileTree) {
-      this.fileTree.setSelection(this.selectionSet);
+    if (this.performanceMonitor?.measureSync) {
+      this.performanceMonitor.measureSync(
+        "treeSelection.update",
+        () => applySelection(),
+        {
+          previousCount,
+          nextCount: normalized.length
+        }
+      );
+      return;
     }
+
+    applySelection();
   }
 
   updatePreview(preview) {
@@ -695,6 +718,9 @@ export class UIRenderer {
     } else {
       this.selectionSet.delete(normalizedPath);
     }
+    if (this.selectionSet.size > 0) {
+      this.selectionSynced = true;
+    }
     this.enqueueSelectionUpdate(normalizedPath, selected);
   }
 
@@ -714,8 +740,10 @@ export class UIRenderer {
       return;
     }
     if (action.type === "select-all") {
+      this.selectionSynced = false;
       this.postCommand(COMMAND_MAP.WEBVIEW_TO_HOST.SELECT_ALL);
     } else if (action.type === "clear") {
+      this.selectionSynced = false;
       this.postCommand(COMMAND_MAP.WEBVIEW_TO_HOST.DESELECT_ALL);
     }
   }

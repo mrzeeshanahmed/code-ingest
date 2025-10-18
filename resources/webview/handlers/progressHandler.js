@@ -5,7 +5,7 @@
 import { BaseHandler } from "./base/handlerInterface.js";
 import { createValidator } from "./base/validation.js";
 
-const PHASES = ["scan", "filter", "tokenize", "ingest", "write"];
+const PHASES = ["scan", "filter", "tokenize", "ingest", "write", "select"];
 
 const validatePayload = createValidator({
   type: "object",

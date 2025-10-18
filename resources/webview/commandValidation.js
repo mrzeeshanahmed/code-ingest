@@ -32,10 +32,29 @@ export const COMMAND_SCHEMAS = {
       selected: { type: "boolean", required: true }
     }
   },
+  "codeIngest.toggleRedactionOverride": {
+    type: "object",
+    properties: {
+      enabled: {
+        type: "boolean"
+      }
+    }
+  },
+  "codeIngest.applyPreset": {
+    type: "object",
+    properties: {
+      presetId: {
+        type: "string",
+        maxLength: 256,
+        default: "default",
+        transform: (value) => (value && value.length > 0 ? value : "default")
+      }
+    }
+  },
   "codeIngest.loadRemoteRepo": {
     type: "object",
     properties: {
-      repoUrl: { type: "string", required: true, minLength: 1, maxLength: 2048 },
+      repoUrl: { type: "string", minLength: 1, maxLength: 2048 },
       ref: { type: "string", maxLength: 128 },
       sparsePaths: {
         type: "array",

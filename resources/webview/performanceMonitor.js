@@ -32,16 +32,33 @@ export class WebviewPerformanceMonitor {
    * @param {() => T | Promise<T>} operation
    * @returns {Promise<T>}
    */
-  async measureOperation(name, operation) {
+  async measureOperation(name, operation, metadata = undefined) {
+    return this.#measure(name, operation, metadata, true);
+  }
+
+  measureSync(name, operation, metadata = undefined) {
+    return this.#measure(name, operation, metadata, false);
+  }
+
+  async #measure(name, operation, metadata, usePromise) {
     const startTime = performance.now();
     const startMemory = this.getMemoryUsage();
 
     let result;
     let error;
-    try {
-      result = await Promise.resolve().then(operation);
-    } catch (err) {
-      error = err;
+
+    const runner = () => {
+      try {
+        result = operation();
+      } catch (err) {
+        error = err;
+      }
+    };
+
+    if (usePromise) {
+      await Promise.resolve().then(runner);
+    } else {
+      runner();
     }
 
     const endTime = performance.now();
@@ -52,7 +69,8 @@ export class WebviewPerformanceMonitor {
       name,
       duration,
       memoryDelta: endMemory - startMemory,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      metadata: metadata ?? undefined
     };
 
     this.performanceData.push(measurement);

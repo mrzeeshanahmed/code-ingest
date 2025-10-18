@@ -147,4 +147,54 @@ describe("FileTreeComponent", () => {
       expect(rendered.length).toBeLessThanOrEqual(120);
     });
   });
+
+  describe("bulk selection feedback", () => {
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it("defers directory recalculation and shows status banner for large selections", () => {
+      jest.useFakeTimers();
+      const largeNodes = Array.from({ length: 1_000 }, (_, index) => ({
+        name: `file-${index}.ts`,
+        type: "file",
+        relPath: `file-${index}.ts`
+      }));
+      component.setNodes(largeNodes);
+
+      const recalcSpy = jest.spyOn(component, "recalculateDirectorySelection");
+      const bulkSelection = new Set(largeNodes.slice(0, 900).map((node) => node.relPath));
+
+      component.setSelection(bulkSelection);
+
+      expect(component.statusBanner?.hasAttribute("hidden")).toBe(false);
+      expect(component.statusBanner?.textContent).toContain("Processing");
+      expect(recalcSpy).not.toHaveBeenCalled();
+
+      jest.advanceTimersByTime(49);
+      expect(recalcSpy).not.toHaveBeenCalled();
+
+      jest.advanceTimersByTime(1);
+      expect(recalcSpy).toHaveBeenCalledTimes(1);
+      expect(component.statusBanner?.hasAttribute("hidden")).toBe(true);
+      recalcSpy.mockRestore();
+    });
+
+    it("surfaces completion feedback when every file is selected", () => {
+      jest.useFakeTimers();
+      const nodes = [
+        { name: "app.ts", type: "file", relPath: "src/app.ts" },
+        { name: "util.ts", type: "file", relPath: "src/util.ts" }
+      ];
+      component.setNodes(nodes);
+
+      component.setSelection(new Set(nodes.map((node) => node.relPath)));
+
+      expect(component.statusBanner?.hasAttribute("hidden")).toBe(false);
+      expect(component.statusBanner?.textContent).toContain("All files selected");
+
+      jest.advanceTimersByTime(1_600);
+      expect(component.statusBanner?.hasAttribute("hidden")).toBe(true);
+    });
+  });
 });

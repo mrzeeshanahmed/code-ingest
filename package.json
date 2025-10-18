@@ -126,7 +126,7 @@
     "build:webview": "node scripts/copyWebviewResources.js",
     "copy-webview": "node scripts/copyWebviewResources.js",
     "watch": "npm run build:watch",
-    "test": "npm run test:unit",
+  "test": "npm run test:unit && npm run check-handlers-coverage",
     "test:unit": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --testPathPattern=unit --coverage",
     "test:integration": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --testPathPattern=integration",
     "test:e2e": "jest --testPathPattern=e2e",

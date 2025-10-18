@@ -23,6 +23,7 @@ const WEBVIEW_TO_HOST_BASE = Object.freeze({
   EXPAND_ALL: "codeIngest.expandAll",
   COLLAPSE_ALL: "codeIngest.collapseAll",
   REFRESH_PREVIEW: "codeIngest.refreshPreview",
+  COPY_PREVIEW: "codeIngest.copyPreview",
   SELECT_ALL: "codeIngest.selectAll",
   DESELECT_ALL: "codeIngest.deselectAll",
   WEBVIEW_READY: "codeIngest.webviewReady",

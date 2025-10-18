@@ -7,6 +7,10 @@ import { VirtualScroller } from "../virtualScroller.js";
 import { sanitizeText } from "../utils/sanitizers.js";
 
 const VIRTUALIZATION_THRESHOLD = 150;
+const LARGE_SELECTION_THRESHOLD = 800;
+const BULK_SELECTION_MESSAGE = "Processing large selection…";
+const FULL_SELECTION_MESSAGE = "All files selected";
+
 const ACTIONS = Object.freeze([
   { id: "select-all", label: "Select all" },
   { id: "clear-selection", label: "Clear" }
@@ -31,7 +35,13 @@ export class FileTreeComponent {
 
     this.focusedPath = null;
     this.dragState = null;
-  this.selectedDirectories = new Set();
+    this.selectedDirectories = new Set();
+    this.cachedDirectoryPaths = this.collectDirectoryPaths(this.props.nodes ?? []);
+    this.totalFileCount = this.countFiles(this.props.nodes ?? []);
+    this.bulkSelectionActive = false;
+    this.selectionRecalcHandle = null;
+    this.statusBanner = null;
+    this.statusBannerHideHandle = null;
 
     this.onClick = this.handleTreeClick.bind(this);
     this.onKeydown = this.handleKeydown.bind(this);
@@ -74,6 +84,13 @@ export class FileTreeComponent {
       actions.appendChild(button);
     }
     header.appendChild(actions);
+    const status = DOMNodes.createElement("div", {
+      className: "file-tree-status",
+      textContent: ""
+    });
+    status.setAttribute("hidden", "true");
+    header.appendChild(status);
+    this.statusBanner = status;
     return header;
   }
 
@@ -99,11 +116,50 @@ export class FileTreeComponent {
     }
     this.props.nodes = nodes;
     this.renderNodes(nodes);
+    this.cachedDirectoryPaths = this.collectDirectoryPaths(nodes);
+    this.totalFileCount = this.countFiles(nodes);
+    this.bulkSelectionActive = false;
+    this.hideStatusBanner();
     this.recalculateDirectorySelection();
   }
 
   setSelection(selected) {
     this.props.selectedFiles = selected instanceof Set ? selected : new Set(selected ?? []);
+    const selectedSize = this.props.selectedFiles.size;
+    const totalFiles = this.totalFileCount ?? 0;
+    const hasFiles = totalFiles > 0;
+    const isFullSelection = hasFiles && selectedSize >= totalFiles;
+    const isBulkSelection = !isFullSelection && selectedSize >= LARGE_SELECTION_THRESHOLD;
+
+    if (isFullSelection) {
+      this.bulkSelectionActive = false;
+      this.selectedDirectories = new Set(this.cachedDirectoryPaths ?? []);
+      if (selectedSize > 0) {
+        this.showStatusBanner(FULL_SELECTION_MESSAGE, "success", 1600);
+      } else {
+        this.hideStatusBanner();
+      }
+      this.updateSelectionStyles();
+      if (this.virtualScroller) {
+        this.virtualScroller.setItems(this.flattenNodes(this.props.nodes ?? []));
+      }
+      return;
+    }
+
+    if (isBulkSelection) {
+      this.bulkSelectionActive = true;
+      this.showStatusBanner(BULK_SELECTION_MESSAGE, "info");
+      this.scheduleDirectoryRecalc();
+      if (this.virtualScroller) {
+        this.virtualScroller.setItems(this.flattenNodes(this.props.nodes ?? []));
+      } else {
+        this.updateSelectionStyles();
+      }
+      return;
+    }
+
+    this.bulkSelectionActive = false;
+    this.hideStatusBanner();
     this.recalculateDirectorySelection();
     if (this.virtualScroller) {
       const flattened = this.flattenNodes(this.props.nodes ?? []);
@@ -484,6 +540,10 @@ export class FileTreeComponent {
   }
 
   recalculateDirectorySelection() {
+    if (this.selectionRecalcHandle !== null) {
+      clearTimeout(this.selectionRecalcHandle);
+      this.selectionRecalcHandle = null;
+    }
     this.selectedDirectories.clear();
 
     const evaluateNode = (node) => {
@@ -536,9 +596,54 @@ export class FileTreeComponent {
     }
 
     this.updateSelectionStyles();
+    this.bulkSelectionActive = false;
+    this.hideStatusBanner();
+  }
+
+  showStatusBanner(message, variant = "info", autoHideMs) {
+    if (!this.statusBanner) {
+      return;
+    }
+    if (this.statusBannerHideHandle !== null) {
+      clearTimeout(this.statusBannerHideHandle);
+      this.statusBannerHideHandle = null;
+    }
+    const safeMessage = typeof message === "string" && message.trim().length > 0 ? message.trim() : "";
+    const variantClass = typeof variant === "string" && variant.length > 0 ? ` file-tree-status--${variant}` : "";
+    this.statusBanner.className = `file-tree-status${variantClass}`;
+    this.statusBanner.textContent = safeMessage;
+    if (!safeMessage) {
+      this.statusBanner.setAttribute("hidden", "true");
+    } else {
+      this.statusBanner.removeAttribute("hidden");
+    }
+    if (typeof autoHideMs === "number" && Number.isFinite(autoHideMs) && autoHideMs > 0) {
+      this.statusBannerHideHandle = setTimeout(() => {
+        this.statusBannerHideHandle = null;
+        this.hideStatusBanner();
+      }, autoHideMs);
+    }
+  }
+
+  hideStatusBanner() {
+    if (!this.statusBanner) {
+      return;
+    }
+    if (this.statusBannerHideHandle !== null) {
+      clearTimeout(this.statusBannerHideHandle);
+      this.statusBannerHideHandle = null;
+    }
+    this.statusBanner.textContent = "";
+    this.statusBanner.className = "file-tree-status";
+    this.statusBanner.setAttribute("hidden", "true");
   }
 
   destroy() {
+    if (this.selectionRecalcHandle !== null) {
+      clearTimeout(this.selectionRecalcHandle);
+      this.selectionRecalcHandle = null;
+    }
+    this.hideStatusBanner();
     this.teardownVirtualScrolling();
     this.detachEventListeners();
   }
@@ -578,5 +683,55 @@ export class FileTreeComponent {
       }
     }
     return acc;
+  }
+
+  collectDirectoryPaths(nodes, acc = []) {
+    if (!Array.isArray(nodes)) {
+      return acc;
+    }
+    for (const node of nodes) {
+      if (!node) {
+        continue;
+      }
+      if (node.type === "directory") {
+        const relPath = node.relPath ?? node.uri ?? node.path;
+        if (relPath) {
+          acc.push(relPath);
+        }
+        if (Array.isArray(node.children)) {
+          this.collectDirectoryPaths(node.children, acc);
+        }
+      }
+    }
+    return acc;
+  }
+
+  countFiles(nodes) {
+    if (!Array.isArray(nodes)) {
+      return 0;
+    }
+    let total = 0;
+    for (const node of nodes) {
+      if (!node) {
+        continue;
+      }
+      if (node.type === "directory") {
+        total += this.countFiles(node.children ?? []);
+      } else {
+        total += 1;
+      }
+    }
+    return total;
+  }
+
+  scheduleDirectoryRecalc() {
+    if (this.selectionRecalcHandle !== null) {
+      clearTimeout(this.selectionRecalcHandle);
+    }
+    this.bulkSelectionActive = true;
+    this.selectionRecalcHandle = setTimeout(() => {
+      this.selectionRecalcHandle = null;
+      this.recalculateDirectorySelection();
+    }, 50);
   }
 }

@@ -47,6 +47,7 @@ export interface WorkspaceStateSnapshot {
 const DEFAULT_MAX_ENTRIES = 2_000;
 const DEFAULT_AUTO_EXPAND_DEPTH = 1;
 const DEFAULT_EXCLUDED_DIRECTORIES = [".git", "node_modules", "dist", "out", "coverage", "tmp", "temp"];
+const BULK_SELECTION_CHUNK_SIZE = 400;
 
 function toPosix(relativePath: string): string {
   return relativePath.split(path.sep).join("/");
@@ -66,6 +67,7 @@ export class WorkspaceManager {
   private totalFiles = 0;
   private lastScanId = "";
   private redactionOverride: boolean;
+  private selectionLock: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly diagnostics: Diagnostics,
@@ -240,14 +242,36 @@ export class WorkspaceManager {
     return this.getSelection();
   }
 
-  selectAll(): string[] {
+  async selectAll(onProgress?: (processed: number, total: number) => void): Promise<string[]> {
+    const totalFiles = this.totalFiles;
+    if (totalFiles === 0) {
+      this.selection.clear();
+      onProgress?.(0, 0);
+      return [];
+    }
+
     const allFiles: string[] = [];
-    this.collectFiles(this.tree, allFiles);
+    await this.collectFilesIncrementally(this.tree, allFiles, onProgress, totalFiles);
     return this.setSelection(allFiles);
   }
 
   clearSelection(): void {
     this.selection.clear();
+  }
+
+  async withSelectionLock<T>(operation: () => Promise<T> | T): Promise<T> {
+    let release: () => void = () => {};
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const previous = this.selectionLock;
+    this.selectionLock = previous.then(() => next, () => next);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   expandAll(): void {
@@ -385,6 +409,61 @@ export class WorkspaceManager {
         this.collectFiles(node.children, acc);
       }
     }
+  }
+
+  private async collectFilesIncrementally(
+    nodes: WorkspaceTreeNode[],
+    acc: string[],
+    onProgress?: (processed: number, total: number) => void,
+    totalFiles = 0
+  ): Promise<void> {
+    if (!Array.isArray(nodes) || nodes.length === 0) {
+      onProgress?.(acc.length, totalFiles);
+      return;
+    }
+
+    const stack: WorkspaceTreeNode[] = [];
+    for (let index = nodes.length - 1; index >= 0; index -= 1) {
+      const node = nodes[index];
+      if (node) {
+        stack.push(node);
+      }
+    }
+
+    let processed = acc.length;
+    let visited = 0;
+
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (!node) {
+        continue;
+      }
+      visited += 1;
+
+      if (node.type === "file") {
+        acc.push(node.relPath);
+        processed += 1;
+        onProgress?.(processed, totalFiles);
+      } else if (node.type === "directory" && Array.isArray(node.children)) {
+        for (let childIndex = node.children.length - 1; childIndex >= 0; childIndex -= 1) {
+          const child = node.children[childIndex];
+          if (child) {
+            stack.push(child);
+          }
+        }
+      }
+
+      if (visited % BULK_SELECTION_CHUNK_SIZE === 0) {
+        onProgress?.(processed, totalFiles);
+        await this.yieldToEventLoop();
+      }
+    }
+
+    onProgress?.(processed, totalFiles);
+  }
+
+  private async yieldToEventLoop(): Promise<void> {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
 
   private collectDirectories(nodes: WorkspaceTreeNode[], acc: string[], maxDepth = Number.POSITIVE_INFINITY, depth = 0): void {

@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { readdir, rm, stat } from "node:fs/promises";
 
 import { COMMAND_MAP } from "./commandMap";
@@ -19,9 +20,53 @@ import { ErrorReporter } from "../services/errorReporter";
 import { DEFAULT_CONFIG } from "../config/constants";
 import { formatDigest } from "../utils/digestFormatters";
 import type { Logger } from "../utils/gitProcessManager";
+import { wrapError } from "../utils/errorHandling";
+
+let remoteIngestQueue: Promise<void> = Promise.resolve();
+const inFlightRemoteIngestions = new Map<string, Promise<{ ok: boolean; reason?: string }>>();
+
+function enqueueRemoteIngestion<T>(task: () => Promise<T>): Promise<T> {
+  const run = remoteIngestQueue.then(() => task());
+  remoteIngestQueue = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
 
 const EXCLUDED_DIRECTORIES = new Set([".git", "node_modules"]);
 const MAX_PREVIEW_LENGTH = 60_000;
+
+interface RemoteRepoPayload {
+  readonly repoUrl?: string;
+  readonly ref?: string;
+  readonly sparsePaths?: string[];
+}
+
+interface NormalizedRemoteOptions {
+  readonly repoUrl: string;
+  readonly repoSlug: string;
+  readonly ref: string;
+  readonly sparsePaths: string[];
+}
+
+function createRemoteRunId(options: NormalizedRemoteOptions): string {
+  const hash = createHash("sha256");
+  hash.update(options.repoUrl.trim().toLowerCase());
+  hash.update("|");
+  hash.update(options.ref.trim().toLowerCase());
+  if (options.sparsePaths.length > 0) {
+    const normalizedPaths = [...options.sparsePaths]
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => entry.length > 0)
+      .sort((a, b) => a.localeCompare(b));
+    for (const entry of normalizedPaths) {
+      hash.update("|");
+      hash.update(entry);
+    }
+  }
+  return hash.digest("hex");
+}
 
 function formatLogContext(context?: Record<string, unknown>): string {
   if (!context) {
@@ -71,6 +116,147 @@ function normalizeSubpath(input: string): string {
   return converted.replace(/^\/+/, "").replace(/\/+$/u, "");
 }
 
+function normalizeSparsePaths(input: unknown): string[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  const normalized = new Set<string>();
+  for (const entry of input) {
+    if (typeof entry !== "string") {
+      continue;
+    }
+    const sanitized = normalizeSubpath(entry);
+    if (sanitized) {
+      normalized.add(sanitized);
+    }
+  }
+  return Array.from(normalized);
+}
+
+function raisePayloadError(message: string, origin: "webview" | "extension", services: CommandServices): never {
+  services.diagnostics.add(`Remote ingest rejected: ${message}`);
+  if (origin === "webview") {
+    services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
+      title: "Remote ingestion failed",
+      message
+    });
+    const error = new Error(message);
+    (error as { handledByHost?: boolean }).handledByHost = true;
+    throw error;
+  }
+  void vscode.window.showErrorMessage(`Code Ingest: ${message}`);
+  throw new Error(message);
+}
+
+async function promptForRemoteOptions(services: CommandServices): Promise<NormalizedRemoteOptions | undefined> {
+  const repoUrl = await vscode.window.showInputBox({
+    title: "Ingest Remote Repository",
+    prompt: "Enter the full GitHub repository URL (e.g. https://github.com/owner/repo).",
+    placeHolder: "https://github.com/owner/repository",
+    ignoreFocusOut: true
+  });
+
+  if (!repoUrl || !repoUrl.trim()) {
+    services.diagnostics.add("Ingest remote repo command cancelled at repository URL step.");
+    return undefined;
+  }
+
+  const trimmedRepoUrl = repoUrl.trim();
+  let repoSlug: string;
+  try {
+    repoSlug = parseRepoSlug(trimmedRepoUrl);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    services.diagnostics.add(`Ingest remote repo aborted: ${message}`);
+    void vscode.window.showErrorMessage(`Code Ingest: ${message}`);
+    return undefined;
+  }
+
+  const gitRef = await vscode.window.showInputBox({
+    title: "Select Git Reference",
+    prompt: "Enter the branch, tag, or commit SHA you want to ingest.",
+    placeHolder: "main",
+    ignoreFocusOut: true
+  });
+
+  if (!gitRef || !gitRef.trim()) {
+    services.diagnostics.add("Ingest remote repo command cancelled at git reference step.");
+    return undefined;
+  }
+
+  const subpath = await vscode.window.showInputBox({
+    title: "Optional Subpath",
+    prompt: "Provide a relative path within the repository to focus on (leave blank for entire repository).",
+    placeHolder: "src/",
+    ignoreFocusOut: true
+  });
+
+  if (typeof subpath === "undefined") {
+    services.diagnostics.add("Ingest remote repo command cancelled at subpath step.");
+    return undefined;
+  }
+
+  const trimmedRef = gitRef.trim();
+  const trimmedSubpath = subpath.trim();
+  const normalizedSubpath = normalizeSubpath(trimmedSubpath);
+
+  return {
+    repoUrl: trimmedRepoUrl,
+    repoSlug,
+    ref: trimmedRef,
+    sparsePaths: normalizedSubpath ? [normalizedSubpath] : []
+  };
+}
+
+async function validatePayloadOptions(
+  payload: RemoteRepoPayload,
+  origin: "webview" | "extension",
+  services: CommandServices
+): Promise<NormalizedRemoteOptions> {
+  const repoUrlValue = typeof payload.repoUrl === "string" ? payload.repoUrl.trim() : "";
+  if (!repoUrlValue) {
+    raisePayloadError("A repository URL is required for remote ingestion.", origin, services);
+  }
+
+  let repoSlug: string;
+  try {
+    repoSlug = parseRepoSlug(repoUrlValue);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    raisePayloadError(message, origin, services);
+  }
+
+  const refValueRaw = typeof payload.ref === "string" ? payload.ref.trim() : "";
+  const refValue = refValueRaw.length > 0 ? refValueRaw : "main";
+  const sparsePaths = normalizeSparsePaths(payload.sparsePaths ?? []);
+
+  return {
+    repoUrl: repoUrlValue,
+    repoSlug,
+    ref: refValue,
+    sparsePaths
+  };
+}
+
+async function resolveRemoteOptions(
+  payload: RemoteRepoPayload | undefined,
+  origin: "webview" | "extension",
+  services: CommandServices
+): Promise<NormalizedRemoteOptions | undefined> {
+  const hasPayload = Boolean(
+    payload &&
+      ((typeof payload.repoUrl === "string" && payload.repoUrl.trim().length > 0) ||
+        (typeof payload.ref === "string" && payload.ref.trim().length > 0) ||
+        (Array.isArray(payload.sparsePaths) && payload.sparsePaths.length > 0))
+  );
+
+  if (hasPayload) {
+    return validatePayloadOptions(payload ?? {}, origin, services);
+  }
+
+  return promptForRemoteOptions(services);
+}
+
 function clampPreview(content: string): { text: string; truncated: boolean } {
   if (content.length <= MAX_PREVIEW_LENGTH) {
     return { text: content, truncated: false };
@@ -86,6 +272,7 @@ function buildPreviewFromOutcome(outcome: IngestOutcome) {
   const overview = outcome.digestResult.content.summary.overview;
 
   return {
+    runId: outcome.runId,
     title: `Remote digest · ${outcome.repoSlug}`,
     subtitle: `${overview.includedFiles} files · ${overview.totalTokens} tokens`,
     content: text,
@@ -141,6 +328,7 @@ interface IngestOutcome {
   totalTokens: number;
   diagnostics: string[];
   workspaceRoot: string;
+  runId: string;
 }
 
 export function registerIngestRemoteRepoCommand(
@@ -148,60 +336,20 @@ export function registerIngestRemoteRepoCommand(
   services: CommandServices,
   registerCommand: CommandRegistrar
 ): void {
-  registerCommand(
-    COMMAND_MAP.EXTENSION_ONLY.INGEST_REMOTE_REPO,
-    async (..._args: unknown[]) => {
-      void _args;
-    const repoUrl = await vscode.window.showInputBox({
-      title: "Ingest Remote Repository",
-      prompt: "Enter the full GitHub repository URL (e.g. https://github.com/owner/repo).",
-      placeHolder: "https://github.com/owner/repository",
-      ignoreFocusOut: true
-    });
+  const executeIngestion = async (
+    options: NormalizedRemoteOptions,
+    runId: string
+  ): Promise<{ ok: boolean; reason?: string }> => {
+    const repoSlug = options.repoSlug;
+    const trimmedRef = options.ref;
+    const normalizedSubpath = options.sparsePaths[0] ?? "";
 
-    if (!repoUrl || !repoUrl.trim()) {
-      services.diagnostics.add("Ingest remote repo command cancelled at repository URL step.");
-      return;
+    if (options.sparsePaths.length > 1) {
+      services.diagnostics.add(
+        `Remote ingestion received ${options.sparsePaths.length} focus paths; using "${normalizedSubpath}" and ignoring ${options.sparsePaths.length - 1} additional entr${options.sparsePaths.length - 1 === 1 ? "y" : "ies"}.`
+      );
     }
 
-    const gitRef = await vscode.window.showInputBox({
-      title: "Select Git Reference",
-      prompt: "Enter the branch, tag, or commit SHA you want to ingest.",
-      placeHolder: "main",
-      ignoreFocusOut: true
-    });
-
-    if (!gitRef || !gitRef.trim()) {
-      services.diagnostics.add("Ingest remote repo command cancelled at git reference step.");
-      return;
-    }
-
-    const subpath = await vscode.window.showInputBox({
-      title: "Optional Subpath",
-      prompt: "Provide a relative path within the repository to focus on (leave blank for entire repository).",
-      placeHolder: "src/",
-      ignoreFocusOut: true
-    });
-
-    if (typeof subpath === "undefined") {
-      services.diagnostics.add("Ingest remote repo command cancelled at subpath step.");
-      return;
-    }
-
-    const trimmedRef = gitRef.trim();
-    const trimmedSubpath = subpath.trim();
-
-    let repoSlug: string;
-    try {
-      repoSlug = parseRepoSlug(repoUrl);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      services.diagnostics.add(`Ingest remote repo aborted: ${message}`);
-      void vscode.window.showErrorMessage(`Code Ingest: ${message}`);
-      return;
-    }
-
-    const normalizedSubpath = normalizeSubpath(trimmedSubpath);
     services.diagnostics.add(
       `Starting remote ingestion for ${repoSlug}@${trimmedRef}${
         normalizedSubpath ? ` (subpath: ${normalizedSubpath})` : ""
@@ -210,9 +358,11 @@ export function registerIngestRemoteRepoCommand(
 
     await services.webviewPanelManager.createAndShowPanel();
     services.webviewPanelManager.setStateSnapshot({
+      activeRunId: runId,
       status: "digest-running",
       preview: null,
       progress: {
+        runId,
         phase: "ingest",
         percent: undefined,
         message: "Preparing remote ingestion…",
@@ -235,8 +385,10 @@ export function registerIngestRemoteRepoCommand(
         const updatePanelProgress = (message: string) => {
           const safeMessage = message || "Remote ingestion in progress…";
           services.webviewPanelManager.setStateSnapshot({
+            activeRunId: runId,
             status: "digest-running",
             progress: {
+              runId,
               phase: "ingest",
               percent: undefined,
               message: safeMessage,
@@ -248,19 +400,19 @@ export function registerIngestRemoteRepoCommand(
           progress.report({ message: safeMessage });
         };
 
-  throwIfCancelled(cancellationToken);
-  updatePanelProgress("Authenticating with GitHub…");
+        throwIfCancelled(cancellationToken);
+        updatePanelProgress("Authenticating with GitHub…");
         token = await authenticate();
         if (!token) {
           throw new Error("GitHub authentication failed or was cancelled.");
         }
 
-    throwIfCancelled(cancellationToken);
-    updatePanelProgress("Resolving repository reference…");
+        throwIfCancelled(cancellationToken);
+        updatePanelProgress("Resolving repository reference…");
         const sha = await resolveRefToSha(repoSlug, trimmedRef, token);
 
-    throwIfCancelled(cancellationToken);
-    updatePanelProgress("Cloning repository (blobless)…");
+        throwIfCancelled(cancellationToken);
+        updatePanelProgress("Cloning repository (blobless)…");
         const { tempDir: cloneDir } = await partialClone(repoSlug, token);
         tempDir = cloneDir;
 
@@ -410,7 +562,8 @@ export function registerIngestRemoteRepoCommand(
               sha,
               totalTokens: digestResult.statistics.totalTokens,
               diagnostics: pipelineDiagnostics,
-              workspaceRoot
+              workspaceRoot,
+              runId
             } satisfies IngestOutcome;
           } finally {
             outputChannel.dispose();
@@ -430,38 +583,66 @@ export function registerIngestRemoteRepoCommand(
     } catch (error) {
       if (error instanceof vscode.CancellationError) {
         services.webviewPanelManager.setStateSnapshot({
-          progress: null,
-          status: null
+          activeRunId: runId,
+          progress: {
+            runId,
+            phase: "ingest",
+            percent: undefined,
+            message: "Remote ingestion cancelled",
+            busy: false,
+            filesProcessed: 0,
+            totalFiles: 0,
+            cancellable: false,
+            cancelled: true
+          },
+          status: "ingest-cancelled"
         });
         services.diagnostics.add("Remote ingestion cancelled by the user.");
-        return;
+        return { ok: false, reason: "cancelled" };
       }
 
-      const message = error instanceof Error ? error.message : String(error);
+      const wrapped = wrapError(error, {
+        command: "ingestRemoteRepo",
+        stage: "pipeline",
+        repoSlug,
+        ref: trimmedRef,
+        runId
+      });
+      const message = wrapped.message ?? "Remote ingestion failed";
       services.webviewPanelManager.setStateSnapshot({
+        activeRunId: runId,
         progress: null,
         status: null
       });
       services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
         title: "Remote ingestion failed",
-        message
+        message,
+        runId
       });
       services.diagnostics.add(`Remote ingestion failed: ${message}`);
+      services.errorReporter.report(wrapped, {
+        source: "ingestRemoteRepo",
+        command: "ingestRemoteRepo",
+        metadata: { repoSlug, ref: trimmedRef, runId }
+      });
       void vscode.window.showErrorMessage(`Code Ingest: Failed to ingest repository. ${message}`);
-      return;
+      (wrapped as { handledByHost?: boolean }).handledByHost = true;
+      throw wrapped;
     }
 
     if (!outcome) {
-      return;
+      return { ok: false, reason: "unknown" };
     }
 
     const preview = buildPreviewFromOutcome(outcome);
     const overview = outcome.digestResult.content.summary.overview;
     services.webviewPanelManager.setStateSnapshot({
+      activeRunId: outcome.runId,
       preview,
       progress: null,
       status: "digest-ready",
       lastDigest: {
+        runId: outcome.runId,
         generatedAt: outcome.digestResult.content.metadata.generatedAt.toISOString(),
         redactionApplied: outcome.digestResult.redactionApplied,
         truncationApplied: outcome.digestResult.truncationApplied,
@@ -489,6 +670,44 @@ export function registerIngestRemoteRepoCommand(
     void vscode.window.showInformationMessage(
       `Code Ingest: Generated digest for ${outcome.repoSlug} @ ${outcome.sha} (${formattedTokens}).`
     );
+
+    return { ok: true };
+  };
+
+  const createHandler = (origin: "webview" | "extension") => async (...args: unknown[]) => {
+    const payload = (args[0] ?? undefined) as RemoteRepoPayload | undefined;
+    const options = await resolveRemoteOptions(payload, origin, services);
+    if (!options) {
+      return;
     }
-  );
+
+    const runId = createRemoteRunId(options);
+    const existingRun = inFlightRemoteIngestions.get(runId);
+    if (existingRun) {
+      return existingRun;
+    }
+
+    const runPromise = enqueueRemoteIngestion(() => executeIngestion(options, runId));
+    inFlightRemoteIngestions.set(runId, runPromise);
+
+    const cleanup = () => {
+      const active = inFlightRemoteIngestions.get(runId);
+      if (active === runPromise) {
+        inFlightRemoteIngestions.delete(runId);
+      }
+    };
+    runPromise.then(cleanup, cleanup);
+
+    return runPromise;
+  };
+
+  registerCommand(COMMAND_MAP.EXTENSION_ONLY.INGEST_REMOTE_REPO, createHandler("extension"));
+  registerCommand(COMMAND_MAP.WEBVIEW_TO_HOST.LOAD_REMOTE_REPO, createHandler("webview"));
 }
+
+export const __testing = {
+  enqueueRemoteIngestion,
+  resetRemoteIngestQueue: () => {
+    remoteIngestQueue = Promise.resolve();
+  }
+};

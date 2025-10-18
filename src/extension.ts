@@ -1,11 +1,12 @@
 import { performance } from "node:perf_hooks";
 import * as vscode from "vscode";
-import { registerAllCommands } from "./commands";
+import { registerAllCommands, markSelectionHandlersReady } from "./commands";
 import { hydrateRedactionOverride } from "./commands/redactionCommands";
 import type { CommandServices } from "./commands/types";
 import { COMMAND_MAP } from "./commands/commandMap";
 import { DashboardViewProvider } from "./providers/dashboardViewProvider";
 import { CodeIngestPanel } from "./providers/codeIngestPanel";
+import { loadCommandValidator } from "./providers/commandValidator";
 import { ConfigurationService } from "./services/configurationService";
 import { Diagnostics } from "./services/diagnostics";
 import { ErrorReporter } from "./services/errorReporter";
@@ -17,6 +18,7 @@ import { WebviewPanelManager } from "./webview/webviewPanelManager";
 import { DEFAULT_CONFIG } from "./config/constants";
 import type { Logger } from "./utils/gitProcessManager";
 import { GitProcessManager } from "./utils/gitProcessManager";
+import { wrapError, type ErrorWithMetadata } from "./utils/errorHandling";
 import * as path from "node:path";
 import * as fsPromises from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
@@ -27,9 +29,46 @@ let errorReporter: ErrorReporter | undefined;
 let outputChannel: vscode.OutputChannel | undefined;
 let activationTelemetry: Telemetry | undefined;
 
+const WEBVIEW_COMMAND_IDS = new Set<string>(Object.values(COMMAND_MAP.WEBVIEW_TO_HOST));
+
 const REQUIRED_WEBVIEW_ASSETS = ["index.html", "main.js", "styles.css", "store.js"] as const;
 
 type EnsureWebviewResourcesFn = () => Promise<void>;
+
+interface ShowErrorPayload {
+  title: string;
+  message: string;
+  runId?: string;
+}
+
+function extractShowErrorPayload(error: unknown): ShowErrorPayload | undefined {
+  if (!error || typeof error !== "object") {
+    return undefined;
+  }
+
+  const details = (error as { showError?: unknown }).showError;
+  if (!details || typeof details !== "object") {
+    return undefined;
+  }
+
+  const title = (details as { title?: unknown }).title;
+  const message = (details as { message?: unknown }).message;
+  const runIdValue = (details as { runId?: unknown }).runId;
+  if (typeof title !== "string" || typeof message !== "string") {
+    return undefined;
+  }
+
+  const payload: ShowErrorPayload = {
+    title,
+    message
+  };
+
+  if (typeof runIdValue === "string" && runIdValue) {
+    payload.runId = runIdValue;
+  }
+
+  return payload;
+}
 
 function createWebviewResourceEnsurer(
   extensionPath: string,
@@ -189,25 +228,104 @@ function createCommandWrapper(
   context: vscode.ExtensionContext,
   commandId: string,
   handler: (...args: unknown[]) => unknown | Promise<unknown>,
-  errorChannel: ErrorReporter
+  errorChannel: ErrorReporter,
+  services?: CommandServices
 ): vscode.Disposable {
   const wrapped = async (...args: unknown[]): Promise<unknown> => {
     outputChannel?.appendLine(`[command] ${commandId} invoked`);
     const start = performance.now();
+    let commandArgs = args;
+
+    if (WEBVIEW_COMMAND_IDS.has(commandId)) {
+      try {
+        const validator = await loadCommandValidator();
+        const validation = validator?.(commandId, args[0]) ?? { ok: true, value: args[0] };
+        if (!validation || validation.ok !== true) {
+          const reason = validation?.reason ?? "validation_failed";
+          const message = `Command ${commandId} rejected: ${reason}`;
+          outputChannel?.appendLine(`[command] ${message}`);
+          if (services) {
+            services.diagnostics.add(message);
+            services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
+              title: "Invalid request",
+              message
+            });
+          }
+          return { ok: false, reason };
+        }
+
+        if (validation.value !== undefined && (validation.value !== args[0] || args.length > 0)) {
+          const nextArgs = [...args];
+          nextArgs[0] = validation.value;
+          commandArgs = nextArgs;
+        }
+      } catch (validationError) {
+        const validationMessage = validationError instanceof Error ? validationError.message : String(validationError);
+        outputChannel?.appendLine(`[command] Failed to validate payload for ${commandId}: ${validationMessage}`);
+      }
+    }
+
     try {
-      const result = await handler(...args);
+      const result = await handler(...commandArgs);
       outputChannel?.appendLine(`[command] ${commandId} completed in ${Math.round(performance.now() - start)}ms`);
       return result;
     } catch (error) {
-      const err = error as Error;
-      const handledByHost = Boolean((err as { handledByHost?: boolean }).handledByHost);
+      const wrappedError = wrapError(error, { commandId });
+      const errorWithMetadata = wrappedError as ErrorWithMetadata;
+      const existingMetadata = (errorWithMetadata.metadata ?? {}) as Record<string, unknown>;
+      const reportMetadata: Record<string, unknown> = { ...existingMetadata };
+
+      if (typeof reportMetadata.commandId !== "string") {
+        reportMetadata.commandId = commandId;
+      }
+      if (typeof reportMetadata.stage !== "string") {
+        reportMetadata.stage = "command";
+      }
+      if (typeof reportMetadata.runId !== "string") {
+        const runIdCandidate =
+          typeof (wrappedError as { runId?: unknown }).runId === "string"
+            ? (wrappedError as { runId?: string }).runId
+            : undefined;
+        if (runIdCandidate) {
+          reportMetadata.runId = runIdCandidate;
+        }
+      }
+      (errorWithMetadata as { metadata: Record<string, unknown> }).metadata = reportMetadata;
+
+      errorChannel.report(wrappedError, {
+        command: commandId,
+        source: "commandWrapper",
+        metadata: reportMetadata
+      });
+
+      const defaultShowError: ShowErrorPayload | undefined = wrappedError.message
+        ? { title: "Command failed", message: wrappedError.message }
+        : undefined;
+      const explicitShowError = extractShowErrorPayload(wrappedError) ?? defaultShowError;
+
+      const wasHandled = Boolean((wrappedError as { handledByHost?: boolean }).handledByHost);
+      if (!wasHandled && services && WEBVIEW_COMMAND_IDS.has(commandId) && explicitShowError) {
+        const payload: ShowErrorPayload = {
+          title: explicitShowError.title,
+          message: explicitShowError.message
+        };
+        const payloadRunId =
+          explicitShowError.runId ?? (typeof reportMetadata.runId === "string" ? (reportMetadata.runId as string) : undefined);
+        if (payloadRunId) {
+          payload.runId = payloadRunId;
+          reportMetadata.runId = payloadRunId;
+          (errorWithMetadata as { metadata: Record<string, unknown> }).metadata = reportMetadata;
+        }
+        services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, payload);
+        (wrappedError as { handledByHost?: boolean }).handledByHost = true;
+      }
+
+      const handledByHost = Boolean((wrappedError as { handledByHost?: boolean }).handledByHost);
 
       if (!handledByHost) {
-        errorChannel.report(err, { command: commandId });
-
         const actions = ["Details", "Report"] as const;
         const selection = await vscode.window.showErrorMessage(
-          `Code Ingest: Command failed (${commandId}). ${err.message}`,
+          `Code Ingest: Command failed (${commandId}). ${wrappedError.message}`,
           ...actions
         );
 
@@ -216,8 +334,8 @@ function createCommandWrapper(
         } else if (selection === "Report") {
           const payload = {
             command: commandId,
-            message: err.message,
-            stack: err.stack,
+            message: wrappedError.message,
+            stack: wrappedError.stack,
             time: new Date().toISOString()
           };
           try {
@@ -236,10 +354,10 @@ function createCommandWrapper(
         }
       } else {
         outputChannel?.appendLine(
-          `[command] ${commandId} rejected by handler: ${err.message || "handled without message"}`
+          `[command] ${commandId} rejected by handler: ${wrappedError.message || "handled without message"}`
         );
       }
-      throw error;
+      throw wrappedError;
     }
   };
 
@@ -248,12 +366,25 @@ function createCommandWrapper(
   return disposable;
 }
 
+async function verifyWebviewCommandRegistration(errorChannel: vscode.OutputChannel): Promise<void> {
+  const expected = new Set(Object.values(COMMAND_MAP.WEBVIEW_TO_HOST));
+  const available = new Set(await vscode.commands.getCommands(true));
+  const missing = Array.from(expected).filter((commandId) => !available.has(commandId));
+
+  if (missing.length > 0) {
+    const message = `Missing host command registrations: ${missing.join(", ")}`;
+    errorChannel.appendLine(`[activation] ${message}`);
+    throw new Error(message);
+  }
+}
+
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const activationStart = performance.now();
   const isDevelopment = context.extensionMode !== vscode.ExtensionMode.Production;
 
   outputChannel = vscode.window.createOutputChannel("Code Ingest");
   const errorChannel = vscode.window.createOutputChannel("Code Ingest Errors");
+  CodeIngestPanel.registerHandlerErrorChannel(errorChannel);
   context.subscriptions.push(outputChannel, errorChannel);
   outputChannel.appendLine("[activation] Starting Code Ingest activation sequence...");
 
@@ -340,7 +471,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   processHandlers.push(() => process.off("unhandledRejection", unhandledRejectionHandler));
   context.subscriptions.push({ dispose: () => processHandlers.forEach((dispose) => dispose()) });
 
-  const webviewPanelManager = new WebviewPanelManager(context.extensionUri, ensureWebviewResourcesReady);
+  const webviewPanelManager = new WebviewPanelManager(
+    context.extensionUri,
+    ensureWebviewResourcesReady,
+    diagnostics,
+    performanceMonitor
+  );
   const outputWriter = new OutputWriter({
     window: vscode.window,
     workspace: vscode.workspace,
@@ -352,7 +488,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const dashboardViewProvider = new DashboardViewProvider(
     context.extensionUri,
     webviewPanelManager,
-    ensureWebviewResourcesReady
+    ensureWebviewResourcesReady,
+    reporter
   );
   const dashboardDisposable = vscode.window.registerWebviewViewProvider(
     DashboardViewProvider.viewType,
@@ -395,7 +532,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   registerAllCommands(context, services, (commandId, handler) =>
-    createCommandWrapper(context, commandId, handler, reporter)
+    createCommandWrapper(context, commandId, handler, reporter, services)
   );
 
   webviewPanelManager.setStateSnapshot(buildPanelState(), { emit: false });
@@ -405,6 +542,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       COMMAND_MAP.WEBVIEW_TO_HOST.WEBVIEW_READY,
       async () => {
         CodeIngestPanel.notifyWebviewReady();
+        markSelectionHandlersReady();
         if (!webviewPanelManager.tryRestoreState()) {
           webviewPanelManager.setStateSnapshot(buildPanelState());
           webviewPanelManager.tryRestoreState();
@@ -428,7 +566,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await vscode.window.showInformationMessage(`Code Ingest metrics available in output channel.`);
     }],
     ["codeIngest.selectNone", () => vscode.commands.executeCommand("codeIngest.deselectAll")],
-    ["codeIngest.loadRemoteRepo", () => vscode.commands.executeCommand("codeIngest.ingestRemoteRepo")],
     ["codeIngest.invertSelection", async () => {
       await vscode.window.showInformationMessage("Code Ingest: Invert selection is not yet implemented.");
     }]
@@ -437,6 +574,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   manualCommands.forEach(([id, handler]) => {
     createCommandWrapper(context, id, handler, errorReporter!);
   });
+
+  await verifyWebviewCommandRegistration(errorChannel);
 
   const configListener = vscode.workspace.onDidChangeConfiguration((event) => {
     if (event.affectsConfiguration("codeIngest")) {
@@ -474,3 +613,7 @@ export function deactivate(): void {
   activationTelemetry?.dispose();
   // Resources registered with context.subscriptions are disposed automatically.
 }
+
+export const __testing = {
+  createCommandWrapper
+};

@@ -46,6 +46,7 @@ export class HandlerRegistry {
         const normalizedError = error instanceof Error ? error : new Error(String(error));
         this.logger.error?.("Failed to register handler", { type, error: normalizedError.message });
         this._reportError(`registry:register:${type ?? "unknown"}`, normalizedError);
+        this._notifyRegistrationFailure(type, normalizedError);
         throw normalizedError;
       }
     }
@@ -129,6 +130,19 @@ export class HandlerRegistry {
       window.vscode?.postMessage?.({ type: "handler:error", payload });
     } catch (postError) {
       this.logger.error?.("Failed to report handler error", postError);
+    }
+  }
+
+  _notifyRegistrationFailure(messageType, error) {
+    const payload = {
+      type: sanitizeText(messageType ?? "unknown", { maxLength: 128 }),
+      reason: error instanceof Error ? sanitizeText(error.message, { maxLength: 512 }) : sanitizeText(String(error), { maxLength: 512 })
+    };
+
+    try {
+      window.vscode?.postMessage?.({ type: "handler:registrationFailed", payload });
+    } catch (postError) {
+      this.logger.error?.("Failed to post handler registration failure", postError);
     }
   }
 

@@ -7,18 +7,8 @@ import {
   type EnvelopeMessage,
   type ResponseMessage
 } from "./messageEnvelope";
-import { setWebviewHtml } from "./webviewHelpers";
-
-type CommandPayloadValidator = (
-  commandId: string,
-  payload: unknown
-) => { ok: true; value: unknown } | { ok: false; reason?: string; errors?: unknown } | undefined;
-
-const commandValidatorPromise: Promise<CommandPayloadValidator> = (async () => {
-  // @ts-expect-error command validation helper is provided as a compiled JS asset under resources/
-  const module = await import("../../resources/webview/commandValidation.js");
-  return (module as { validateCommandPayload: CommandPayloadValidator }).validateCommandPayload;
-})();
+import { loadCommandValidator, type CommandPayloadValidator } from "./commandValidator";
+import { detectFallbackHtml, setWebviewHtml } from "./webviewHelpers";
 
 interface LegacyMessage {
   readonly type: string;
@@ -34,11 +24,17 @@ interface PendingHostMessage {
 
 export class CodeIngestPanel {
   private static instance: CodeIngestPanel | undefined;
+  private static handlerErrorChannel: vscode.OutputChannel | undefined;
+
+  public static registerHandlerErrorChannel(channel: vscode.OutputChannel | undefined): void {
+    CodeIngestPanel.handlerErrorChannel = channel;
+  }
   private readonly envelope: WebviewMessageEnvelope;
   private readonly sessionToken: string;
   private readonly pendingMessages: PendingHostMessage[] = [];
   private isWebviewReady = false;
   private flushRetryTimer: NodeJS.Timeout | undefined;
+  private hasRenderedFallback = false;
 
   private constructor(
     private readonly panel: vscode.WebviewPanel,
@@ -84,7 +80,8 @@ export class CodeIngestPanel {
     const htmlUri = vscode.Uri.joinPath(extensionUri, "out", "resources", "webview", "index.html");
 
     console.log("CodeIngestPanel: Loading HTML from", htmlUri.fsPath);
-    setWebviewHtml(panel.webview, extensionUri, htmlRelativePath, { sessionToken });
+    const html = setWebviewHtml(panel.webview, extensionUri, htmlRelativePath, { sessionToken });
+    CodeIngestPanel.instance.handleInitialRender(html);
   }
 
   static restoreState(state: unknown): boolean {
@@ -147,6 +144,7 @@ export class CodeIngestPanel {
       clearTimeout(this.flushRetryTimer);
       this.flushRetryTimer = undefined;
     }
+    this.hasRenderedFallback = false;
   }
 
   private isEnvelopeMessage(message: EnvelopeMessage | LegacyMessage): message is EnvelopeMessage {
@@ -154,8 +152,8 @@ export class CodeIngestPanel {
   }
 
   private async executeCommandFromWebview(message: CommandMessage): Promise<void> {
-    const validator = await commandValidatorPromise;
-    const validation = validator(message.command, message.payload) ?? { ok: true, value: message.payload };
+    const validator = await this.getCommandValidator();
+    const validation = validator?.(message.command, message.payload) ?? { ok: true, value: message.payload };
     if (!validation || validation.ok !== true) {
       const reason = validation?.reason ?? "validation_failed";
       this.logInboundRejection(message.command, reason);
@@ -196,6 +194,15 @@ export class CodeIngestPanel {
     }
   }
 
+  private async getCommandValidator(): Promise<CommandPayloadValidator | undefined> {
+    try {
+      return await loadCommandValidator();
+    } catch (error) {
+      console.error("CodeIngestPanel: failed to load command validator", error);
+      return undefined;
+    }
+  }
+
   private handleResponse(message: ResponseMessage): void {
     console.debug?.("Received webview response", {
       command: message.command,
@@ -210,6 +217,10 @@ export class CodeIngestPanel {
     }
 
     if (typeof message.type === "string" && message.type.startsWith("handler:")) {
+      if (message.type === "handler:registrationFailed") {
+        CodeIngestPanel.logHandlerRegistrationFailure(message.payload);
+        return;
+      }
       console.info("Webview handler notification", message.type, message.payload);
     }
   }
@@ -349,5 +360,40 @@ export class CodeIngestPanel {
         this.schedulePendingFlush(Math.min(delay * 2, 4000));
       }
     }, delay);
+  }
+
+  private handleInitialRender(html: string): void {
+    const detection = detectFallbackHtml(html);
+    if (!detection.isFallback) {
+      this.hasRenderedFallback = false;
+      return;
+    }
+
+    if (this.hasRenderedFallback) {
+      return;
+    }
+
+    this.hasRenderedFallback = true;
+    const reason = detection.reason ?? "unknown";
+    console.error("CodeIngestPanel: Webview rendered fallback UI", { reason });
+    CodeIngestPanel.handlerErrorChannel?.appendLine(
+      `[webview-fallback] Dashboard webview failed to load (${reason}). Run "npm run build:webview" and reopen Code Ingest.`
+    );
+  }
+
+  private static logHandlerRegistrationFailure(payload: unknown): void {
+    const type = typeof (payload as { type?: unknown })?.type === "string"
+      ? (payload as { type: string }).type
+      : "unknown";
+    const reason = typeof (payload as { reason?: unknown })?.reason === "string"
+      ? (payload as { reason: string }).reason
+      : "Handler registration failed";
+
+    const message = `[handler-error] Registration failed for "${type}": ${reason}`;
+    console.error("CodeIngestPanel: handler registration failed", { type, reason });
+    CodeIngestPanel.handlerErrorChannel?.appendLine(message);
+    if (!CodeIngestPanel.handlerErrorChannel) {
+      void vscode.window.showErrorMessage(`Code Ingest handler registration failed: ${type}. ${reason}`);
+    }
   }
 }

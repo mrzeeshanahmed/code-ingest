@@ -22,6 +22,7 @@ export interface CommandMap {
     openDashboardPanel: 'codeIngest.openDashboardPanel';
     refreshPreview: 'codeIngest.refreshPreview';
     refreshTree: 'codeIngest.refreshTree';
+  copyPreview: 'codeIngest.copyPreview';
     selectAll: 'codeIngest.selectAll';
     toggleRedactionOverride: 'codeIngest.toggleRedactionOverride';
     updateSelection: 'codeIngest.updateSelection';
