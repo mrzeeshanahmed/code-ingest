@@ -5,7 +5,8 @@ import {
   type FormatterTemplateSet,
   type JsonDigestFile,
   type JsonDigestMetadata,
-  type JsonDigestSchema
+  type JsonDigestSchema,
+  type TemplateVariables
 } from "./types";
 import type { DigestMetadata, DigestResult, DigestSummary, ProcessedFileContent } from "../services/digestGenerator";
 
@@ -25,28 +26,65 @@ export class JsonFormatter extends BaseFormatter {
   }
 
   public buildHeader(metadata: DigestMetadata): string {
-    return this.stringifySection(metadata);
+    return this.applyTemplate("header", this.stringifySection(metadata), {
+      metadata,
+      metadataView: this.renderMetadata(metadata)
+    });
   }
 
   public buildSummary(summary: DigestSummary): string {
-    return this.stringifySection(summary);
+    return this.applyTemplate("summary", this.stringifySection(summary), {
+      summary,
+      summaryView: this.renderSummary(summary)
+    });
   }
 
   public buildFileTree(files: ProcessedFileContent[]): string {
-    void files;
-    return "";
+    const treeView = this.getFileTreeView(files, this.getCurrentContext());
+    return this.applyTemplate("fileTree", "", {
+      files,
+      fileTreeView: treeView
+    });
   }
 
   public buildFileContent(file: ProcessedFileContent): string {
-    return this.stringifySection(this.serializeFile(file));
+    const serialized = this.stringifySection(this.serializeFile(file));
+    return this.applyTemplate("fileContent", serialized, { file });
   }
 
   public buildFooter(statistics: DigestResult["statistics"]): string {
-    return this.stringifySection(statistics);
+    return this.applyTemplate("footer", this.stringifySection(statistics), {
+      statistics,
+      statisticsView: this.renderStatistics(statistics)
+    });
   }
 
   public override finalize(digestResult: DigestResult): string {
     const schemaVersion = this.options.json?.schemaVersion ?? DEFAULT_FORMATTER_OPTIONS.json?.schemaVersion ?? "1.0.0";
+    const templateVariables = {
+      digest: digestResult,
+      metadata: digestResult.content.metadata,
+      metadataView: this.renderMetadata(digestResult.content.metadata),
+      summary: digestResult.content.summary,
+      summaryView: this.renderSummary(digestResult.content.summary),
+      statistics: digestResult.statistics,
+      statisticsView: this.renderStatistics(digestResult.statistics)
+    } satisfies TemplateVariables;
+
+    const hasSectionTemplates =
+      this.templateEngine.has("header") ||
+      this.templateEngine.has("summary") ||
+      this.templateEngine.has("fileTree") ||
+      this.templateEngine.has("fileContent") ||
+      this.templateEngine.has("footer");
+
+    if (hasSectionTemplates) {
+      const sectionOutput = super.finalize(digestResult);
+      if (this.templateEngine.has("finalize")) {
+        return this.applyTemplate("finalize", sectionOutput, templateVariables);
+      }
+      return sectionOutput;
+    }
 
     if (this.options.json?.stream) {
       const records: Array<StreamRecord<unknown>> = [];
@@ -68,11 +106,13 @@ export class JsonFormatter extends BaseFormatter {
       records.push({ type: "statistics", schemaVersion, data: digestResult.statistics });
 
       const indent = this.options.json?.pretty ? 2 : undefined;
-      return records.map((record) => JSON.stringify(record, null, indent)).join("\n");
+      const output = records.map((record) => JSON.stringify(record, null, indent)).join("\n");
+      return this.applyTemplate("finalize", output, templateVariables);
     }
 
     const schema = this.buildSchema(digestResult, schemaVersion);
-    return this.formatJsonSchema(schema);
+    const output = this.formatJsonSchema(schema);
+    return this.applyTemplate("finalize", output, templateVariables);
   }
 
   private buildSchema(digestResult: DigestResult, schemaVersion: string): JsonDigestSchema {

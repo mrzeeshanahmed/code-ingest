@@ -449,7 +449,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   activationTelemetry.start("activation");
 
   const gitignoreService = new GitignoreService();
-  const workspaceManager = new WorkspaceManager(diagnostics, gitignoreService);
+  const workspaceManager = new WorkspaceManager(diagnostics, gitignoreService, {
+    loadConfiguration: () => configurationService.getConfig()
+  });
   await workspaceManager.initialize();
   hydrateRedactionOverride(context, workspaceManager);
 

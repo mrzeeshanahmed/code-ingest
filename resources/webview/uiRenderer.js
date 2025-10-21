@@ -3,6 +3,7 @@
  */
 
 import { clampNumber, sanitizeRecord, sanitizeText } from "./utils/sanitizers.js";
+import { buildConfigDisplay } from "./utils/configSummary.js";
 import { FileTreeComponent } from "./components/fileTree.js";
 import { COMMAND_MAP } from "./commandMap.js";
 
@@ -15,6 +16,37 @@ const PROGRESS_LABELS = Object.freeze({
   write: "Writing output",
   select: "Selecting files"
 });
+const PREVIEW_FALLBACK_MESSAGE = "Run a generation to populate the preview.";
+
+const normalizeTokenInfo = (tokenInfo) => {
+  if (tokenInfo === null || tokenInfo === undefined) {
+    return null;
+  }
+
+  if (typeof tokenInfo === "number") {
+    if (!Number.isFinite(tokenInfo)) {
+      return null;
+    }
+    return { total: Math.max(0, tokenInfo) };
+  }
+
+  if (!tokenInfo || typeof tokenInfo !== "object") {
+    return null;
+  }
+
+  const normalized = {};
+  for (const [key, rawValue] of Object.entries(tokenInfo)) {
+    if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+      normalized[key] = key === "total" || key === "approx" ? Math.max(0, rawValue) : rawValue;
+      continue;
+    }
+    if (typeof rawValue === "boolean" || typeof rawValue === "string") {
+      normalized[key] = rawValue;
+    }
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : null;
+};
 
 export class UIRenderer {
   constructor(doc, options = {}) {
@@ -48,12 +80,13 @@ export class UIRenderer {
     this.pipelineMessage = this.pipelineSection?.querySelector(".progress__message");
     this.pipelineLog = doc.querySelector('[data-element="status-log"]');
     this.pipelineLogEntries = [];
+    this.activeProgressId = null;
 
     this.treeHost = doc.getElementById("file-tree-host");
     this.treePlaceholder = doc.querySelector('[data-element="tree-placeholder"]');
 
-  this.selectionSet = new Set();
-  this.selectionSynced = false;
+    this.selectionSet = new Set();
+    this.selectionSynced = false;
     this.expandedPaths = new Set();
     this.treeModel = [];
 
@@ -201,7 +234,7 @@ export class UIRenderer {
       truncated: Boolean(preview?.truncated),
       nodes: normalizedNodes,
       metadata: sanitizedMetadata,
-      tokenCount: preview?.tokenCount ?? null,
+      tokenCount: normalizeTokenInfo(preview?.tokenCount),
       stats: preview?.stats ?? null
     };
 
@@ -210,7 +243,7 @@ export class UIRenderer {
   }
 
   setTokenCount(tokenInfo) {
-    this.currentPreview.tokenCount = tokenInfo ?? null;
+    this.currentPreview.tokenCount = normalizeTokenInfo(tokenInfo);
     this.refreshPreviewMeta();
   }
 
@@ -236,6 +269,11 @@ export class UIRenderer {
     const preview = this.currentPreview ?? {};
     const title = preview.title || "Digest preview";
     const subtitle = preview.subtitle || "";
+    const summaryHasContent = typeof preview.summary === "string" && preview.summary.trim().length > 0;
+    const bodyTextHasContent = typeof preview.previewText === "string" && preview.previewText.trim().length > 0;
+    const bodyHtmlHasContent = typeof preview.previewHtml === "string" && preview.previewHtml.trim().length > 0;
+    const nodeHasContent = Array.isArray(preview.nodes) && preview.nodes.some((node) => Boolean(node?.path) || Boolean(node?.snippet));
+    const hasPreviewBody = summaryHasContent || bodyTextHasContent || bodyHtmlHasContent || nodeHasContent;
 
     if (this.previewTitleNode) {
       this.previewTitleNode.textContent = title;
@@ -252,30 +290,35 @@ export class UIRenderer {
     }
 
     if (this.previewContentNode) {
-      const sections = [];
-      if (preview.summary) {
-        sections.push(preview.summary);
+      if (hasPreviewBody) {
+        const sections = [];
+        if (summaryHasContent) {
+          sections.push(preview.summary);
+        }
+        const body = bodyHtmlHasContent ? preview.previewHtml : preview.previewText;
+        if (body) {
+          sections.push(body);
+        }
+        if (nodeHasContent) {
+          const nodeStrings = preview.nodes
+            .filter((node) => node && (node.path || node.snippet))
+            .map((node) => {
+              const snippet = node.snippet ? `\n  ${node.snippet}` : "";
+              return `${node.path || "(unknown path)"}${snippet}`;
+            });
+          if (nodeStrings.length > 0) {
+            sections.push(nodeStrings.join("\n\n"));
+          }
+        }
+        const combined = sections.filter(Boolean).join("\n\n");
+        this.previewContentNode.textContent = combined || PREVIEW_FALLBACK_MESSAGE;
+      } else {
+        this.previewContentNode.textContent = PREVIEW_FALLBACK_MESSAGE;
       }
-      const body = preview.previewHtml || preview.previewText;
-      if (body) {
-        sections.push(body);
-      }
-      if (Array.isArray(preview.nodes) && preview.nodes.length > 0) {
-        const nodeStrings = preview.nodes
-          .filter((node) => node && (node.path || node.snippet))
-          .map((node) => {
-            const snippet = node.snippet ? `\n  ${node.snippet}` : "";
-            return `${node.path || "(unknown path)"}${snippet}`;
-          });
-        sections.push(nodeStrings.join("\n\n"));
-      }
-      const combined = sections.filter(Boolean).join("\n\n");
-      this.previewContentNode.textContent = combined || "Run a generation to populate the preview.";
     }
 
     if (this.previewArticle) {
-      const hasContent = Boolean(this.previewContentNode?.textContent?.trim());
-      this.previewArticle.dataset.state = hasContent ? "ready" : "empty";
+      this.previewArticle.dataset.state = hasPreviewBody ? "ready" : "empty";
     }
 
     if (this.previewFooterNode) {
@@ -301,12 +344,15 @@ export class UIRenderer {
     }
 
     const parts = [];
-    const tokenInfo = this.currentPreview.tokenCount;
+    const tokenInfo = normalizeTokenInfo(this.currentPreview.tokenCount);
     if (tokenInfo && typeof tokenInfo === "object") {
       if (typeof tokenInfo.total === "number" && Number.isFinite(tokenInfo.total)) {
         parts.push(`${tokenInfo.total.toLocaleString()} tokens`);
       } else if (typeof tokenInfo.approx === "number" && Number.isFinite(tokenInfo.approx)) {
         parts.push(`~${tokenInfo.approx.toLocaleString()} tokens`);
+      }
+      if (tokenInfo.truncated === true) {
+        parts.push("Token count truncated");
       }
     }
 
@@ -340,7 +386,7 @@ export class UIRenderer {
     this.previewMetaElement.textContent = message;
   }
 
-  appendPipelineLog(entry) {
+  appendPipelineLog(entry, options = {}) {
     if (!this.pipelineLog) {
       return;
     }
@@ -349,14 +395,39 @@ export class UIRenderer {
       return;
     }
 
-    const lastEntry = this.pipelineLogEntries[this.pipelineLogEntries.length - 1];
-    if (lastEntry === safeEntry) {
-      return;
+    const progressId = typeof options.progressId === "string" && options.progressId.length > 0
+      ? options.progressId
+      : typeof options.id === "string" && options.id.length > 0
+        ? options.id
+        : undefined;
+    const phase = options.phase;
+    const percent = typeof options.percent === "number" ? options.percent : undefined;
+    const isSelectionPhase = phase === "select";
+
+    if (progressId && progressId !== this.activeProgressId) {
+      this.pipelineLogEntries = [];
+      this.activeProgressId = progressId;
     }
 
-    this.pipelineLogEntries.push(safeEntry);
-    if (this.pipelineLogEntries.length > 100) {
-      this.pipelineLogEntries.splice(0, this.pipelineLogEntries.length - 100);
+    if (isSelectionPhase) {
+      if (percent !== undefined && percent >= 100) {
+        this.pipelineLogEntries = [safeEntry];
+        this.activeProgressId = null;
+      } else {
+        this.pipelineLogEntries = [safeEntry];
+      }
+    } else {
+      const lastEntry = this.pipelineLogEntries[this.pipelineLogEntries.length - 1];
+      if (lastEntry !== safeEntry) {
+        this.pipelineLogEntries.push(safeEntry);
+        if (this.pipelineLogEntries.length > 100) {
+          this.pipelineLogEntries.splice(0, this.pipelineLogEntries.length - 100);
+        }
+      }
+
+      if (progressId && percent !== undefined && percent >= 100) {
+        this.activeProgressId = null;
+      }
     }
 
     this.pipelineLog.textContent = this.pipelineLogEntries.join("\n");
@@ -364,9 +435,15 @@ export class UIRenderer {
   }
 
   updateProgress(progress) {
+    const progressId = typeof progress?.progressId === "string" && progress.progressId.length > 0
+      ? progress.progressId
+      : typeof progress?.id === "string" && progress.id.length > 0
+        ? progress.id
+        : undefined;
     const label = PROGRESS_LABELS[progress?.phase] ?? "Processing";
     const percent = clampNumber(progress?.percent, { min: 0, max: 100, defaultValue: undefined });
     const statusMessage = sanitizeText(progress?.message ?? label);
+    const isSelectionPhase = progress?.phase === "select";
 
     if (!progress) {
       if (this.pipelineIndicator) {
@@ -389,6 +466,11 @@ export class UIRenderer {
         this.insightPerformanceElement.textContent = "Idle";
       }
       this.toggleLoadingOverlay(false);
+      this.pipelineLogEntries = [];
+      if (this.pipelineLog) {
+        this.pipelineLog.textContent = "";
+      }
+      this.activeProgressId = null;
       return;
     }
 
@@ -427,8 +509,33 @@ export class UIRenderer {
       this.toggleLoadingOverlay(false);
     }
 
-    if (typeof progress.message === "string" && progress.message.trim()) {
-      this.appendPipelineLog(`${label}: ${progress.message}`);
+    const trimmedMessage = typeof progress.message === "string" ? progress.message.trim() : "";
+    if (trimmedMessage) {
+      this.appendPipelineLog(`${label}: ${trimmedMessage}`, {
+        progressId,
+        phase: progress.phase,
+        percent
+      });
+    } else if (isSelectionPhase) {
+      this.appendPipelineLog(label, {
+        progressId,
+        phase: progress.phase,
+        percent
+      });
+    }
+
+    if (isSelectionPhase && typeof percent === "number" && percent >= 100) {
+      if (this.pipelineSection) {
+        this.pipelineSection.dataset.phase = "idle";
+        this.pipelineSection.classList.remove("is-busy");
+      }
+      if (this.pipelineIndicator) {
+        this.pipelineIndicator.style.width = "0%";
+      }
+      if (this.pipelineTrack) {
+        this.pipelineTrack.removeAttribute("aria-valuenow");
+      }
+      this.toggleLoadingOverlay(false);
     }
 
     if (progress.phase === "ingest" && percent === 100) {
@@ -546,17 +653,92 @@ export class UIRenderer {
     }
 
     const safeConfig = sanitizeRecord(config ?? {});
-    const redactionOverride = Boolean(safeConfig.redactionOverride);
-    const entries = Object.entries(safeConfig)
-      .filter(([key, value]) => key !== "redactionOverride" && value !== undefined)
-      .map(([key, value]) => `${key}: ${value}`);
-    const summary = entries.length === 0 ? "Using default configuration" : entries.join(" · ");
-    this.configSummary.textContent = summary;
+    const summaryDetails =
+      config && typeof config === "object" && config.summary && typeof config.summary === "object"
+        ? config.summary
+        : undefined;
+    const hasConfigDetails = Boolean(
+      summaryDetails ||
+        Array.isArray(config?.include) ||
+        Array.isArray(config?.includePatterns) ||
+        Array.isArray(config?.exclude) ||
+        Array.isArray(config?.excludePatterns) ||
+        typeof config?.followSymlinks === "boolean" ||
+        typeof config?.respectGitIgnore === "boolean" ||
+        typeof config?.respectGitignore === "boolean" ||
+        typeof config?.redactionOverride === "boolean" ||
+        typeof config?.outputFormat === "string" ||
+        typeof config?.preset === "string"
+    );
+
+    let display = summaryDetails;
+    if (!display && hasConfigDetails) {
+      display = buildConfigDisplay(config ?? {});
+    }
+
+    const formatArrayValue = (value) => {
+      if (!Array.isArray(value)) {
+        return sanitizeText(value, { maxLength: 256 }) || "";
+      }
+      const values = [];
+      for (let index = 0; index < value.length && index < 3; index += 1) {
+        const item = value[index];
+        const sanitized = sanitizeText(item, { maxLength: 128 });
+        if (sanitized) {
+          values.push(sanitized);
+        }
+      }
+      if (value.length > 3) {
+        values.push(`(+${value.length - 3} more)`);
+      }
+      return values.length > 0 ? values.join(", ") : "(empty)";
+    };
+
+    const fallbackEntries = Object.entries(safeConfig)
+      .filter(([key]) => key !== "summary")
+      .map(([key, value]) => {
+        const safeKey = sanitizeText(key, { maxLength: 64 }) || "config";
+        if (Array.isArray(value)) {
+          return `${safeKey}: ${formatArrayValue(value)}`;
+        }
+        if (value && typeof value === "object") {
+          return `${safeKey}: [object]`;
+        }
+        const safeValue = sanitizeText(value, { maxLength: 256 });
+        return `${safeKey}: ${safeValue || ""}`;
+      })
+      .filter(Boolean);
+
+    let statusText = "";
+    let insightText = "";
+    let redactionOverride = typeof display?.redactionOverride === "boolean"
+      ? display.redactionOverride
+      : Boolean(config?.redactionOverride ?? safeConfig.redactionOverride);
+
+    if (display) {
+      statusText = sanitizeText(display.statusLine, { maxLength: 512 }) || "Using default configuration";
+      const lines = Array.isArray(display.lines) ? display.lines : [];
+      const sanitizedLines = lines
+        .map((line) => sanitizeText(line, { maxLength: 256 }))
+        .filter(Boolean);
+      insightText = sanitizedLines.length > 0 ? sanitizedLines.join("\n") : statusText;
+    } else if (fallbackEntries.length > 0) {
+      statusText = fallbackEntries.join(" · ");
+      insightText = fallbackEntries.join("\n");
+    } else {
+      statusText = "Using default configuration";
+      insightText = "Awaiting configuration data.";
+    }
+
+    this.configSummary.textContent = statusText;
+    this.configSummary.title = insightText;
+
     if (this.statusConfigChip) {
-      this.statusConfigChip.textContent = summary;
+      this.statusConfigChip.textContent = statusText;
+      this.statusConfigChip.title = insightText;
     }
     if (this.insightConfigElement) {
-      this.insightConfigElement.textContent = summary;
+      this.insightConfigElement.textContent = insightText;
     }
 
     const toggleButton = this.document.querySelector('[data-action="toggle-redaction"]');
@@ -696,8 +878,8 @@ export class UIRenderer {
       if (!node || typeof node !== "object") {
         continue;
       }
-  const rawPath = typeof node.relPath === "string" ? node.relPath : typeof node.uri === "string" ? node.uri : node.path;
-  const path = this.toWorkspaceRelative(rawPath);
+      const rawPath = typeof node.relPath === "string" ? node.relPath : typeof node.uri === "string" ? node.uri : node.path;
+      const path = this.toWorkspaceRelative(rawPath);
       if (node.expanded && path) {
         acc.add(path);
       }

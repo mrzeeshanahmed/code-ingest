@@ -321,6 +321,13 @@ const ExtensionKind = {
   Web: 3
 };
 
+const FileType = {
+  Unknown: 0,
+  File: 1,
+  Directory: 2,
+  SymbolicLink: 64
+};
+
 const ViewColumn = {
   One: 1,
   Two: 2,
@@ -423,6 +430,7 @@ const mockVSCode = {
   ExtensionMode,
   ExtensionRuntime,
   ExtensionKind,
+  FileType,
   ViewColumn,
   TreeItem,
   TreeItemCollapsibleState,

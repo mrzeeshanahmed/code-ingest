@@ -14,7 +14,7 @@ describe("IngestPreviewHandler", () => {
     mockStore = TestUtils.createMockStore({
       preview: {
         content: "",
-        tokenCount: {},
+        tokenCount: null,
         truncated: false
       }
     });

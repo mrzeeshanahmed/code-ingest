@@ -6,7 +6,7 @@ const createPreviewState = () => ({
   title: "",
   subtitle: "",
   content: "",
-  tokenCount: 0,
+  tokenCount: null,
   truncated: false,
   metadata: {}
 });

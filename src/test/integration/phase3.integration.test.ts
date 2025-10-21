@@ -13,7 +13,7 @@ import { WorkspaceManager } from "../../services/workspaceManager";
 import { ConfigurationService } from "../../services/configurationService";
 import { DEFAULT_CONFIG } from "../../config/constants";
 import { DigestGenerator, type DigestResult } from "../../services/digestGenerator";
-import type { OutputWriter, OutputTarget, WriteResult } from "../../services/outputWriter";
+import type { OutputWriter, OutputTarget, WriteResult, WriteOptions } from "../../services/outputWriter";
 import { configureWorkspaceEnvironment, resetWorkspaceEnvironment } from "../support/workspaceEnvironment";
 import { createTempWorkspace, cleanupTempWorkspaces, mockWorkspaceFolders, seedWorkspaceFile } from "../support/integrationUtils";
 
@@ -69,6 +69,9 @@ describe("Phase 3 integration", () => {
   let configurationService: ConfigurationService;
   let selectAllSpy: jest.SpiedFunction<WorkspaceManager["selectAll"]>;
   let digestSpy: jest.SpiedFunction<DigestGenerator["generateDigest"]>;
+  let outputWriterResolveConfiguredTarget: jest.Mock;
+  let outputWriterWriteOutput: jest.Mock;
+  let outputWriter: OutputWriter;
   const webviewPanelManager = {
     setStateSnapshot: jest.fn(),
     sendCommand: jest.fn(),
@@ -159,19 +162,21 @@ describe("Phase 3 integration", () => {
     digestSpy = jest.spyOn(DigestGenerator.prototype, "generateDigest").mockResolvedValue(mockDigest);
     selectAllSpy = jest.spyOn(workspaceManager, "selectAll");
 
-    const outputWriter: OutputWriter = {
-      resolveConfiguredTarget: jest.fn(() => ({
-        type: "file",
-        path: path.join(workspaceRoot, "code-ingest.md")
-      }) satisfies OutputTarget),
-      writeOutput: jest.fn(async () => ({
-        success: true,
-        bytesWritten: 256,
-        writeTime: 5,
-        target: { type: "file", path: path.join(workspaceRoot, "code-ingest.md") },
-        uri: vscode.Uri.file(path.join(workspaceRoot, "code-ingest.md"))
-      }) satisfies WriteResult)
-    } as unknown as OutputWriter;
+    outputWriterResolveConfiguredTarget = jest.fn(() => ({
+      type: "file",
+      path: path.join(workspaceRoot, "code-ingest.md")
+    }) satisfies OutputTarget);
+    outputWriterWriteOutput = jest.fn(async () => ({
+      success: true,
+      bytesWritten: 256,
+      writeTime: 5,
+      target: { type: "file", path: path.join(workspaceRoot, "code-ingest.md") },
+      uri: vscode.Uri.file(path.join(workspaceRoot, "code-ingest.md"))
+    }) satisfies WriteResult);
+    outputWriter = {
+      resolveConfiguredTarget: outputWriterResolveConfiguredTarget as unknown as OutputWriter["resolveConfiguredTarget"],
+      writeOutput: outputWriterWriteOutput as unknown as OutputWriter["writeOutput"]
+    } as OutputWriter;
 
     const errorReporter = { report: jest.fn(), dispose: jest.fn() };
 
@@ -218,5 +223,173 @@ describe("Phase 3 integration", () => {
 
     expect(emptySelectionErrorRaised).toBe(false);
     expect(digestSpy).toHaveBeenCalledTimes(1);
+
+    const digestCall = digestSpy.mock.calls[0]?.[0];
+    const selectionCount = workspaceManager.getSelection().length;
+    expect(Array.isArray(digestCall?.selectedFiles) ? digestCall.selectedFiles.length : 0).toBe(selectionCount);
+
+    const snapshotCalls = (webviewPanelManager.setStateSnapshot as unknown as jest.Mock).mock.calls;
+    const finalSnapshot = snapshotCalls[snapshotCalls.length - 1]?.[0] as { preview?: { metadata?: { totalFiles?: number } }; lastDigest?: { totalFiles?: number } } | undefined;
+    expect(finalSnapshot?.lastDigest?.totalFiles).toBe(selectionCount);
+    if (typeof finalSnapshot?.preview?.metadata?.totalFiles === "number") {
+      expect(finalSnapshot.preview.metadata.totalFiles).toBe(selectionCount);
+    }
+  });
+
+  it("waits for in-flight select-all before generating a digest", async () => {
+    markSelectionHandlersReady();
+
+    const originalSelectAll = workspaceManager.selectAll.bind(workspaceManager);
+    let releaseSelectAll: (() => void) | undefined;
+    selectAllSpy.mockImplementationOnce(async (onProgress) => {
+      await new Promise<void>((resolve) => {
+        releaseSelectAll = resolve;
+      });
+      return originalSelectAll(onProgress);
+    });
+
+    const selectAllPromise = vscode.commands.executeCommand(COMMAND_MAP.WEBVIEW_TO_HOST.SELECT_ALL);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const digestPromise = vscode.commands.executeCommand(COMMAND_MAP.WEBVIEW_TO_HOST.GENERATE_DIGEST, {});
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(typeof releaseSelectAll).toBe("function");
+    releaseSelectAll?.();
+
+    await expect(selectAllPromise).resolves.toBeDefined();
+    await expect(digestPromise).resolves.toBeUndefined();
+
+    const selectionCount = workspaceManager.getSelection().length;
+    expect(selectionCount).toBeGreaterThan(0);
+
+    const showErrorCalls = (webviewPanelManager.sendCommand as unknown as jest.Mock).mock.calls.filter((call) => call[0] === COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR);
+    const emptySelectionErrorRaised = showErrorCalls.some(([, payload]) => {
+      const candidate = payload as { message?: string } | undefined;
+      return typeof candidate?.message === "string" && candidate.message.includes("No files selected");
+    });
+
+    expect(emptySelectionErrorRaised).toBe(false);
+    expect(digestSpy).toHaveBeenCalledTimes(1);
+
+    const digestCall = digestSpy.mock.calls[0]?.[0];
+    expect(Array.isArray(digestCall?.selectedFiles) ? digestCall.selectedFiles.length : 0).toBe(selectionCount);
+
+    const snapshotCalls = (webviewPanelManager.setStateSnapshot as unknown as jest.Mock).mock.calls;
+    const finalSnapshot = snapshotCalls[snapshotCalls.length - 1]?.[0] as { preview?: { metadata?: { totalFiles?: number } }; lastDigest?: { totalFiles?: number } } | undefined;
+    expect(finalSnapshot?.lastDigest?.totalFiles).toBe(selectionCount);
+    if (typeof finalSnapshot?.preview?.metadata?.totalFiles === "number") {
+      expect(finalSnapshot.preview.metadata.totalFiles).toBe(selectionCount);
+    }
+  });
+
+  it("captures the empty preview emitted for editor targets", async () => {
+    markSelectionHandlersReady();
+
+    outputWriterResolveConfiguredTarget.mockReturnValue({
+      type: "editor",
+      title: "Digest Preview"
+    } satisfies OutputTarget);
+
+    outputWriterWriteOutput.mockImplementation(async (options) => {
+      const opts = options as WriteOptions | undefined;
+      opts?.progressCallback?.({
+        phase: "preparing",
+        bytesWritten: 0,
+        totalBytes: 128,
+        currentOperation: "Preparing editor buffer"
+      });
+      opts?.progressCallback?.({
+        phase: "writing",
+        bytesWritten: 64,
+        totalBytes: 128,
+        currentOperation: "Populating editor"
+      });
+      opts?.progressCallback?.({
+        phase: "complete",
+        bytesWritten: 128,
+        totalBytes: 128,
+        currentOperation: "Editor ready"
+      });
+      return {
+        success: true,
+        bytesWritten: 128,
+        writeTime: 4,
+        target: { type: "editor", title: "Digest Preview" },
+        uri: undefined
+      } satisfies WriteResult;
+    });
+
+    await expect(vscode.commands.executeCommand(COMMAND_MAP.WEBVIEW_TO_HOST.SELECT_ALL)).resolves.toBeDefined();
+    (webviewPanelManager.setStateSnapshot as jest.Mock).mockClear();
+
+    await expect(vscode.commands.executeCommand(COMMAND_MAP.WEBVIEW_TO_HOST.GENERATE_DIGEST, {})).resolves.toBeUndefined();
+
+    const snapshotCalls = (webviewPanelManager.setStateSnapshot as jest.Mock).mock.calls as Array<[Record<string, unknown>]>;
+    const previewSnapshot = [...snapshotCalls]
+      .map(([state]) => state as { preview?: { content?: unknown } })
+      .reverse()
+      .find((state) => state.preview !== undefined);
+
+    const previewContent = typeof previewSnapshot?.preview?.content === "string" ? previewSnapshot.preview.content : "";
+    expect(previewContent).toBe("");
+
+    const diagnosticMessages = diagnostics.getAll();
+    const previewDiagnostics = diagnosticMessages.filter((message) => message.includes("Digest preview prepared"));
+    expect(previewDiagnostics.length).toBeGreaterThan(0);
+    expect(previewDiagnostics[previewDiagnostics.length - 1]).toContain("length=0");
+  });
+
+  it("warns when filters exclude every requested file and succeeds after broadening includes", async () => {
+    markSelectionHandlersReady();
+
+    const baseSnapshot = configurationService.getConfig();
+    configurationService["config"] = {
+      ...baseSnapshot,
+      include: ["docs/**"],
+      exclude: []
+    } as typeof baseSnapshot;
+    configurationService.loadConfig();
+
+    await expect(
+      vscode.commands.executeCommand(COMMAND_MAP.WEBVIEW_TO_HOST.GENERATE_DIGEST, {
+        selectedFiles: ["src/index.ts"]
+      })
+    ).rejects.toMatchObject({
+      message: "All selected files are excluded by the current include/exclude or gitignore settings.",
+      handledByHost: true
+    });
+
+    expect(digestSpy).not.toHaveBeenCalled();
+    const diagnosticMessages = diagnostics.getAll();
+    expect(diagnosticMessages.some((message) => message.includes("Selection filtering: skipped 1 selected file"))).toBe(true);
+    expect(diagnosticMessages.some((message) => message.includes("Digest request rejected: All selected files are excluded"))).toBe(true);
+
+    const errorCalls = (webviewPanelManager.sendCommand as jest.Mock).mock.calls.filter((call) => call[0] === COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR);
+    expect(errorCalls.length).toBeGreaterThan(0);
+    expect(errorCalls[errorCalls.length - 1]?.[1]).toMatchObject({
+      message: "All selected files are excluded by the current include/exclude or gitignore settings."
+    });
+
+    (webviewPanelManager.sendCommand as jest.Mock).mockClear();
+    diagnostics.clear();
+    digestSpy.mockClear();
+
+    configurationService["config"] = {
+      ...baseSnapshot,
+      include: ["**/*"],
+      exclude: []
+    } as typeof baseSnapshot;
+    configurationService.loadConfig();
+
+    await expect(
+      vscode.commands.executeCommand(COMMAND_MAP.WEBVIEW_TO_HOST.GENERATE_DIGEST, {
+        selectedFiles: ["src/index.ts"]
+      })
+    ).resolves.toBeUndefined();
+
+    expect(digestSpy).toHaveBeenCalledTimes(1);
+    const recoveredDiagnostics = diagnostics.getAll();
+    expect(recoveredDiagnostics.some((message) => message.includes("Digest preview prepared"))).toBe(true);
   });
 });

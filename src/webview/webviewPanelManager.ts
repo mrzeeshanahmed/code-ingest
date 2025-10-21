@@ -49,10 +49,25 @@ export class WebviewPanelManager {
         ? ((incomingState as { tree: unknown[] }).tree.length)
         : undefined
     };
+    let previewSnapshot: { length?: number; truncated?: boolean } | undefined;
 
     const applySnapshot = () => {
       const nextState = this.stateSnapshot ? { ...this.stateSnapshot, ...incomingState } : { ...incomingState };
       this.stateSnapshot = nextState;
+
+      const previewCandidate = (nextState as { preview?: { content?: unknown; truncated?: unknown } }).preview;
+      if (previewCandidate && typeof previewCandidate === "object") {
+        const content = (previewCandidate as { content?: unknown }).content;
+        const previewLength = typeof content === "string" ? content.length : undefined;
+        const isTruncated = (previewCandidate as { truncated?: unknown }).truncated === true;
+        previewSnapshot = {};
+        if (typeof previewLength === "number") {
+          previewSnapshot.length = previewLength;
+        }
+        if (isTruncated) {
+          previewSnapshot.truncated = true;
+        }
+      }
 
       if (!emit) {
         return;
@@ -69,8 +84,10 @@ export class WebviewPanelManager {
     const { metrics } = this.performanceMonitor.measureSync("webview.setStateSnapshot", () => applySnapshot(), metadata);
     const durationMs = Math.round(metrics.duration);
     const selectionCount = metadata.selectionCount ?? 0;
+    const previewLength = previewSnapshot?.length ?? 0;
+    const previewTruncated = previewSnapshot?.truncated === true ? "yes" : "no";
     this.diagnostics.add(
-      `[trace] stateSnapshot emit=${emit} selectionCount=${selectionCount} duration=${durationMs}ms.`
+      `[trace] stateSnapshot emit=${emit} selectionCount=${selectionCount} previewLength=${previewLength} truncated=${previewTruncated} duration=${durationMs}ms.`
     );
   }
 

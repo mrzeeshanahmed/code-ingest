@@ -39,93 +39,94 @@ export class MarkdownFormatter extends BaseFormatter {
   }
 
   public buildHeader(metadata: DigestMetadata): string {
-    if (!this.options.includeMetadata) {
-      return "";
-    }
+    const metadataView = this.renderMetadata(metadata);
+    const frontMatterOrder: Array<keyof typeof metadataView.frontMatter> = [
+      "generated_at",
+      "workspace_root",
+      "total_files",
+      "included_files",
+      "skipped_files",
+      "binary_files",
+      "token_estimate",
+      "processing_time_ms",
+      "redaction_applied",
+      "generator_version"
+    ];
 
     const frontMatter = [
       "---",
-      `generated_at: ${metadata.generatedAt.toISOString()}`,
-      `workspace_root: ${metadata.workspaceRoot}`,
-      `total_files: ${metadata.totalFiles}`,
-      `included_files: ${metadata.includedFiles}`,
-      `skipped_files: ${metadata.skippedFiles}`,
-      `binary_files: ${metadata.binaryFiles}`,
-      `token_estimate: ${metadata.tokenEstimate}`,
-      `processing_time_ms: ${metadata.processingTime}`,
-      `redaction_applied: ${metadata.redactionApplied}`,
-      `generator_version: ${metadata.generatorVersion}`,
+      ...frontMatterOrder.map((key) => `${key}: ${metadataView.frontMatter[key]}`),
       "---"
     ];
 
-    return this.applyTemplate("header", frontMatter.join("\n"), { metadata });
+    return this.applyTemplate("header", frontMatter.join("\n"), {
+      metadata,
+      metadataView
+    });
   }
 
   public buildSummary(summary: DigestSummary): string {
-    if (!this.options.includeSummary) {
-      return "";
-    }
-
+    const summaryView = this.renderSummary(summary);
     const headerLevel = Math.max(1, this.options.markdown?.headerLevel ?? 2);
     const headerMarker = "#".repeat(headerLevel);
 
     const lines: string[] = [];
     lines.push(`${headerMarker} Digest Summary`);
     lines.push("\n");
-    lines.push(`- Total files: ${summary.overview.totalFiles}`);
-    lines.push(`- Included files: ${summary.overview.includedFiles}`);
-    lines.push(`- Skipped files: ${summary.overview.skippedFiles}`);
-    lines.push(`- Binary files: ${summary.overview.binaryFiles}`);
-    lines.push(`- Total tokens: ${summary.overview.totalTokens}`);
+    summaryView.overview.forEach((entry) => {
+      lines.push(`- ${entry.label}: ${entry.value}`);
+    });
 
-    if (summary.notes.length > 0) {
+    if (summaryView.notes.length > 0) {
       lines.push("\n");
       lines.push(`${headerMarker}# Notes`);
-      for (const note of summary.notes) {
+      for (const note of summaryView.notes) {
         lines.push(`- ${note}`);
       }
     }
 
-    if (summary.tableOfContents.length > 0) {
+    if (summaryView.tableOfContents.length > 0) {
       lines.push("\n");
       lines.push(`${headerMarker}# Table of Contents`);
-      for (const entry of summary.tableOfContents.slice(0, this.options.markdown?.tableOfContentsDepth ?? summary.tableOfContents.length)) {
+      const depth = this.options.markdown?.tableOfContentsDepth ?? summaryView.tableOfContents.length;
+      for (const entry of summaryView.tableOfContents.slice(0, depth)) {
         const truncated = entry.truncated ? " _(truncated)_" : "";
         lines.push(`- [${entry.path}](#${this.anchorize(entry.path)}) — ${entry.tokens} tokens${truncated}`);
       }
     }
 
-    return this.applyTemplate("summary", lines.join("\n"), { summary });
+    return this.applyTemplate("summary", lines.join("\n"), {
+      summary,
+      summaryView
+    });
   }
 
   public buildFileTree(files: ProcessedFileContent[]): string {
-    if (!this.options.includeFileTree || files.length === 0) {
+    if (files.length === 0) {
       return "";
     }
 
     const headerLevel = Math.max(1, (this.options.markdown?.headerLevel ?? 2) + 1);
     const headerMarker = "#".repeat(headerLevel);
     const lines: string[] = [`${headerMarker} File Tree`];
+    const treeView = this.getFileTreeView(files, this.getCurrentContext());
 
-    const tree = this.buildMermaidTree(files);
     if (this.options.markdown?.includeMermaidDiagram) {
       lines.push("```mermaid");
       lines.push("graph TD");
-      lines.push(...tree.map((line) => `  ${line}`));
+      lines.push(...treeView.mermaid.map((line) => `  ${line}`));
       lines.push("```");
     }
 
-    const nestedList = this.buildNestedList(files.map((file) => file.relativePath));
-    lines.push(...nestedList);
+    lines.push(...treeView.nested);
 
-    return this.applyTemplate("fileTree", lines.join("\n"), { files });
+    return this.applyTemplate("fileTree", lines.join("\n"), {
+      files,
+      fileTreeView: treeView
+    });
   }
 
   public buildFileContent(file: ProcessedFileContent): string {
-    if (!this.options.includeFiles) {
-      return "";
-    }
-
     const headerLevel = Math.max(1, (this.options.markdown?.headerLevel ?? 2) + 1);
     const headerMarker = "#".repeat(headerLevel);
     const title = `${headerMarker} ${file.relativePath}`;
@@ -164,29 +165,33 @@ export class MarkdownFormatter extends BaseFormatter {
   }
 
   public buildFooter(statistics: DigestResult["statistics"]): string {
+    const statisticsView = this.renderStatistics(statistics);
     const headerLevel = Math.max(1, (this.options.markdown?.headerLevel ?? 2) + 1);
     const headerMarker = "#".repeat(headerLevel);
 
     const lines: string[] = [`${headerMarker} Statistics`];
-    lines.push(`- Files processed: ${statistics.filesProcessed}`);
-    lines.push(`- Total tokens: ${statistics.totalTokens}`);
-    lines.push(`- Processing time: ${this.formatDuration(statistics.processingTime)}`);
+    statisticsView.keyValues.forEach((entry) => {
+      lines.push(`- ${entry.label}: ${entry.value}`);
+    });
 
-    if (statistics.warnings.length > 0) {
+    if (statisticsView.warnings.length > 0) {
       lines.push("- Warnings:");
-      for (const warning of statistics.warnings) {
+      for (const warning of statisticsView.warnings) {
         lines.push(`  - ${warning}`);
       }
     }
 
-    if (statistics.errors.length > 0) {
+    if (statisticsView.errors.length > 0) {
       lines.push("- Errors:");
-      for (const error of statistics.errors) {
+      for (const error of statisticsView.errors) {
         lines.push(`  - ${error}`);
       }
     }
 
-    return this.applyTemplate("footer", lines.join("\n"), { statistics });
+    return this.applyTemplate("footer", lines.join("\n"), {
+      statistics,
+      statisticsView
+    });
   }
 
   public override finalize(digestResult: DigestResult): string {
@@ -194,7 +199,15 @@ export class MarkdownFormatter extends BaseFormatter {
     return this.applyTemplate(
       "finalize",
       sections.filter((section) => section.trim().length > 0).join(this.getSectionSeparator()),
-      { digest: digestResult }
+      {
+        digest: digestResult,
+        metadata: digestResult.content.metadata,
+        metadataView: this.renderMetadata(digestResult.content.metadata),
+        summary: digestResult.content.summary,
+        summaryView: this.renderSummary(digestResult.content.summary),
+        statistics: digestResult.statistics,
+        statisticsView: this.renderStatistics(digestResult.statistics)
+      }
     );
   }
 
@@ -218,78 +231,4 @@ export class MarkdownFormatter extends BaseFormatter {
     return this.options.markdown?.codeFenceLanguageFallback ?? "";
   }
 
-  private buildNestedList(paths: string[]): string[] {
-    interface NestedTreeNode {
-      children: Map<string, NestedTreeNode>;
-    }
-
-    const root: NestedTreeNode = { children: new Map() };
-
-    for (const relPath of paths) {
-      const segments = relPath.split(/\\|\//);
-      let current = root;
-      for (const segment of segments) {
-        if (!current.children.has(segment)) {
-          current.children.set(segment, { children: new Map() });
-        }
-        current = current.children.get(segment)!;
-      }
-    }
-
-    const lines: string[] = [];
-
-    const traverse = (node: NestedTreeNode, depth: number) => {
-      const entries = Array.from(node.children.entries()).sort(([a], [b]) => a.localeCompare(b));
-      for (const [name, child] of entries) {
-        const indent = "  ".repeat(depth);
-        lines.push(`${indent}- ${name}`);
-        if (child.children.size > 0) {
-          traverse(child, depth + 1);
-        }
-      }
-    };
-
-    traverse(root, 0);
-    return lines;
-  }
-
-  private buildMermaidTree(files: ProcessedFileContent[]): string[] {
-    type TreeNode = { name: string; children: Map<string, TreeNode> };
-
-    const root: TreeNode = { name: "Workspace", children: new Map() };
-
-    for (const file of files) {
-      const segments = file.relativePath.split(/\\|\//);
-      let current = root;
-      for (const segment of segments) {
-        if (!current.children.has(segment)) {
-          current.children.set(segment, { name: segment, children: new Map() });
-        }
-        current = current.children.get(segment)!;
-      }
-    }
-
-    const lines: string[] = ["root[\"Workspace\"]"];
-
-    const slugify = (value: string): string =>
-      value
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "_")
-        .replace(/^_+|_+$/g, "") || "node";
-
-    const traverse = (node: TreeNode, parentId: string) => {
-      const entries = Array.from(node.children.values()).sort((a, b) => a.name.localeCompare(b.name));
-      entries.forEach((child, index) => {
-        const childId = `${parentId}_${slugify(child.name)}_${index}`;
-        const escapedLabel = child.name.replace(/\"/g, '\\"');
-        lines.push(`${childId}[\"${escapedLabel}\"]`);
-        lines.push(`${parentId} --> ${childId}`);
-        traverse(child, childId);
-      });
-    };
-
-    traverse(root, "root");
-
-    return lines;
-  }
 }

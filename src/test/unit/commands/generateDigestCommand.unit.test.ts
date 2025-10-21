@@ -1,3 +1,4 @@
+import { minimatch } from "minimatch";
 import { afterEach, beforeEach, describe, expect, it, jest } from "@jest/globals";
 import * as vscode from "vscode";
 
@@ -16,9 +17,109 @@ jest.mock("../../../services/digestGenerator", () => ({
   }))
 }));
 
-jest.mock("../../../services/filterService", () => ({
-  FilterService: jest.fn().mockImplementation(() => ({}))
-}));
+const filterServiceInstances: Array<{ batchFilter: jest.Mock; compilePattern: jest.Mock }> = [];
+
+const toRelativePath = (absolutePath: string): string => {
+  const normalized = absolutePath.replace(/\\/g, "/");
+  const marker = "/workspace/";
+  const index = normalized.indexOf(marker);
+  if (index >= 0) {
+    return normalized.slice(index + marker.length);
+  }
+  return normalized.startsWith("/") ? normalized.slice(1) : normalized;
+};
+
+const normalizePattern = (pattern: string): string | null => {
+  if (typeof pattern !== "string") {
+    return null;
+  }
+  const trimmed = pattern.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  return trimmed.replace(/\\/g, "/").replace(/^\.\//, "");
+};
+
+jest.mock("../../../services/filterService", () => {
+  const FilterService = jest.fn().mockImplementation(() => {
+    const instance = {
+      batchFilter: jest
+        .fn(async (paths: string[], options: { includePatterns?: string[]; excludePatterns?: string[] } = {}) => {
+          const result = new Map<string, { included: boolean; reason: "included" | "excluded" | "gitignored" | "depth-limit" | "symlink-skipped"; matchedPattern?: string }>();
+          const includeMatchers: Array<{ source: string; matcher: (candidate: string) => boolean }> = Array.isArray(options.includePatterns)
+            ? options.includePatterns
+                .map((pattern) => {
+                  const normalized = normalizePattern(pattern);
+                  if (!normalized) {
+                    return null;
+                  }
+                  return {
+                    source: pattern,
+                    matcher: (candidate: string) => minimatch(candidate, normalized, { dot: true })
+                  };
+                })
+                .filter(
+                  (entry): entry is { source: string; matcher: (candidate: string) => boolean } =>
+                    Boolean(entry)
+                )
+            : [];
+          const excludeMatchers: Array<{ source: string; matcher: (candidate: string) => boolean }> = Array.isArray(options.excludePatterns)
+            ? options.excludePatterns
+                .map((pattern) => {
+                  const normalized = normalizePattern(pattern);
+                  if (!normalized) {
+                    return null;
+                  }
+                  return {
+                    source: pattern,
+                    matcher: (candidate: string) => minimatch(candidate, normalized, { dot: true })
+                  };
+                })
+                .filter(
+                  (entry): entry is { source: string; matcher: (candidate: string) => boolean } =>
+                    Boolean(entry)
+                )
+            : [];
+
+          for (const filePath of paths) {
+            const relativePath = toRelativePath(filePath);
+            if (filePath.includes("__filtered__")) {
+              result.set(filePath, { included: false, reason: "excluded", matchedPattern: "filters/__filtered__" });
+              continue;
+            }
+
+            const matchesInclude = includeMatchers.length === 0 || includeMatchers.some((entry) => entry.matcher(relativePath));
+            if (!matchesInclude) {
+              const matchedPattern = includeMatchers[0]?.source ?? "include";
+              result.set(filePath, { included: false, reason: "excluded", matchedPattern });
+              continue;
+            }
+
+            const matchesExclude = excludeMatchers.some((entry) => entry.matcher(relativePath));
+            if (matchesExclude) {
+              const matchedPattern = excludeMatchers.find((entry) => entry.matcher(relativePath))?.source ?? "exclude";
+              result.set(filePath, { included: false, reason: "excluded", matchedPattern });
+              continue;
+            }
+            result.set(filePath, { included: true, reason: "included" });
+          }
+          return result;
+        }) as unknown as jest.Mock,
+      compilePattern: jest.fn(() => ({ matcher: jest.fn(() => false), source: "" })) as unknown as jest.Mock
+    } satisfies { batchFilter: jest.Mock; compilePattern: jest.Mock };
+    filterServiceInstances.push(instance);
+    return instance;
+  });
+
+  return {
+    FilterService,
+    __getFilterServiceInstances: () => filterServiceInstances
+  };
+});
+const filterServiceModule = jest.requireMock("../../../services/filterService") as {
+  FilterService: jest.Mock;
+  __getFilterServiceInstances: () => Array<{ batchFilter: jest.Mock; compilePattern: jest.Mock }>;
+};
 
 jest.mock("../../../services/contentProcessor", () => ({
   ContentProcessor: jest.fn().mockImplementation(() => ({}))
@@ -37,7 +138,11 @@ jest.mock("../../../services/notebookProcessor", () => ({
 }));
 
 jest.mock("../../../formatters/factory", () => ({
-  createFormatter: jest.fn(() => ({ finalize: jest.fn(() => "formatted") }))
+  createFormatter: jest.fn(() => ({
+    finalize: jest.fn(() => "formatted"),
+    supportsStreaming: jest.fn(() => false),
+    streamSectionsAsync: jest.fn()
+  }))
 }));
 
 const { createFormatter: createFormatterMock } = jest.requireMock("../../../formatters/factory") as {
@@ -97,6 +202,10 @@ describe("registerGenerateDigestCommand", () => {
   const withProgressMock = vscode.window.withProgress as unknown as jest.MockedFunction<typeof vscode.window.withProgress>;
 
   beforeEach(() => {
+    filterServiceModule.FilterService.mockClear();
+    const recordedInstances = filterServiceModule.__getFilterServiceInstances();
+    recordedInstances.splice(0, recordedInstances.length);
+
     generateDigestTesting.clearInFlightDigests();
     workspaceSelection = [];
     generateDigestMock.mockReset();
@@ -145,6 +254,7 @@ describe("registerGenerateDigestCommand", () => {
         getSelection: jest.fn(() => workspaceSelection),
         setSelection: setSelectionMock,
         withSelectionLock: jest.fn(async (operation: () => unknown) => operation()),
+        awaitSelectionSnapshot: jest.fn(async () => workspaceSelection),
         waitForSelectionIdle: jest.fn(async () => undefined),
         getRedactionOverride: jest.fn(() => false),
         setRedactionOverride: jest.fn()
@@ -205,7 +315,8 @@ describe("registerGenerateDigestCommand", () => {
             writeTime: 5,
             target: { type: "file", path: "/workspace/digest.md" }
           };
-        })
+        }),
+        writeStream: jest.fn()
       }
     };
   };
@@ -258,6 +369,17 @@ describe("registerGenerateDigestCommand", () => {
       return state?.status === "digest-writing";
     });
     expect(hasWritingStatus).toBe(true);
+
+    const updatePreviewCall = sendCommandMock.mock.calls.find((call) => call[0] === COMMAND_MAP.HOST_TO_WEBVIEW.UPDATE_PREVIEW);
+    expect(updatePreviewCall).toBeDefined();
+    const updatePreviewPayload = updatePreviewCall?.[1] as {
+      content?: string;
+      previewId?: string;
+      tokenCount?: { total?: number };
+    } | undefined;
+    expect(updatePreviewPayload?.content).toBe("formatted");
+    expect(updatePreviewPayload?.previewId).toMatch(/^preview-/);
+    expect(updatePreviewPayload?.tokenCount?.total).toBe(digestResult.statistics.totalTokens);
   });
 
   it("drops missing files and aborts when none remain", async () => {
@@ -287,6 +409,81 @@ describe("registerGenerateDigestCommand", () => {
       }
     );
     expect(workspaceSelection).toEqual([]);
+  });
+
+  it("filters the selection using the FilterService before generating", async () => {
+    const services = buildServices();
+    const handler = registerAndGetHandler(services);
+
+    const digestResult = createDigestResult();
+    generateDigestMock.mockResolvedValueOnce(digestResult);
+
+    await handler({ selectedFiles: ["src/keep.ts", "src/__filtered__/skip.ts"] });
+
+    const warningMessages = showWarningMessageMock.mock.calls.map(([message]) => message);
+    expect(warningMessages).toContain("Code Ingest: Skipped 1 selected file due to current filters.");
+
+    // First call sets the initial selection; the latest call should reflect the filtered selection.
+    const latestSelection = setSelectionMock.mock.calls[setSelectionMock.mock.calls.length - 1]?.[0] as string[];
+    expect(latestSelection).toEqual(["src/keep.ts"]);
+    expect(workspaceSelection).toEqual(["src/keep.ts"]);
+
+    expect(generateDigestMock).toHaveBeenCalledTimes(1);
+    const options = generateDigestMock.mock.calls[0][0] as { selectedFiles: string[] };
+    expect(options.selectedFiles).toHaveLength(1);
+    expect(options.selectedFiles[0]).toContain("keep.ts");
+  });
+
+  it("rejects runs when filters exclude the entire selection and recovers once include patterns broaden", async () => {
+    const services = buildServices();
+    const handler = registerAndGetHandler(services);
+
+    const baseConfig = services.configurationService.getConfig();
+    const restrictedConfig = {
+      ...baseConfig,
+      include: ["docs/**"],
+      exclude: []
+    } as typeof baseConfig;
+    services.configurationService.getConfig.mockReset();
+    const configSequence: Array<typeof baseConfig> = [restrictedConfig];
+    services.configurationService.getConfig.mockImplementation(() => {
+      const nextConfig = configSequence.shift();
+      return nextConfig ?? { ...baseConfig };
+    });
+
+    await expect(handler({ selectedFiles: ["src/index.ts"] })).rejects.toMatchObject({
+      message: "All selected files are excluded by the current include/exclude or gitignore settings.",
+      handledByHost: true
+    });
+
+    const diagnosticMessages = (services.diagnostics.add as jest.Mock).mock.calls.map(([message]) => String(message));
+    expect(diagnosticMessages.some((message) => message.includes("Selection filtering: skipped 1 selected file"))).toBe(true);
+    expect(diagnosticMessages.some((message) => message.includes("Digest request rejected: All selected files are excluded"))).toBe(true);
+
+    expect(showWarningMessageMock).toHaveBeenCalledWith(
+      "Code Ingest: Skipped 1 selected file due to current filters."
+    );
+    const errorCall = sendCommandMock.mock.calls.find((call) => call[0] === COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR);
+    expect(errorCall?.[1]).toMatchObject({
+      title: "No files available",
+      message: "All selected files are excluded by the current include/exclude or gitignore settings."
+    });
+    expect(generateDigestMock).not.toHaveBeenCalled();
+
+    showWarningMessageMock.mockClear();
+    sendCommandMock.mockClear();
+    (services.diagnostics.add as jest.Mock).mockClear();
+    generateDigestMock.mockReset();
+
+    const digestResult = createDigestResult();
+    generateDigestMock.mockResolvedValueOnce(digestResult);
+
+    await expect(handler({ selectedFiles: ["src/index.ts"] })).resolves.toBeUndefined();
+
+    expect(generateDigestMock).toHaveBeenCalledTimes(1);
+    expect(showWarningMessageMock).not.toHaveBeenCalled();
+    const successDiagnostics = (services.diagnostics.add as jest.Mock).mock.calls.map(([message]) => String(message));
+    expect(successDiagnostics.some((message) => message.includes("Digest preview prepared"))).toBe(true);
   });
 
   it("reuses in-flight digest runs for duplicate host invocations", async () => {

@@ -1,4 +1,6 @@
 import type { DigestMetadata, DigestResult, DigestSummary, ProcessedFileContent } from "../services/digestGenerator";
+import type { FormatterMetadataView, FormatterStatisticsView, FormatterSummaryView } from "./base/sectionModels";
+import type { FileTreeView } from "./base/fileTreeBuilder";
 
 export type DigestStatistics = DigestResult["statistics"];
 
@@ -45,10 +47,14 @@ export interface FormatterTemplateSet {
 
 export interface TemplateVariables {
   metadata?: DigestMetadata;
+  metadataView?: FormatterMetadataView;
   summary?: DigestSummary;
+  summaryView?: FormatterSummaryView;
   file?: ProcessedFileContent;
   statistics?: DigestStatistics;
+  statisticsView?: FormatterStatisticsView;
   digest?: DigestResult;
+  fileTreeView?: FileTreeView;
   [key: string]: unknown;
 }
 

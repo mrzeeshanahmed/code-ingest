@@ -38,8 +38,8 @@ export interface Diagnostics {
   addWarning?(message: string): void;
 }
 
-const DEFAULT_INCLUDE = ["src"];
-const DEFAULT_EXCLUDE = ["node_modules", "dist", "out"];
+const DEFAULT_INCLUDE = ["**/*"];
+const DEFAULT_EXCLUDE = ["node_modules/**", "dist/**", "out/**"];
 const DEFAULT_MAX_DEPTH = 5;
 const DEFAULT_MAX_FILES = 1000;
 const DEFAULT_REPO_NAME = "workspace";
@@ -60,37 +60,72 @@ function normalizeStringArray(
   field: keyof Pick<DigestConfig, "include" | "exclude">,
   diagnostics: Diagnostics
 ): string[] {
-  if (Array.isArray(value)) {
-    const sanitized = value
-      .filter((entry) => {
-        const isString = typeof entry === "string";
-        if (!isString && diagnostics) {
+  const normalizePatterns = (patterns: string[], source: "user" | "fallback"): string[] => {
+    const normalized: string[] = [];
+    const seen = new Set<string>();
+    let duplicateDetected = false;
+
+    for (const candidate of patterns) {
+      if (typeof candidate !== "string") {
+        if (source === "user") {
           diagnostics.addError(`Configuration field "${String(field)}" must contain only strings.`);
         }
-        return isString;
-      })
-      .map((entry) => entry.trim())
-      .filter((entry) => entry.length > 0);
-
-    if (sanitized.length === 0) {
-      if (diagnostics) {
-        diagnostics.addError(`Configuration field "${String(field)}" must contain at least one non-empty string.`);
+        continue;
       }
-      return [...fallback];
+
+      const trimmed = candidate.trim();
+      if (trimmed.length === 0) {
+        if (source === "user") {
+          diagnostics.addError(`Configuration field "${String(field)}" must contain non-empty strings.`);
+        }
+        continue;
+      }
+
+      const normalizedPattern = trimmed.replace(/\\/g, "/");
+      if (seen.has(normalizedPattern)) {
+        duplicateDetected = true;
+        continue;
+      }
+      seen.add(normalizedPattern);
+      normalized.push(normalizedPattern);
     }
 
+    if (duplicateDetected && source === "user") {
+      diagnostics.addWarning?.(
+        `Configuration field "${String(field)}" contains duplicate entries that were ignored.`
+      );
+    }
+
+    return normalized;
+  };
+
+  if (Array.isArray(value)) {
+    const sanitized = normalizePatterns(value as string[], "user");
+    if (sanitized.length === 0) {
+      diagnostics.addError(
+        `Configuration field "${String(field)}" must include at least one valid pattern; using defaults.`
+      );
+      return normalizePatterns(fallback, "fallback");
+    }
     return sanitized;
   }
 
-  if (typeof value === "string" && value.trim().length > 0) {
-    return [value.trim()];
+  if (typeof value === "string") {
+    const normalized = normalizePatterns([value], "user");
+    if (normalized.length === 0) {
+      diagnostics.addError(
+        `Configuration field "${String(field)}" must be a non-empty string or array of strings.`
+      );
+      return normalizePatterns(fallback, "fallback");
+    }
+    return normalized;
   }
 
-  if (value != null && diagnostics) {
+  if (value != null) {
     diagnostics.addError(`Configuration field "${String(field)}" must be an array of strings.`);
   }
 
-  return [...fallback];
+  return normalizePatterns(fallback, "fallback");
 }
 
 /* coerceMaxDepth removed in favor of the generic coercePositiveInteger helper */

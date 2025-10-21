@@ -1,6 +1,10 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 
+import { FilterService, type FilterOptions, type FilterResult } from "./filterService";
+import { createSkipStatsMap, recordSkip, recordFilterOutcome, buildSkipMessages, type SkipStatsMap } from "./filterDiagnostics";
+import { DEFAULT_CONFIG } from "../config/constants";
+import type { DigestConfig } from "../utils/validateConfig";
 import type { Diagnostics } from "./diagnostics";
 import type { GitignoreService } from "./gitignoreService";
 
@@ -22,6 +26,7 @@ interface WorkspaceManagerOptions {
   skipHidden?: boolean;
   excludedDirectories?: string[];
   redactionOverride?: boolean;
+  loadConfiguration?: () => DigestConfig;
 }
 
 interface BuildContext {
@@ -30,6 +35,7 @@ interface BuildContext {
   filePaths: Set<string>;
   directoryDepths: Map<string, number>;
   warnings: string[];
+  skipStats: SkipStatsMap;
 }
 
 export interface WorkspaceStateSnapshot {
@@ -48,6 +54,23 @@ const DEFAULT_MAX_ENTRIES = 2_000;
 const DEFAULT_AUTO_EXPAND_DEPTH = 1;
 const DEFAULT_EXCLUDED_DIRECTORIES = [".git", "node_modules", "dist", "out", "coverage", "tmp", "temp"];
 const BULK_SELECTION_CHUNK_SIZE = 400;
+interface FilterRuntime {
+  service: FilterService;
+  options: FilterOptions;
+  excludeMatchers: Array<ReturnType<FilterService["compilePattern"]>>;
+  maxDepth?: number;
+  followSymlinks: boolean;
+  useGitignore: boolean;
+}
+
+interface EntryMetadata {
+  name: string;
+  relPath: string;
+  uri: vscode.Uri;
+  isDirectory: boolean;
+  isFile: boolean;
+  isSymlink: boolean;
+}
 
 function toPosix(relativePath: string): string {
   return relativePath.split(path.sep).join("/");
@@ -58,6 +81,7 @@ export class WorkspaceManager {
   private readonly autoExpandDepth: number;
   private readonly skipHidden: boolean;
   private readonly excludedDirectories: Set<string>;
+  private readonly loadConfiguration: (() => DigestConfig) | undefined;
 
   private rootUri: vscode.Uri | undefined;
   private tree: WorkspaceTreeNode[] = [];
@@ -68,6 +92,7 @@ export class WorkspaceManager {
   private lastScanId = "";
   private redactionOverride: boolean;
   private selectionLock: Promise<void> = Promise.resolve();
+  private knownFiles = new Set<string>();
 
   constructor(
     private readonly diagnostics: Diagnostics,
@@ -81,6 +106,7 @@ export class WorkspaceManager {
       (options.excludedDirectories ?? DEFAULT_EXCLUDED_DIRECTORIES).map((dir) => dir.trim()).filter(Boolean)
     );
     this.redactionOverride = Boolean(options.redactionOverride);
+    this.loadConfiguration = options.loadConfiguration;
   }
 
   async initialize(): Promise<void> {
@@ -160,23 +186,32 @@ export class WorkspaceManager {
         this.warnings = ["No workspace folder available."];
         this.totalFiles = 0;
         this.lastScanId = `scan-${Date.now()}`;
+        this.knownFiles.clear();
         return this.getStateSnapshot();
       }
     }
 
+    const configSnapshot = this.resolveConfiguration();
+    const runtime = this.createFilterRuntime(configSnapshot, this.rootUri!);
     const context: BuildContext = {
       count: 0,
       truncated: false,
       filePaths: new Set<string>(),
       directoryDepths: new Map<string, number>(),
-      warnings: []
+      warnings: [],
+      skipStats: createSkipStatsMap()
     };
 
     try {
-      const nodes = await this.buildDirectory(this.rootUri!, 0, context);
+      const nodes = await this.buildDirectory(this.rootUri!, 0, context, runtime);
       this.tree = nodes;
-      this.totalFiles = context.filePaths.size;
-      this.warnings = context.warnings;
+      this.knownFiles = context.filePaths;
+      this.totalFiles = this.knownFiles.size;
+      const skipWarnings = buildSkipMessages(context.skipStats, {
+        followSymlinks: runtime.followSymlinks,
+        ...(typeof runtime.maxDepth === "number" ? { maxDepth: runtime.maxDepth } : {})
+      });
+      this.warnings = [...context.warnings, ...skipWarnings];
       if (context.truncated) {
         this.warnings.push(
           `Tree truncated after ${this.maxEntries} entries. Use filters or includes to narrow scope.`
@@ -198,7 +233,7 @@ export class WorkspaceManager {
       // Discard selection entries that no longer exist
       const retained = new Set<string>();
       for (const relPath of this.selection) {
-        if (context.filePaths.has(relPath)) {
+        if (this.knownFiles.has(relPath)) {
           retained.add(relPath);
         }
       }
@@ -215,6 +250,7 @@ export class WorkspaceManager {
       this.warnings = [`Failed to scan workspace: ${message}`];
       this.totalFiles = 0;
       this.lastScanId = `scan-${Date.now()}`;
+      this.knownFiles.clear();
     }
 
     return this.getStateSnapshot();
@@ -222,6 +258,9 @@ export class WorkspaceManager {
 
   updateSelection(filePath: string, selected: boolean): void {
     if (typeof filePath !== "string" || filePath.length === 0) {
+      return;
+    }
+    if (!this.knownFiles.has(filePath)) {
       return;
     }
     if (selected) {
@@ -233,13 +272,28 @@ export class WorkspaceManager {
 
   setSelection(paths: Iterable<string>): string[] {
     const next = new Set<string>();
+    let requested = 0;
     for (const relPath of paths) {
-      if (typeof relPath === "string" && relPath.length > 0) {
+      if (typeof relPath !== "string" || relPath.length === 0) {
+        continue;
+      }
+      requested += 1;
+      if (this.knownFiles.has(relPath)) {
         next.add(relPath);
       }
     }
+    if (requested > next.size) {
+      const dropped = requested - next.size;
+      this.diagnostics.add(
+        `Ignored ${dropped} selection ${dropped === 1 ? "entry" : "entries"} not present in the current tree.`
+      );
+    }
     this.selection = next;
     return this.getSelection();
+  }
+
+  async awaitSelectionSnapshot(): Promise<string[]> {
+    return this.withSelectionLock(() => this.getSelection());
   }
 
   async selectAll(onProgress?: (processed: number, total: number) => void): Promise<string[]> {
@@ -304,9 +358,88 @@ export class WorkspaceManager {
     return this.redactionOverride;
   }
 
-  private async buildDirectory(uri: vscode.Uri, depth: number, context: BuildContext): Promise<WorkspaceTreeNode[]> {
+  private resolveConfiguration(): DigestConfig {
+    const snapshot = this.loadConfiguration?.() ?? DEFAULT_CONFIG;
+    const defaultInclude = Array.isArray(DEFAULT_CONFIG.include) && DEFAULT_CONFIG.include.length > 0
+      ? DEFAULT_CONFIG.include
+      : ["**/*"];
+    const defaultExclude = Array.isArray(DEFAULT_CONFIG.exclude) && DEFAULT_CONFIG.exclude.length > 0
+      ? DEFAULT_CONFIG.exclude
+      : [];
+
+    const include = Array.isArray(snapshot.include) && snapshot.include.length > 0
+      ? [...snapshot.include]
+      : [...defaultInclude];
+    const exclude = Array.isArray(snapshot.exclude) && snapshot.exclude.length > 0
+      ? [...snapshot.exclude]
+      : [...defaultExclude];
+
+    return {
+      ...snapshot,
+      include,
+      exclude
+    } satisfies DigestConfig;
+  }
+
+  private createFilterRuntime(config: DigestConfig, rootUri: vscode.Uri): FilterRuntime {
+    const include = Array.isArray(config.include) && config.include.length > 0
+      ? [...config.include]
+      : [...(DEFAULT_CONFIG.include ?? ["**/*"])];
+    const exclude = Array.isArray(config.exclude) && config.exclude.length > 0
+      ? [...config.exclude]
+      : [...(DEFAULT_CONFIG.exclude ?? [])];
+    const followSymlinks = config.followSymlinks === true;
+    const useGitignore = config.respectGitIgnore !== false;
+    const maxDepth = typeof config.maxDepth === "number" && Number.isFinite(config.maxDepth)
+      ? Math.max(0, Math.floor(config.maxDepth))
+      : undefined;
+
+    const options: FilterOptions = {
+      includePatterns: include,
+      excludePatterns: exclude,
+      followSymlinks,
+      useGitignore,
+      ...(typeof maxDepth === "number" ? { maxDepth } : {})
+    };
+
+    const service = new FilterService({
+      workspaceRoot: rootUri.fsPath,
+      gitignoreService: this.gitignoreService,
+      loadConfiguration: () => ({
+        includePatterns: include,
+        excludePatterns: exclude,
+        followSymlinks,
+        respectGitignore: useGitignore,
+        ...(typeof maxDepth === "number" ? { maxDepth } : {})
+      })
+    });
+
+    const excludeMatchers = exclude.map((pattern) => service.compilePattern(pattern, "exclude"));
+
+    const runtime: FilterRuntime = {
+      service,
+      options,
+      excludeMatchers,
+      followSymlinks,
+      useGitignore,
+      ...(typeof maxDepth === "number" ? { maxDepth } : {})
+    };
+
+    return runtime;
+  }
+
+  private async buildDirectory(
+    uri: vscode.Uri,
+    depth: number,
+    context: BuildContext,
+    runtime: FilterRuntime
+  ): Promise<WorkspaceTreeNode[]> {
     if (context.count >= this.maxEntries) {
       context.truncated = true;
+      return [];
+    }
+
+    if (runtime.maxDepth !== undefined && depth > runtime.maxDepth) {
       return [];
     }
 
@@ -321,13 +454,8 @@ export class WorkspaceManager {
 
     entries.sort((a, b) => a[0].localeCompare(b[0], undefined, { sensitivity: "base" }));
 
-    const nodes: WorkspaceTreeNode[] = [];
+    const metadata: EntryMetadata[] = [];
     for (const [name, fileType] of entries) {
-      if (context.count >= this.maxEntries) {
-        context.truncated = true;
-        break;
-      }
-
       if (this.skipHidden && name.startsWith(".")) {
         continue;
       }
@@ -341,20 +469,83 @@ export class WorkspaceManager {
         continue;
       }
 
-      if (await this.gitignoreService.isIgnored(childUri.fsPath)) {
+      const isDirectory = Boolean(fileType & vscode.FileType.Directory);
+      const isFile = Boolean(fileType & vscode.FileType.File);
+      const isSymlink = Boolean(fileType & vscode.FileType.SymbolicLink);
+
+      if (!isDirectory && !isFile) {
         continue;
       }
 
-      const isDirectory = Boolean(fileType & vscode.FileType.Directory);
-      const isFile = Boolean(fileType & vscode.FileType.File);
+      metadata.push({
+        name,
+        relPath,
+        uri: childUri,
+        isDirectory,
+        isFile,
+        isSymlink
+      });
+    }
 
-      if (isDirectory) {
-        context.directoryDepths.set(relPath, depth);
-        const children = await this.buildDirectory(childUri, depth + 1, context);
+    const fileEntries = metadata.filter((entry) => entry.isFile);
+    let fileResults: Map<string, FilterResult> | undefined;
+    if (fileEntries.length > 0) {
+      try {
+        const filePaths = fileEntries.map((entry) => entry.uri.fsPath);
+        fileResults = await runtime.service.batchFilter(filePaths, runtime.options);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        context.warnings.push(`Failed to evaluate filters for ${uri.fsPath}: ${message}`);
+      }
+    }
+
+    const nodes: WorkspaceTreeNode[] = [];
+
+    for (const entry of metadata) {
+      if (context.count >= this.maxEntries) {
+        context.truncated = true;
+        break;
+      }
+
+      if (entry.isDirectory) {
+        if (!runtime.followSymlinks && entry.isSymlink) {
+          recordSkip(context.skipStats, "symlink", entry.relPath);
+          continue;
+        }
+
+        if (runtime.maxDepth !== undefined && depth + 1 > runtime.maxDepth) {
+          recordSkip(context.skipStats, "depth", entry.relPath);
+          continue;
+        }
+
+        if (runtime.useGitignore) {
+          try {
+            if (await this.gitignoreService.isIgnored(entry.uri.fsPath)) {
+              recordSkip(context.skipStats, "gitignore", entry.relPath);
+              continue;
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            context.warnings.push(`Gitignore check failed for ${entry.uri.fsPath}: ${message}`);
+          }
+        }
+
+        const excludeMatch = runtime.excludeMatchers.find((pattern) => pattern.matcher(entry.relPath, true));
+        if (excludeMatch) {
+          recordSkip(context.skipStats, "exclude", entry.relPath, excludeMatch.source);
+          continue;
+        }
+
+        const children = await this.buildDirectory(entry.uri, depth + 1, context, runtime);
+        if (children.length === 0) {
+          continue;
+        }
+
+        context.directoryDepths.set(entry.relPath, depth);
         const node: WorkspaceTreeNode = {
-          uri: childUri.toString(),
-          name,
-          relPath,
+          uri: entry.uri.toString(),
+          name: entry.name,
+          relPath: entry.relPath,
           type: "directory",
           children,
           childCount: children.length
@@ -364,20 +555,35 @@ export class WorkspaceManager {
         continue;
       }
 
-      if (isFile) {
-        const stat = await this.safeStat(childUri);
-        const size = stat?.size;
-        context.filePaths.add(relPath);
-        const fileNode: WorkspaceTreeNode = {
-          uri: childUri.toString(),
-          name,
-          relPath,
-          type: "file"
-        };
-        if (typeof size === "number") {
-          fileNode.size = size;
+      if (entry.isFile) {
+        if (!runtime.followSymlinks && entry.isSymlink) {
+          recordSkip(context.skipStats, "symlink", entry.relPath);
+          continue;
         }
-        nodes.push(fileNode);
+
+        const hasFilterResults = Boolean(fileResults);
+        const result = fileResults?.get(entry.uri.fsPath);
+        if (hasFilterResults) {
+          if (!result) {
+            recordSkip(context.skipStats, "include", entry.relPath);
+            continue;
+          }
+          if (!result.included) {
+            recordFilterOutcome(context.skipStats, entry.relPath, result);
+            continue;
+          }
+        }
+
+        context.filePaths.add(entry.relPath);
+        const stat = await this.safeStat(entry.uri);
+        const node: WorkspaceTreeNode = {
+          uri: entry.uri.toString(),
+          name: entry.name,
+          relPath: entry.relPath,
+          type: "file",
+          ...(typeof stat?.size === "number" ? { size: stat.size } : {})
+        };
+        nodes.push(node);
         context.count += 1;
       }
     }

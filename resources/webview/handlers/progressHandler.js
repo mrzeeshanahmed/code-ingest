@@ -37,6 +37,7 @@ export class ProgressHandler extends BaseHandler {
     this.store.setState({
       progress: {
         id: payload.progressId,
+        progressId: payload.progressId,
         phase: payload.phase,
         percent: typeof payload.percent === "number" ? payload.percent : undefined,
         message: payload.message,
@@ -46,6 +47,18 @@ export class ProgressHandler extends BaseHandler {
     });
 
     this.uiRenderer?.updateProgress?.(payload);
+
+    const isSelectionPhase = payload.phase === "select";
+
+    if (isSelectionPhase) {
+      const showOverlay = Boolean(payload.overlayMessage) && payload.cancelled !== true && payload.percent !== 100;
+      if (showOverlay) {
+        this.uiRenderer?.toggleLoadingOverlay?.(true, payload.overlayMessage);
+      } else {
+        this.uiRenderer?.toggleLoadingOverlay?.(false);
+      }
+      return;
+    }
 
     if (payload.overlayMessage || payload.phase === "ingest") {
       const showOverlay = payload.cancelled !== true && payload.percent !== 100;

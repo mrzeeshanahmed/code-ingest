@@ -90,9 +90,9 @@ describe("webview store", () => {
 
     actions.fileTree.setSelection(["a", "b"]);
 
-  const persistedRaw = storage.getItem("code-ingest-webview");
-  expect(persistedRaw).toBeTruthy();
-  const persisted = JSON.parse(persistedRaw);
+    const persistedRaw = storage.getItem("code-ingest-webview");
+    expect(persistedRaw).toBeTruthy();
+    const persisted = JSON.parse(persistedRaw);
     expect(persisted.state.fileTree.selectedFiles).toEqual(["a", "b"]);
 
     const rehydratedStore = createWebviewStore({ enableSync: false, storage });
@@ -100,5 +100,36 @@ describe("webview store", () => {
 
     expect(Array.from(rehydratedState.fileTree.selectedFiles)).toEqual(["a", "b"]);
     expect(rehydratedState.selection).toEqual(["a", "b"]);
+  });
+
+  test("generation preview stores tokenCount objects", () => {
+    const store = createStore();
+    const actions = store.getActions();
+
+    actions.generation.setPreview({ tokenCount: { total: 120, truncated: true } });
+    let state = store.getState();
+    expect(state.generation.preview.tokenCount).toEqual({ total: 120, truncated: true });
+
+    actions.generation.setPreview({ tokenCount: { approx: 115 } });
+    state = store.getState();
+    expect(state.generation.preview.tokenCount).toEqual({ total: 120, truncated: true, approx: 115 });
+
+    actions.generation.setPreview({ tokenCount: null });
+    state = store.getState();
+    expect(state.generation.preview.tokenCount).toBeNull();
+  });
+
+  test("config updates populate summary and sync redaction", () => {
+    const store = createStore();
+    const actions = store.getActions();
+
+    actions.config.update({ include: ["src/**/*.ts"], redactionOverride: true });
+
+    const state = store.getState();
+    expect(state.config.summary).toMatchObject({
+      includeSummary: expect.stringContaining("src"),
+      statusLine: expect.stringContaining("Redaction: Off")
+    });
+    expect(state.generation.redactionOverride).toBe(true);
   });
 });

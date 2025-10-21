@@ -11,6 +11,32 @@ import { registerStateSync } from "./sync.js";
 
 const PERSIST_KEY = "code-ingest-webview";
 
+const coerceTokenCount = (value) => {
+  if (value === null) {
+    return null;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+    return { total: Math.max(0, value) };
+  }
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const normalized = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof raw === "number" && Number.isFinite(raw)) {
+      normalized[key] = key === "total" || key === "approx" ? Math.max(0, raw) : raw;
+      continue;
+    }
+    if (typeof raw === "boolean" || typeof raw === "string") {
+      normalized[key] = raw;
+    }
+  }
+  return Object.keys(normalized).length > 0 ? normalized : null;
+};
+
 const createStorage = (storageImpl) => {
   const storage = storageImpl ?? (typeof window !== "undefined" ? window.localStorage : undefined);
 
@@ -85,7 +111,7 @@ const fromLegacyState = (state) => {
       ...next.generation,
       preview: {
         content: state.preview.content ?? "",
-        tokenCount: state.preview.tokenCount ?? 0,
+        tokenCount: coerceTokenCount(state.preview.tokenCount),
         truncated: Boolean(state.preview.truncated),
         metadata: state.preview.metadata ?? {},
         title: state.preview.title,

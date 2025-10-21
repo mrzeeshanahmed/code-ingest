@@ -47,7 +47,7 @@ export class IngestPreviewHandler extends BaseHandler {
       subtitle: payload.subtitle ?? "Live digest preview",
       content: payload.content ?? "",
       summary: payload.summary ?? "",
-      tokenCount: payload.tokenCount ?? {},
+      tokenCount: payload.tokenCount ?? null,
       truncated: Boolean(payload.truncated),
       format: payload.format ?? "markdown",
       metadata: payload.metadata ?? {}

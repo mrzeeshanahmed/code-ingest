@@ -29,7 +29,7 @@ describe("validateConfig", () => {
     validateConfig(config, collector);
 
     expect(config.include).toEqual(["src"]);
-    expect(config.exclude).toEqual(["node_modules", "dist", "out"]);
+  expect(config.exclude).toEqual(["node_modules/**", "dist/**", "out/**"]);
     expect(errors.length).toBeGreaterThan(0);
   });
 

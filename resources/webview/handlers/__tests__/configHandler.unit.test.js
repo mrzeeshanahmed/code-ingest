@@ -26,8 +26,17 @@ describe("ConfigHandler", () => {
     });
 
     expect(store.getState().config.maxFiles).toBe(200);
+    expect(store.getState().config.summary).toMatchObject({
+      statusLine: expect.any(String),
+      includeSummary: expect.any(String)
+    });
     expect(store.getState().activePreset).toBe("Large");
-    expect(ui.updateConfig).toHaveBeenCalledWith(expect.objectContaining({ preset: "Large" }));
+    expect(ui.updateConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        preset: "Large",
+        summary: expect.objectContaining({ statusLine: expect.any(String) })
+      })
+    );
   });
 
   it("surfaces validation errors to the user", async () => {

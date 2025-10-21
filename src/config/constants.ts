@@ -1,8 +1,8 @@
 import type { DigestConfig } from "../utils/validateConfig";
 
 export const DEFAULT_CONFIG: DigestConfig = {
-  include: ["src"],
-  exclude: ["node_modules", "dist", "out"],
+  include: ["**/*"],
+  exclude: ["node_modules/**", "dist/**", "out/**"],
   maxDepth: 5,
   maxFiles: 1000,
   outputFormat: 'markdown',

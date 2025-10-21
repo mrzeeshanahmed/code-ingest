@@ -182,6 +182,13 @@ Languages: TypeScript, JavaScript, JSON
 ...
 ```
 
+### Formatter Defaults
+- All built-in formatters emit sections in the order: metadata → summary → file tree → file contents → statistics. Disabling a section removes it from the stream but preserves the surrounding order.
+- **Markdown**: uses level-2 headings, Mermaid diagrams for the file graph, collapses files longer than 40 lines, and auto-detects code fence languages (fallback `plaintext`).
+- **JSON**: pretty-prints (`indent=2`) by default, emits schema version `1.0.0`, serializes metadata dates to ISO strings, and respects the streaming mode when `json.stream` is enabled.
+- **Text**: renders ASCII boxes with width 80, label/value columns (18/52 characters), preserves whitespace inside file sections, and omits ANSI color codes unless `text.showColorCodes` is enabled.
+- Templates defined in user presets can override any section. Missing variables resolve to an empty string, so template experiments are safe—validate them with `TemplateEngine#validate` before shipping.
+
 ## Troubleshooting
 
 ### Common Issues

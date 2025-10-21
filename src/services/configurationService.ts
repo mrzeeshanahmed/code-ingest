@@ -16,8 +16,8 @@ export class ConfigurationService {
 
   constructor(initialConfig?: Partial<DigestConfig>, diagnostics?: Diagnostics) {
     this.diagnostics = diagnostics ?? { addError: (m: string) => console.error(m), addWarning: (m: string) => console.warn(m) };
-    // start with a shallow clone of defaults + provided overrides
-    this.config = Object.assign({}, initialConfig) as DigestConfig;
+    const merged = { ...DEFAULT_CONFIG, ...(initialConfig ?? {}) } as DigestConfig;
+    this.config = merged;
   }
 
   /**
@@ -25,9 +25,11 @@ export class ConfigurationService {
    * and currently validates the in-memory `config` object using `validateConfig`.
    */
   loadConfig(): DigestConfig {
-    validateConfig(this.config, this.diagnostics);
-    this.cachedConfig = { ...this.config };
-    return { ...this.cachedConfig };
+    const snapshot = { ...DEFAULT_CONFIG, ...this.config } as DigestConfig;
+    validateConfig(snapshot, this.diagnostics);
+    this.config = { ...snapshot };
+    this.cachedConfig = { ...snapshot };
+    return { ...snapshot };
   }
 
   getConfig(): DigestConfig {

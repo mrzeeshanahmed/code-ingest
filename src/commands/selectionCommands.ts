@@ -109,7 +109,7 @@ export function registerSelectionCommands(
         });
       } else {
         const message = reason === "outside_workspace"
-          ? "The requested item is outside of the current workspace."
+          ? "The requested item is outside the workspace."
           : "Unable to interpret the requested selection.";
         services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
           title: "Invalid selection",

@@ -2,6 +2,8 @@
  * Follow instructions in copilot-instructions.md exactly.
  */
 
+import { buildConfigDisplay } from "../utils/configSummary.js";
+
 const toArray = (value) => {
   if (Array.isArray(value)) {
     return [...value];
@@ -28,11 +30,68 @@ const toSet = (value) => {
   return new Set([value]);
 };
 
+const cloneTokenCount = (value) => {
+  if (value === null) {
+    return null;
+  }
+
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      return null;
+    }
+    return { total: Math.max(0, value) };
+  }
+
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const normalized = {};
+  for (const [key, rawValue] of Object.entries(value)) {
+    if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
+      normalized[key] = key === "total" || key === "approx" ? Math.max(0, rawValue) : rawValue;
+      continue;
+    }
+    if (typeof rawValue === "boolean") {
+      normalized[key] = rawValue;
+      continue;
+    }
+    if (typeof rawValue === "string") {
+      normalized[key] = rawValue;
+    }
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : null;
+};
+
+const normalizeTokenCount = (nextTokenCount, previousTokenCount) => {
+  if (nextTokenCount === null) {
+    return null;
+  }
+
+  const previousNormalized = cloneTokenCount(previousTokenCount);
+
+  if (nextTokenCount === undefined) {
+    return previousNormalized;
+  }
+
+  const nextNormalized = cloneTokenCount(nextTokenCount);
+  if (!nextNormalized) {
+    return previousNormalized;
+  }
+
+  if (!previousNormalized) {
+    return nextNormalized;
+  }
+
+  return { ...previousNormalized, ...nextNormalized };
+};
+
 const mergePreview = (previous, next) => ({
   title: next?.title ?? previous.title ?? "",
   subtitle: next?.subtitle ?? previous.subtitle ?? "",
   content: next?.content ?? previous.content ?? "",
-  tokenCount: typeof next?.tokenCount === "number" ? next.tokenCount : previous.tokenCount ?? 0,
+  tokenCount: normalizeTokenCount(next?.tokenCount, previous.tokenCount),
   truncated: Boolean(next?.truncated ?? previous.truncated),
   metadata: { ...(previous.metadata ?? {}), ...(next?.metadata ?? {}) }
 });
@@ -61,6 +120,23 @@ const mergeNotifications = (existing, patch) => ({
   warnings: patch?.warnings ? [...patch.warnings] : existing.warnings,
   info: patch?.info ? [...patch.info] : existing.info
 });
+
+const applyConfigPatch = (state, patch) => {
+  const baseConfig = state.config ?? {};
+  const merged = { ...baseConfig, ...(patch ?? {}) };
+  const summary = buildConfigDisplay(merged);
+  const nextConfig = { ...merged, summary };
+  const redactionOverride = Boolean(merged.redactionOverride);
+  const currentGeneration = state.generation ?? {};
+  const needsGenerationUpdate = currentGeneration.redactionOverride !== redactionOverride;
+
+  return {
+    config: nextConfig,
+    generation: needsGenerationUpdate
+      ? { ...currentGeneration, redactionOverride }
+      : undefined
+  };
+};
 
 export const createActions = (set, get, api) => {
   const syncLegacyState = (draft) => {
@@ -210,23 +286,32 @@ export const createActions = (set, get, api) => {
     },
 
     config: {
-      update: (patch) => updateState((state) => ({
-        config: { ...state.config, ...(patch ?? {}) },
-        ...(patch && typeof patch.redactionOverride === "boolean"
-          ? {
-              generation: {
-                ...state.generation,
-                redactionOverride: patch.redactionOverride
-              }
-            }
-          : {})
-      }), "config.update"),
-      setRedactionPatterns: (patterns) => updateState((state) => ({
-        config: { ...state.config, redactionPatterns: Array.isArray(patterns) ? [...patterns] : [] }
-      }), "config.setRedactionPatterns"),
-      toggleShowRedacted: () => updateState((state) => ({
-        config: { ...state.config, showRedacted: !state.config.showRedacted }
-      }), "config.toggleShowRedacted")
+      update: (patch) => updateState((state) => {
+        const { config, generation } = applyConfigPatch(state, patch);
+        const nextState = { config };
+        if (generation) {
+          nextState.generation = generation;
+        }
+        return nextState;
+      }, "config.update"),
+      setRedactionPatterns: (patterns) => updateState((state) => {
+        const patch = { redactionPatterns: Array.isArray(patterns) ? [...patterns] : [] };
+        const { config, generation } = applyConfigPatch(state, patch);
+        const nextState = { config };
+        if (generation) {
+          nextState.generation = generation;
+        }
+        return nextState;
+      }, "config.setRedactionPatterns"),
+      toggleShowRedacted: () => updateState((state) => {
+        const patch = { showRedacted: !state.config.showRedacted };
+        const { config, generation } = applyConfigPatch(state, patch);
+        const nextState = { config };
+        if (generation) {
+          nextState.generation = generation;
+        }
+        return nextState;
+      }, "config.toggleShowRedacted")
     },
 
     notifications: {

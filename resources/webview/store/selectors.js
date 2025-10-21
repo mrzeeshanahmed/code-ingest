@@ -2,6 +2,8 @@
  * Follow instructions in copilot-instructions.md exactly.
  */
 
+import { buildConfigDisplay } from "../utils/configSummary.js";
+
 const toFrozenArray = (value) => Object.freeze(Array.isArray(value) ? [...value] : Array.from(value ?? []));
 
 export const selectUi = (state) => state.ui;
@@ -35,6 +37,22 @@ export const selectRemoteRepoBanner = (state) => ({
 });
 
 export const selectConfig = (state) => state.config;
+export const selectConfigSummary = (state) => {
+  const config = state.config ?? {};
+  if (config.summary && typeof config.summary === "object") {
+    return config.summary;
+  }
+  return buildConfigDisplay(config);
+};
+export const selectConfigIncludePatterns = (state) => {
+  const summary = selectConfigSummary(state);
+  return Object.freeze([...(summary?.include ?? [])]);
+};
+export const selectConfigExcludePatterns = (state) => {
+  const summary = selectConfigSummary(state);
+  return Object.freeze([...(summary?.exclude ?? [])]);
+};
+export const selectConfigRedactionOverride = (state) => Boolean(selectConfigSummary(state)?.redactionOverride);
 export const selectDiagnostics = (state) => state.diagnostics;
 
 export const selectLegacySnapshot = (state) => ({
@@ -70,6 +88,10 @@ export const selectors = {
   selectRemoteRepo,
   selectRemoteRepoBanner,
   selectConfig,
+  selectConfigSummary,
+  selectConfigIncludePatterns,
+  selectConfigExcludePatterns,
+  selectConfigRedactionOverride,
   selectDiagnostics,
   selectLegacySnapshot
 };

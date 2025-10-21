@@ -21,7 +21,7 @@ describe("ConfigurationService", () => {
 
     const result = service.loadConfig();
 
-    expect(validateModule.validateConfig).toHaveBeenCalledWith(result, diagnostics);
+  expect(validateModule.validateConfig).toHaveBeenCalledWith(expect.objectContaining(initial), diagnostics);
     expect(result).toMatchObject(initial);
     expect(result).not.toBe(initial);
   });

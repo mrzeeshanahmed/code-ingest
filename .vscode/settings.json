@@ -10,5 +10,13 @@
 	"typescript.tsc.autoDetect": "off",
 	"files.readonlyInclude": {
 		"{**/.c4z/.extsrcs/*.PROTSYM.cbl,**/.c4z/.extsrcs/*.PROTSYM.listing}": true
+	},
+	"files.watcherExclude": {
+		"**/.git/objects/**": true,
+		"**/.git/subtree-cache/**": true,
+		"**/.hg/store/**": true,
+		"**/.git/**": true,
+		"**/node_modules/**": true,
+		"**/.vscode/**": true
 	}
 }

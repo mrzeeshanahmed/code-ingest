@@ -23,6 +23,7 @@ import type { FileNode as ScannerFileNode } from "./fileScanner";
 import type { TokenBudgetOptions, CancelToken, AnalyzeOptions } from "./tokenAnalyzer";
 import type { NotebookProcessingOptions, ProcessedNotebook } from "./notebookProcessor";
 import type { FilterResult } from "./filterService";
+import { createSkipStatsMap, recordFilterOutcome as recordFilterDiagnostic, buildSkipMessages } from "./filterDiagnostics";
 import { FileScanner } from "./fileScanner";
 import { FilterService } from "./filterService";
 import { ContentProcessor } from "./contentProcessor";
@@ -201,7 +202,12 @@ export class DigestGenerator {
       const scannerResult = await this.scanWorkspace(emitProgress, context);
       this.ensureNotCancelled(context.cancellationToken);
 
-      const candidates = await this.filterCandidates(scannerResult.nodes, context, options, emitProgress);
+      const { candidates, warnings: filterWarnings } = await this.filterCandidates(
+        scannerResult.nodes,
+        context,
+        options,
+        emitProgress
+      );
       this.ensureNotCancelled(context.cancellationToken);
       const sortedCandidates = this.sortCandidatesByPriority(candidates);
 
@@ -209,7 +215,8 @@ export class DigestGenerator {
       const truncationByCount = sortedCandidates.length > context.maxFiles;
 
       const processedFiles: ProcessedFileContent[] = [];
-      const warnings: string[] = [];
+  const warnings: string[] = [];
+  warnings.push(...filterWarnings);
       const errors: string[] = [];
 
       let tokensProcessed = 0;
@@ -470,7 +477,7 @@ export class DigestGenerator {
     context: PipelineContext,
     options: DigestOptions,
     emitProgress: ReturnType<typeof DigestGenerator.prototype.createProgressEmitter>
-  ): Promise<FileCandidate[]> {
+  ): Promise<{ candidates: FileCandidate[]; warnings: string[] }> {
     this.ensureNotCancelled(context.cancellationToken);
     const files = nodes.filter((node) => node.type === "file");
     const absolutePaths = files.map((node) => vscode.Uri.parse(node.uri).fsPath);
@@ -479,7 +486,8 @@ export class DigestGenerator {
       includePatterns: context.config.include ?? [],
       excludePatterns: context.config.exclude ?? [],
       useGitignore: context.config.respectGitIgnore ?? true,
-      followSymlinks: context.config.followSymlinks ?? false
+      followSymlinks: context.config.followSymlinks ?? false,
+      ...(typeof context.config.maxDepth === "number" ? { maxDepth: context.config.maxDepth } : {})
     });
 
     const selectedAbsolute = new Set(
@@ -487,12 +495,17 @@ export class DigestGenerator {
     );
 
     const candidates: FileCandidate[] = [];
+    const skipStats = createSkipStatsMap();
 
     files.forEach((node, index) => {
       this.ensureNotCancelled(context.cancellationToken);
       const absolutePath = absolutePaths[index];
       const filterResult = filterResults.get(absolutePath);
+      const relativePathRaw = path.relative(context.workspaceRoot, absolutePath) || path.basename(absolutePath);
+      const normalizedRelativePath = relativePathRaw.split(path.sep).join("/");
+
       if (!this.shouldIncludeFile(filterResult)) {
+        recordFilterDiagnostic(skipStats, normalizedRelativePath, filterResult);
         return;
       }
 
@@ -500,11 +513,9 @@ export class DigestGenerator {
         return;
       }
 
-      const relativePath = path.relative(context.workspaceRoot, absolutePath) || path.basename(absolutePath);
-
       candidates.push({
         absolutePath,
-        relativePath: relativePath.split(path.sep).join("/"),
+        relativePath: normalizedRelativePath,
         scannerNode: node
       });
     });
@@ -515,7 +526,12 @@ export class DigestGenerator {
       tokensProcessed: 0
     });
 
-    return candidates;
+    const warnings = buildSkipMessages(skipStats, {
+      followSymlinks: context.config.followSymlinks ?? false,
+      ...(typeof context.config.maxDepth === "number" ? { maxDepth: context.config.maxDepth } : {})
+    });
+
+    return { candidates, warnings };
   }
 
   private shouldIncludeFile(result: FilterResult | undefined): boolean {

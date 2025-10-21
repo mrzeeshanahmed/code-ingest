@@ -2,12 +2,6 @@ import { BaseFormatter } from "./base/formatter.interface";
 import type { FormatterOptions, FormatterTemplateSet } from "./types";
 import type { DigestMetadata, DigestResult, DigestSummary, ProcessedFileContent } from "../services/digestGenerator";
 
-interface TreeNode {
-  name: string;
-  children: Map<string, TreeNode>;
-  isFile: boolean;
-}
-
 interface RenderSectionOptions {
   readonly preserveSpacing?: boolean;
 }
@@ -22,120 +16,90 @@ export class TextFormatter extends BaseFormatter {
   }
 
   public buildHeader(metadata: DigestMetadata): string {
-    const lines = [
-      this.formatKeyValue("Workspace", metadata.workspaceRoot),
-      this.formatKeyValue("Generated", metadata.generatedAt.toISOString()),
-      this.formatKeyValue("Total files", metadata.totalFiles.toString()),
-      this.formatKeyValue("Included", metadata.includedFiles.toString()),
-      this.formatKeyValue("Skipped", metadata.skippedFiles.toString()),
-      this.formatKeyValue("Binary", metadata.binaryFiles.toString()),
-      this.formatKeyValue("Token estimate", metadata.tokenEstimate.toString()),
-      this.formatKeyValue("Processing time", `${metadata.processingTime} ms`),
-      this.formatKeyValue("Redaction", metadata.redactionApplied ? "yes" : "no"),
-      this.formatKeyValue("Generator", metadata.generatorVersion)
-    ];
+    const metadataView = this.renderMetadata(metadata);
+    const rendered = this.renderSection(
+      "Digest Metadata",
+      metadataView.keyValues.flatMap((entry) => this.formatKeyValue(entry.label, entry.value).split("\n"))
+    );
 
-    return this.renderSection("Digest Metadata", lines.flatMap((line) => line.split("\n")));
+    return this.applyTemplate("header", rendered, {
+      metadata,
+      metadataView
+    });
   }
 
   public buildSummary(summary: DigestSummary): string {
-    const lines = [
-      this.formatKeyValue("Total files", summary.overview.totalFiles.toString()),
-      this.formatKeyValue("Included", summary.overview.includedFiles.toString()),
-      this.formatKeyValue("Skipped", summary.overview.skippedFiles.toString()),
-      this.formatKeyValue("Binary", summary.overview.binaryFiles.toString()),
-      this.formatKeyValue("Tokens", summary.overview.totalTokens.toString())
-    ];
+    const summaryView = this.renderSummary(summary);
+    const lines: string[] = summaryView.overview.map((entry) => this.formatKeyValue(entry.label, entry.value));
 
-    if (summary.tableOfContents.length > 0) {
+    if (summaryView.tableOfContents.length > 0) {
       lines.push("", this.applyLabelStyle("Table of Contents"));
-      summary.tableOfContents.forEach((entry) => {
+      summaryView.tableOfContents.forEach((entry) => {
         const suffix = entry.truncated ? " (truncated)" : "";
         lines.push(`  • ${entry.path} — ${entry.tokens} tokens${suffix}`);
       });
     }
 
-    if (summary.notes.length > 0) {
+    if (summaryView.notes.length > 0) {
       lines.push("", this.applyLabelStyle("Notes"));
-      summary.notes.forEach((note) => lines.push(`  • ${note}`));
+      summaryView.notes.forEach((note) => lines.push(`  • ${note}`));
     }
 
-    return this.renderSection("Summary", lines);
+    const rendered = this.renderSection("Summary", lines);
+    return this.applyTemplate("summary", rendered, {
+      summary,
+      summaryView
+    });
   }
 
   public buildFileTree(files: ProcessedFileContent[]): string {
-    const treeLines = this.buildAsciiTree(files.map((file) => file.relativePath));
-    return this.renderSection("File Tree", treeLines);
+    const treeView = this.getFileTreeView(files, this.getCurrentContext());
+    const rendered = this.renderSection("File Tree", treeView.ascii);
+    return this.applyTemplate("fileTree", rendered, {
+      files,
+      fileTreeView: treeView
+    });
   }
 
   public buildFileContent(file: ProcessedFileContent): string {
     const header = `${file.relativePath} (${file.tokens} tokens${file.truncated ? ", truncated" : ""})`;
     const contentLines = this.truncateContent(file.content).split(/\r?\n/);
-    return this.renderSection(header, contentLines, { preserveSpacing: true });
+    const rendered = this.renderSection(header, contentLines, { preserveSpacing: true });
+    return this.applyTemplate("fileContent", rendered, { file });
   }
 
   public buildFooter(statistics: DigestResult["statistics"]): string {
-    const lines = [
-      this.formatKeyValue("Files processed", statistics.filesProcessed.toString()),
-      this.formatKeyValue("Tokens", statistics.totalTokens.toString()),
-      this.formatKeyValue("Processing time", this.formatDuration(statistics.processingTime)),
-      this.formatKeyValue("Warnings", statistics.warnings.length.toString()),
-      this.formatKeyValue("Errors", statistics.errors.length.toString())
-    ];
+    const statisticsView = this.renderStatistics(statistics);
+    const lines: string[] = statisticsView.keyValues.map((entry) => this.formatKeyValue(entry.label, entry.value));
 
-    if (statistics.warnings.length > 0) {
+    if (statisticsView.warnings.length > 0) {
       lines.push("", this.applyLabelStyle("Warnings"));
-      statistics.warnings.forEach((warning) => lines.push(`  • ${warning}`));
+      statisticsView.warnings.forEach((warning) => lines.push(`  • ${warning}`));
     }
 
-    if (statistics.errors.length > 0) {
+    if (statisticsView.errors.length > 0) {
       lines.push("", this.applyLabelStyle("Errors"));
-      statistics.errors.forEach((error) => lines.push(`  • ${error}`));
+      statisticsView.errors.forEach((error) => lines.push(`  • ${error}`));
     }
 
-    return this.renderSection("Statistics", lines);
+    const rendered = this.renderSection("Statistics", lines);
+    return this.applyTemplate("footer", rendered, {
+      statistics,
+      statisticsView
+    });
   }
 
-  private buildAsciiTree(paths: string[]): string[] {
-    if (paths.length === 0) {
-      return ["<no files>"];
-    }
-
-    const root: TreeNode = { name: "", isFile: false, children: new Map() };
-
-    paths.forEach((relPath) => {
-      const segments = relPath.split(/\\|\//);
-      let current = root;
-      segments.forEach((segment, index) => {
-        const isFile = index === segments.length - 1;
-        if (!current.children.has(segment)) {
-          current.children.set(segment, { name: segment, isFile, children: new Map() });
-        }
-        const node = current.children.get(segment)!;
-        if (isFile) {
-          node.isFile = true;
-        }
-        current = node;
-      });
+  public override finalize(digestResult: DigestResult): string {
+    const output = super.finalize(digestResult);
+    return this.applyTemplate("finalize", output, {
+      digest: digestResult,
+      metadata: digestResult.content.metadata,
+      metadataView: this.renderMetadata(digestResult.content.metadata),
+      summary: digestResult.content.summary,
+      summaryView: this.renderSummary(digestResult.content.summary),
+      statistics: digestResult.statistics,
+      statisticsView: this.renderStatistics(digestResult.statistics)
     });
-
-    const lines: string[] = [];
-
-    const traverse = (node: TreeNode, prefix: string) => {
-      const sorted = Array.from(node.children.values()).sort((a, b) => a.name.localeCompare(b.name));
-      sorted.forEach((child, index) => {
-        const isLast = index === sorted.length - 1;
-        const connector = isLast ? "└──" : "├──";
-        lines.push(`${prefix}${connector} ${child.name}`);
-        const nextPrefix = prefix + (isLast ? "    " : "│   ");
-        if (child.children.size > 0) {
-          traverse(child, nextPrefix);
-        }
-      });
-    };
-
-    traverse(root, "");
-    return lines;
   }
 
   private formatKeyValue(label: string, value: string): string {

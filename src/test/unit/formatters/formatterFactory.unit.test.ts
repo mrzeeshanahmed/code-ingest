@@ -37,6 +37,17 @@ class StubFormatter implements Formatter {
     void _digest;
     return "stub";
   }
+
+  public streamSectionsAsync(_digest: DigestResult): AsyncIterable<string> {
+    void _digest;
+    return (async function* stream() {
+      yield "stub";
+    })();
+  }
+
+  public supportsStreaming(): boolean {
+    return false;
+  }
 }
 
 describe("Formatter factory", () => {
@@ -46,7 +57,7 @@ describe("Formatter factory", () => {
   });
 
   test("registers and unregisters custom formatter", () => {
-  registerFormatter("stub", () => new StubFormatter());
+    registerFormatter("stub", () => new StubFormatter());
 
     const formatter = createFormatter("stub");
     expect(formatter.format).toBe("stub");

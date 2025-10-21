@@ -5,6 +5,7 @@
 import { BaseHandler } from "./base/handlerInterface.js";
 import { createValidator } from "./base/validation.js";
 import { sanitizeRecord } from "../utils/sanitizers.js";
+import { buildConfigDisplay } from "../utils/configSummary.js";
 
 const validatePayload = createValidator({
   type: "object",
@@ -31,18 +32,35 @@ export class ConfigHandler extends BaseHandler {
   }
 
   async handle(payload) {
-    const config = sanitizeRecord(payload.config ?? {});
-    this.store.setState((current) => ({
-      config: { ...current.config, ...config },
-      activePreset: payload.activePreset ?? current.activePreset,
-      presets: payload.presets ?? current.presets
-    }));
-
-    const summary = {
-      ...config,
-      preset: payload.activePreset ?? "Custom"
+    const sanitizedConfig = sanitizeRecord(payload.config ?? {});
+    const currentState = this.store.getState ? this.store.getState() : {};
+    const mergedConfig = {
+      ...(currentState?.config ?? {}),
+      ...sanitizedConfig
     };
-    this.uiRenderer.updateConfig(summary);
+    const activePreset = payload.activePreset ?? currentState?.activePreset ?? "default";
+    mergedConfig.preset = activePreset;
+
+    const display = buildConfigDisplay(mergedConfig);
+    const configWithSummary = { ...mergedConfig, summary: display };
+
+    const nextState = {
+      config: configWithSummary,
+      activePreset,
+      presets: Array.isArray(payload.presets) ? payload.presets : currentState?.presets
+    };
+
+    const redactionOverride = Boolean(mergedConfig.redactionOverride);
+    const currentGeneration = currentState?.generation;
+    if (!currentGeneration || currentGeneration.redactionOverride !== redactionOverride) {
+      nextState.generation = {
+        ...(currentGeneration ?? {}),
+        redactionOverride
+      };
+    }
+
+    this.store.setState(nextState);
+    this.uiRenderer.updateConfig(configWithSummary);
 
     if (payload.validationErrors && payload.validationErrors.length > 0) {
       this.uiRenderer.showRecoverableError({
