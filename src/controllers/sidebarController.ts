@@ -5,7 +5,9 @@
 import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import { ConfigurationService } from "../services/configurationService";
+import { GENERATED_COMMAND_SCHEMAS } from "../config/generatedCommandSchemas";
 import type { ErrorReporter } from "../services/errorReporter";
+import type { JSONSchema } from "../types/jsonSchema";
 import { wrapError } from "../utils/errorHandling";
 
 export interface MessageEnvelope {
@@ -41,20 +43,6 @@ interface ValidationFailure {
   ok: false;
   reason?: string;
   errors?: string[];
-}
-
-export interface JSONSchema {
-  readonly type: "object" | "array" | "string" | "boolean";
-  readonly properties?: Record<string, JSONSchema>;
-  readonly items?: JSONSchema;
-  readonly required?: string[];
-  readonly enum?: readonly string[];
-  readonly pattern?: string;
-  readonly maxItems?: number;
-  readonly maxLength?: number;
-  readonly minLength?: number;
-  readonly additionalProperties?: boolean;
-  readonly default?: unknown;
 }
 
 export interface SecurityValidator {
@@ -110,55 +98,7 @@ export interface CodeIngestWebviewViewProvider {
   getErrorReporter?(): ErrorReporter | undefined;
 }
 
-const COMMAND_SCHEMAS: Record<string, JSONSchema> = {
-  generateDigest: {
-    type: "object",
-    properties: {
-      selectedFiles: {
-        type: "array",
-        items: { type: "string", pattern: "^[^<>:\"|?*\\\\$]+$" },
-        maxItems: 10_000
-      },
-      outputFormat: {
-        type: "string",
-        enum: ["markdown", "json", "text"]
-      },
-      redactionOverride: { type: "boolean" }
-    },
-    required: ["selectedFiles"],
-    additionalProperties: false
-  },
-  updateSelection: {
-    type: "object",
-    properties: {
-      filePath: {
-        type: "string",
-        pattern: "^[^<>:\"|?*\\\\$]+$",
-        maxLength: 1000
-      },
-      selected: { type: "boolean" }
-    },
-    required: ["filePath", "selected"],
-    additionalProperties: false
-  },
-  loadRemoteRepo: {
-    type: "object",
-    properties: {
-      url: {
-        type: "string",
-        pattern: "^https://github\\.com/[\\w\\-.]+/[\\w\\-.]+(?:\\.git)?$",
-        maxLength: 500
-      },
-      ref: {
-        type: "string",
-        pattern: "^[\\w\\-./_]+$",
-        maxLength: 100
-      }
-    },
-    required: ["url"],
-    additionalProperties: false
-  }
-};
+const COMMAND_SCHEMAS: Record<string, JSONSchema> = GENERATED_COMMAND_SCHEMAS;
 
 class MessageValidator implements SecurityValidator {
   private schemas: Map<string, JSONSchema> = new Map();

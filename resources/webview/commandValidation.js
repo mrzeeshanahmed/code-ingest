@@ -2,68 +2,29 @@
  * Follow instructions in copilot-instructions.md exactly.
  */
 
+import { COMMAND_MAP } from "./commandMap.js";
+import { COMMAND_SCHEMA_DEFINITIONS } from "./commandSchemas.js";
 import { createValidator } from "./handlers/base/validation.js";
 
-export const COMMAND_SCHEMAS = {
-  "codeIngest.generateDigest": {
-    type: "object",
-    properties: {
-      selectedFiles: {
-        type: "array",
-        required: true,
-        items: { type: "string", minLength: 1 },
-        maxLength: 5000
-      },
-      outputFormat: {
-        type: "enum",
-        enum: ["markdown", "json", "text"],
-        default: "markdown"
-      },
-      redactionOverride: {
-        type: "boolean",
-        default: false
-      }
-    }
-  },
-  "codeIngest.updateSelection": {
-    type: "object",
-    properties: {
-      filePath: { type: "string", required: true, minLength: 1, maxLength: 4096 },
-      selected: { type: "boolean", required: true }
-    }
-  },
-  "codeIngest.toggleRedactionOverride": {
-    type: "object",
-    properties: {
-      enabled: {
-        type: "boolean"
-      }
-    }
-  },
-  "codeIngest.applyPreset": {
-    type: "object",
-    properties: {
-      presetId: {
-        type: "string",
-        maxLength: 256,
-        default: "default",
-        transform: (value) => (value && value.length > 0 ? value : "default")
-      }
-    }
-  },
-  "codeIngest.loadRemoteRepo": {
-    type: "object",
-    properties: {
-      repoUrl: { type: "string", minLength: 1, maxLength: 2048 },
-      ref: { type: "string", maxLength: 128 },
-      sparsePaths: {
-        type: "array",
-        items: { type: "string", minLength: 1, maxLength: 4096 },
-        maxLength: 200
-      }
-    }
+function deriveSchemaKey(commandId) {
+  if (typeof commandId !== "string") {
+    return undefined;
   }
-};
+  return commandId.startsWith("codeIngest.") ? commandId.slice("codeIngest.".length) : commandId;
+}
+
+function buildSchemaMap(definitions, commandMap) {
+  const entries = Object.values(commandMap.WEBVIEW_TO_HOST ?? {})
+    .map((commandId) => {
+      const key = deriveSchemaKey(commandId);
+      const schema = key ? definitions[key] : undefined;
+      return schema ? [commandId, schema] : null;
+    })
+    .filter(Boolean);
+  return Object.freeze(Object.fromEntries(entries));
+}
+
+export const COMMAND_SCHEMAS = buildSchemaMap(COMMAND_SCHEMA_DEFINITIONS, COMMAND_MAP);
 
 const validatorCache = new Map();
 

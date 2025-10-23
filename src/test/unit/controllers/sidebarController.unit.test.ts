@@ -44,7 +44,7 @@ describe("SidebarController", () => {
 
   beforeEach(() => {
     provider = new MockProvider(session);
-    registry = new MockRegistry(new Set(["generateDigest", "updateSelection"]));
+    registry = new MockRegistry(new Set(["generateDigest", "updateSelection", "loadRemoteRepo"]));
     const configService = new ConfigurationService({ include: ["src"], exclude: ["dist"], maxDepth: 1 });
     controller = new SidebarController(provider, registry, configService, baseOptions);
   });
@@ -112,5 +112,64 @@ describe("SidebarController", () => {
 
     await controller.handleWebviewMessage(response);
     await expect(outboundPromise).resolves.toBeUndefined();
+  });
+
+  test("forwards loadRemoteRepo payload with repoUrl intact", async () => {
+    const repoUrl = "https://github.com/acme/project";
+    const message: MessageEnvelope = {
+      id: "remote-1",
+      type: "command",
+      command: "loadRemoteRepo",
+      payload: {
+        repoUrl,
+        ref: "main",
+        sparsePaths: ["src/app"]
+      },
+      timestamp: Date.now(),
+      token: session.token
+    };
+
+    await controller.handleWebviewMessage(message);
+
+    expect(registry.execute).toHaveBeenCalledWith("loadRemoteRepo", {
+      repoUrl,
+      ref: "main",
+      sparsePaths: ["src/app"]
+    });
+
+    expect(provider.sent).toHaveLength(1);
+    const response = provider.sent[0];
+    expect(response.payload).toMatchObject({ ok: true });
+  });
+
+  test("rejects loadRemoteRepo payloads missing repoUrl", async () => {
+    const message: MessageEnvelope = {
+      id: "remote-2",
+      type: "command",
+      command: "loadRemoteRepo",
+      payload: { url: "https://github.com/acme/project" },
+      timestamp: Date.now(),
+      token: session.token
+    };
+
+    await controller.handleWebviewMessage(message);
+
+    expect(registry.execute).not.toHaveBeenCalledWith("loadRemoteRepo", expect.anything());
+    expect(provider.sent).toHaveLength(2);
+    const validationEvent = provider.sent.find((message) => message.type === "event");
+    expect(validationEvent).toMatchObject({
+      command: "validationError",
+      payload: { message: expect.stringContaining("Invalid request") }
+    });
+
+    const response = provider.sent.find((message) => message.type === "response");
+    expect(response).toMatchObject({
+      command: "loadRemoteRepo",
+      payload: { ok: false }
+    });
+    const responsePayload = response?.payload as { ok?: boolean; reason?: unknown };
+    expect(typeof responsePayload?.reason).toBe("string");
+    expect(String(responsePayload?.reason)).toContain("unexpected property");
+    expect(String(responsePayload?.reason)).toContain("loadRemoteRepo.url");
   });
 });

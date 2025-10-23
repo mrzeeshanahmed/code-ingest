@@ -15,6 +15,7 @@ import { GitignoreService } from "../../services/gitignoreService";
 import { WorkspaceManager } from "../../services/workspaceManager";
 import { DigestGenerator, type DigestResult } from "../../services/digestGenerator";
 import * as formatterFactory from "../../formatters/factory";
+import { SidebarController, type ControllerOptions, type CodeIngestWebviewViewProvider, type CommandRegistry, type MessageEnvelope, type SessionDescriptor } from "../../controllers/sidebarController";
 import { cleanupTempWorkspaces, createTempWorkspace, mockWorkspaceFolders, seedWorkspaceFile } from "../support/integrationUtils";
 import { configureWorkspaceEnvironment } from "../support/workspaceEnvironment";
 
@@ -408,5 +409,90 @@ describe("Phase 5 integration", () => {
     const finalDiagnostics = diagnostics.getAll();
     expect(finalDiagnostics.some((message) => message.includes("Starting remote ingestion"))).toBe(true);
     expect(finalDiagnostics.some((message) => message.includes("Digest generated"))).toBe(true);
+  });
+
+  it("processes loadRemoteRepo messages via SidebarController", async () => {
+    const commandsApi = vscode.commands as unknown as {
+      __getRegisteredCommands(): Map<string, (...args: unknown[]) => unknown>;
+    };
+    const registeredHandlers = commandsApi.__getRegisteredCommands();
+    const session: SessionDescriptor = { id: "webview-session", token: "session-token" };
+
+    class TestProvider implements CodeIngestWebviewViewProvider {
+      public readonly sent: MessageEnvelope[] = [];
+      public constructor(private readonly descriptor: SessionDescriptor) {}
+
+      postMessage(message: MessageEnvelope): Thenable<boolean> {
+        this.sent.push(message);
+        return Promise.resolve(true);
+      }
+
+      getSession(): SessionDescriptor {
+        return this.descriptor;
+      }
+
+      getErrorReporter() {
+        return services.errorReporter;
+      }
+    }
+
+    let forwardedPayload: unknown;
+    const registry: CommandRegistry = {
+      has: (command) => command === "loadRemoteRepo",
+      execute: async (command, payload) => {
+        forwardedPayload = payload === undefined ? undefined : JSON.parse(JSON.stringify(payload));
+        const handler = registeredHandlers.get(COMMAND_MAP.WEBVIEW_TO_HOST.LOAD_REMOTE_REPO);
+        if (!handler) {
+          throw new Error("Remote repository handler not registered");
+        }
+        return handler(payload);
+      }
+    };
+
+    const controllerOptions: ControllerOptions = {
+      enableRateLimit: false,
+      rateLimitWindowMs: 1000,
+      maxRequestsPerWindow: 10,
+      messageTimeoutMs: 5000,
+      enableSchemaValidation: true,
+      enableLogging: false
+    };
+
+    const provider = new TestProvider(session);
+    const controller = new SidebarController(provider, registry, configurationService, controllerOptions);
+
+    const message: MessageEnvelope = {
+      id: "msg-load-remote",
+      type: "command",
+      command: "loadRemoteRepo",
+      payload: {
+        repoUrl: `${REMOTE_REPO_URL} `,
+        ref: "main",
+        sparsePaths: [" pkg "]
+      },
+      timestamp: Date.now(),
+      token: session.token
+    };
+
+    const handlePromise = controller.handleWebviewMessage(message);
+
+    const remoteProgressEvent = await waitForCondition(() =>
+      webviewPanelManager.events.find((event): event is ProgressEvent => isProgressEvent(event) && event.update?.phase === "ingest")
+    );
+    expect(remoteProgressEvent).toBeDefined();
+
+    remoteDigestDeferred.resolve(remoteDigestResult);
+    await handlePromise;
+
+    expect(forwardedPayload).toEqual({
+      repoUrl: REMOTE_REPO_URL,
+      ref: "main",
+      sparsePaths: ["pkg"]
+    });
+
+    expect(provider.sent).toHaveLength(1);
+    const response = provider.sent[0];
+    expect(response.type).toBe("response");
+    expect(response.payload).toMatchObject({ ok: true });
   });
 });

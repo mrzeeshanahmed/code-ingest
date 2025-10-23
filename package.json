@@ -125,6 +125,8 @@
     "build:watch": "webpack --mode development --watch",
     "build:webview": "node scripts/copyWebviewResources.js",
     "copy-webview": "node scripts/copyWebviewResources.js",
+    "sync-command-schemas": "node scripts/syncCommandSchemas.js",
+    "check-command-schemas": "node scripts/syncCommandSchemas.js --check",
     "watch": "npm run build:watch",
   "test": "npm run test:unit && npm run check-handlers-coverage",
     "test:unit": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --testPathPattern=unit --coverage",
@@ -136,11 +138,11 @@
     "check-webview-assets": "node scripts/check-webview-assets.js",
     "check-handlers-coverage": "node scripts/check-handlers-coverage.js",
     "security-audit": "npm audit --audit-level=moderate",
-    "pretest": "npm run build:webview",
+  "pretest": "npm run build:webview && npm run sync-command-schemas",
     "package": "vsce package --out dist/",
     "publish": "vsce publish",
     "prepare-release": "node scripts/prepare-release.js",
-    "ci": "npm run lint && npm run type-check && npm run test:unit && npm run test:integration && npm run check-bundle-size && npm run check-webview-assets && npm run check-handlers-coverage && npm run build"
+    "ci": "npm run lint && npm run type-check && npm run test:unit && npm run test:integration && npm run check-bundle-size && npm run check-webview-assets && npm run check-command-schemas && npm run check-handlers-coverage && npm run build"
   },
   "dependencies": {
     "minimatch": "^9.0.4"
