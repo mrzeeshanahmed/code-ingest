@@ -24,7 +24,8 @@ function buildDigestKey(
   workspaceFsPath: string,
   selection: readonly string[],
   format: string,
-  applyRedaction: boolean
+  applyRedaction: boolean,
+  configFingerprint: string
 ): string {
   const workspaceResolved = path.resolve(workspaceFsPath);
   const normalizedSelection = selection.map((entry) => path.normalize(entry));
@@ -32,7 +33,8 @@ function buildDigestKey(
     workspace: workspaceResolved,
     selection: normalizedSelection,
     format,
-    applyRedaction
+    applyRedaction,
+    fingerprint: configFingerprint
   });
 }
 
@@ -44,11 +46,18 @@ function getInFlightDigestCount(): number {
   return inFlightDigestRuns.size;
 }
 
+function createProgressToken(digestKey: string): string {
+  const hash = createHash("sha1");
+  hash.update(digestKey);
+  return `progress-${hash.digest("hex").slice(0, 32)}`;
+}
+
 function createPreviewId(
   workspaceFsPath: string,
   selection: readonly string[],
   format: string,
-  applyRedaction: boolean
+  applyRedaction: boolean,
+  configFingerprint: string
 ): string {
   const hash = createHash("sha1");
   hash.update(path.resolve(workspaceFsPath));
@@ -59,6 +68,8 @@ function createPreviewId(
   }
   hash.update(format);
   hash.update(applyRedaction ? "1" : "0");
+  hash.update("\n");
+  hash.update(configFingerprint);
   return `preview-${hash.digest("hex").slice(0, 32)}`;
 }
 
@@ -85,6 +96,8 @@ const PROGRESS_PHASE_MAP: Record<GenerationProgress["phase"], "scan" | "filter" 
   formatting: "write",
   complete: "write"
 };
+
+const DIGEST_OPERATION = "digest";
 
 function clampPreview(content: string): { text: string; truncated: boolean } {
   if (content.length <= MAX_PREVIEW_LENGTH) {
@@ -356,95 +369,11 @@ export function registerGenerateDigestCommand(
 
     const workspaceFsPath = workspaceRoot.fsPath;
 
-    let payloadSelection: string[] | undefined;
-    let selectionFromPayload = false;
     const selectionCandidates = payload?.selectedFiles;
-    if (Array.isArray(selectionCandidates)) {
-      selectionFromPayload = true;
-      payloadSelection = normalizeSelectionInput(selectionCandidates, workspaceFsPath);
-    }
+    const preLockSelection = normalizeSelectionInput(services.workspaceManager.getSelection(), workspaceFsPath);
 
-    const preAwaitSelection = normalizeSelectionInput(services.workspaceManager.getSelection(), workspaceFsPath);
-
-    const existingSelectionSnapshot = normalizeSelectionInput(
-      await services.workspaceManager.awaitSelectionSnapshot(),
-      workspaceFsPath
-    );
-
-    if (preAwaitSelection.length === 0 && existingSelectionSnapshot.length > 0) {
-      services.diagnostics.add(
-        `Digest request waited for active selection to settle (${existingSelectionSnapshot.length} file(s) recovered).`
-      );
-    }
-
-    let normalizedSelection = selectionFromPayload ? payloadSelection ?? [] : existingSelectionSnapshot;
-    if (selectionFromPayload && normalizedSelection.length === 0 && existingSelectionSnapshot.length > 0) {
-      services.diagnostics.add(
-        `Digest request payload empty; falling back to active selection containing ${existingSelectionSnapshot.length} file(s).`
-      );
-      normalizedSelection = existingSelectionSnapshot;
-      selectionFromPayload = false;
-    }
-
-    const { valid: accessibleSelection, missing } = await validateSelection(normalizedSelection, workspaceRoot);
-    let finalSelection = accessibleSelection;
-
-    const shouldUpdateManager = selectionFromPayload || !selectionsEqual(finalSelection, existingSelectionSnapshot);
-    let relativeSelection: string[];
-    if (shouldUpdateManager) {
-      relativeSelection = services.workspaceManager.setSelection(finalSelection);
-    } else {
-      relativeSelection = finalSelection;
-    }
-
-    services.webviewPanelManager.setStateSnapshot({ selection: relativeSelection });
-
-    if (missing.length > 0) {
-      const missingPreview = missing.slice(0, 5).join(", ");
-      const overflowSuffix = missing.length > 5 ? ` …(+${missing.length - 5})` : "";
-      services.diagnostics.add(
-        `Selection pruning: skipped ${missing.length} missing file(s): ${missingPreview}${overflowSuffix}`
-      );
-      const plural = missing.length === 1 ? "" : "s";
-      void vscode.window.showWarningMessage(
-        `Code Ingest: Skipped ${missing.length} missing file${plural} before generating the digest.`
-      );
-
-      if (selectionFromPayload && relativeSelection.length === 0) {
-        const message = missing.length === 1
-          ? `The requested file "${missing[0]}" is not available in this workspace.`
-          : "None of the requested files are available in this workspace.";
-        services.diagnostics.add(`Digest request rejected: ${message}`);
-        services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
-          title: "No files available",
-          message
-        });
-        const rejectionError = new Error(message);
-        (rejectionError as { code?: string }).code = DIGEST_SELECTION_REJECTED;
-        (rejectionError as { handledByHost?: boolean }).handledByHost = true;
-        throw rejectionError;
-      }
-    }
-
-    if (relativeSelection.length === 0) {
-      const message = "Select one or more files before generating a digest.";
-      if (selectionFromPayload) {
-        services.diagnostics.add("Digest request rejected: selection empty after normalization.");
-        services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
-          title: "No files selected",
-          message
-        });
-        const rejectionError = new Error(message);
-        (rejectionError as { code?: string }).code = DIGEST_SELECTION_REJECTED;
-        (rejectionError as { handledByHost?: boolean }).handledByHost = true;
-        throw rejectionError;
-      }
-      void vscode.window.showInformationMessage(`Code Ingest: ${message}`);
-      return;
-    }
-
-    let absoluteSelection = relativeSelection.map((relPath) => path.resolve(workspaceFsPath, relPath));
     const configSnapshot = services.configurationService.getConfig();
+    const configFingerprint = services.configurationService.getFingerprint();
 
     const filterService = new FilterService({
       workspaceRoot: workspaceRoot.fsPath,
@@ -458,78 +387,182 @@ export function registerGenerateDigestCommand(
       })
     });
 
-    const selectionFilterOptions = {
-      includePatterns: configSnapshot.include ?? [],
-      excludePatterns: configSnapshot.exclude ?? [],
-      useGitignore: configSnapshot.respectGitIgnore ?? true,
-      followSymlinks: configSnapshot.followSymlinks ?? false,
-      ...(typeof configSnapshot.maxDepth === "number" ? { maxDepth: configSnapshot.maxDepth } : {})
-    } as const;
+    const selectionResult = await services.workspaceManager.withSelectionLock(async () => {
+      let selectionFromPayload = false;
+      let payloadSelection: string[] | undefined;
 
-    const selectionResults = await filterService.batchFilter(absoluteSelection, selectionFilterOptions);
-    const selectionSkipStats = createSkipStatsMap();
-    const filteredAbsoluteSelection: string[] = [];
-    const filteredRelativeSelection: string[] = [];
-
-    absoluteSelection.forEach((absolutePath) => {
-      const result = selectionResults.get(absolutePath);
-      const relativePath = path.relative(workspaceFsPath, absolutePath) || path.basename(absolutePath);
-      const normalizedRelative = relativePath.split(path.sep).join("/");
-
-      if (!result || result.included) {
-        filteredAbsoluteSelection.push(absolutePath);
-        filteredRelativeSelection.push(normalizedRelative);
-        return;
+      if (Array.isArray(selectionCandidates)) {
+        selectionFromPayload = true;
+        payloadSelection = normalizeSelectionInput(selectionCandidates, workspaceFsPath);
       }
 
-      recordFilterDiagnostic(selectionSkipStats, normalizedRelative, result);
-    });
+      const settledSelection = normalizeSelectionInput(services.workspaceManager.getSelection(), workspaceFsPath);
 
-    const filteredOutCount = relativeSelection.length - filteredRelativeSelection.length;
-    if (filteredOutCount > 0) {
-      const plural = filteredOutCount === 1 ? "" : "s";
-      services.diagnostics.add(
-        `Selection filtering: skipped ${filteredOutCount} selected file${plural} due to configuration filters.`
-      );
-      const selectionMessages = buildSkipMessages(selectionSkipStats, {
+      if (preLockSelection.length === 0 && settledSelection.length > 0) {
+        services.diagnostics.add(
+          `Digest request waited for active selection to settle (${settledSelection.length} file(s) recovered).`
+        );
+      }
+
+      let normalizedSelection = selectionFromPayload ? payloadSelection ?? [] : settledSelection;
+      if (selectionFromPayload && normalizedSelection.length === 0 && settledSelection.length > 0) {
+        services.diagnostics.add(
+          `Digest request payload empty; falling back to active selection containing ${settledSelection.length} file(s).`
+        );
+        normalizedSelection = settledSelection;
+        selectionFromPayload = false;
+      }
+
+      const { valid: accessibleSelection, missing } = await validateSelection(normalizedSelection, workspaceRoot);
+      let relativeSelection = accessibleSelection;
+
+      const shouldUpdateManager = selectionFromPayload || !selectionsEqual(relativeSelection, settledSelection);
+      if (shouldUpdateManager) {
+        relativeSelection = services.workspaceManager.setSelection(relativeSelection);
+      }
+
+      services.webviewPanelManager.setStateSnapshot({ selection: relativeSelection });
+
+      if (missing.length > 0) {
+        const missingPreview = missing.slice(0, 5).join(", ");
+        const overflowSuffix = missing.length > 5 ? ` …(+${missing.length - 5})` : "";
+        services.diagnostics.add(
+          `Selection pruning: skipped ${missing.length} missing file(s): ${missingPreview}${overflowSuffix}`
+        );
+        const plural = missing.length === 1 ? "" : "s";
+        void vscode.window.showWarningMessage(
+          `Code Ingest: Skipped ${missing.length} missing file${plural} before generating the digest.`
+        );
+
+        if (selectionFromPayload && relativeSelection.length === 0) {
+          const message = missing.length === 1
+            ? `The requested file "${missing[0]}" is not available in this workspace.`
+            : "None of the requested files are available in this workspace.";
+          services.diagnostics.add(`Digest request rejected: ${message}`);
+          services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
+            title: "No files available",
+            message
+          });
+          const rejectionError = new Error(message);
+          (rejectionError as { code?: string }).code = DIGEST_SELECTION_REJECTED;
+          (rejectionError as { handledByHost?: boolean }).handledByHost = true;
+          throw rejectionError;
+        }
+      }
+
+      if (relativeSelection.length === 0) {
+        const message = "Select one or more files before generating a digest.";
+        if (selectionFromPayload) {
+          services.diagnostics.add("Digest request rejected: selection empty after normalization.");
+          services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
+            title: "No files selected",
+            message
+          });
+          const rejectionError = new Error(message);
+          (rejectionError as { code?: string }).code = DIGEST_SELECTION_REJECTED;
+          (rejectionError as { handledByHost?: boolean }).handledByHost = true;
+          throw rejectionError;
+        }
+        void vscode.window.showInformationMessage(`Code Ingest: ${message}`);
+        return null;
+      }
+
+      let absoluteSelection = relativeSelection.map((relPath) => path.resolve(workspaceFsPath, relPath));
+
+      const selectionFilterOptions = {
+        includePatterns: configSnapshot.include ?? [],
+        excludePatterns: configSnapshot.exclude ?? [],
+        useGitignore: configSnapshot.respectGitIgnore ?? true,
         followSymlinks: configSnapshot.followSymlinks ?? false,
         ...(typeof configSnapshot.maxDepth === "number" ? { maxDepth: configSnapshot.maxDepth } : {})
+      } as const;
+
+      const selectionResults = await filterService.batchFilter(absoluteSelection, selectionFilterOptions);
+      const selectionSkipStats = createSkipStatsMap();
+      const filteredAbsoluteSelection: string[] = [];
+      const filteredRelativeSelection: string[] = [];
+
+      absoluteSelection.forEach((absolutePath) => {
+        const result = selectionResults.get(absolutePath);
+        const relativePath = path.relative(workspaceFsPath, absolutePath) || path.basename(absolutePath);
+        const normalizedRelative = relativePath.split(path.sep).join("/");
+
+        if (!result || result.included) {
+          filteredAbsoluteSelection.push(absolutePath);
+          filteredRelativeSelection.push(normalizedRelative);
+          return;
+        }
+
+        recordFilterDiagnostic(selectionSkipStats, normalizedRelative, result);
       });
-      for (const message of selectionMessages) {
-        services.diagnostics.add(`Selection filtering: ${message}`);
+
+      const filteredOutCount = relativeSelection.length - filteredRelativeSelection.length;
+      if (filteredOutCount > 0) {
+        const plural = filteredOutCount === 1 ? "" : "s";
+        services.diagnostics.add(
+          `Selection filtering: skipped ${filteredOutCount} selected file${plural} due to configuration filters.`
+        );
+        const selectionMessages = buildSkipMessages(selectionSkipStats, {
+          followSymlinks: configSnapshot.followSymlinks ?? false,
+          ...(typeof configSnapshot.maxDepth === "number" ? { maxDepth: configSnapshot.maxDepth } : {})
+        });
+        for (const message of selectionMessages) {
+          services.diagnostics.add(`Selection filtering: ${message}`);
+        }
+        void vscode.window.showWarningMessage(
+          `Code Ingest: Skipped ${filteredOutCount} selected file${plural} due to current filters.`
+        );
+
+        relativeSelection = filteredRelativeSelection;
+        absoluteSelection = filteredAbsoluteSelection;
+        const normalizedSelection = services.workspaceManager.setSelection(relativeSelection);
+        relativeSelection = normalizedSelection;
+        absoluteSelection = relativeSelection.map((relPath) => path.resolve(workspaceFsPath, relPath));
+        services.webviewPanelManager.setStateSnapshot({ selection: relativeSelection });
       }
-      void vscode.window.showWarningMessage(
-        `Code Ingest: Skipped ${filteredOutCount} selected file${plural} due to current filters.`
-      );
 
-      relativeSelection = filteredRelativeSelection;
-      absoluteSelection = filteredAbsoluteSelection;
-      const normalizedSelection = services.workspaceManager.setSelection(relativeSelection);
-      relativeSelection = normalizedSelection;
-      absoluteSelection = relativeSelection.map((relPath) => path.resolve(workspaceFsPath, relPath));
-      services.webviewPanelManager.setStateSnapshot({ selection: relativeSelection });
+      if (relativeSelection.length === 0) {
+        const message = "All selected files are excluded by the current include/exclude or gitignore settings.";
+        services.diagnostics.add(`Digest request rejected: ${message}`);
+        services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
+          title: "No files available",
+          message
+        });
+        const rejectionError = new Error(message);
+        (rejectionError as { code?: string }).code = DIGEST_SELECTION_REJECTED;
+        (rejectionError as { handledByHost?: boolean }).handledByHost = true;
+        throw rejectionError;
+      }
+
+      return { relativeSelection, absoluteSelection };
+    });
+
+    if (!selectionResult) {
+      return;
     }
 
-    if (relativeSelection.length === 0) {
-      const message = "All selected files are excluded by the current include/exclude or gitignore settings.";
-      services.diagnostics.add(`Digest request rejected: ${message}`);
-      services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
-        title: "No files available",
-        message
-      });
-      const rejectionError = new Error(message);
-      (rejectionError as { code?: string }).code = DIGEST_SELECTION_REJECTED;
-      (rejectionError as { handledByHost?: boolean }).handledByHost = true;
-      throw rejectionError;
-    }
+    let { relativeSelection, absoluteSelection } = selectionResult;
 
     const outputFormat = resolveOutputFormat(payload?.outputFormat ?? configSnapshot.outputFormat);
     const redactionOverride = Boolean(
       payload?.redactionOverride ?? services.workspaceManager.getRedactionOverride()
     );
     const applyRedaction = !redactionOverride;
-    const previewId = createPreviewId(workspaceFsPath, relativeSelection, outputFormat, applyRedaction);
-    const digestKey = buildDigestKey(workspaceFsPath, absoluteSelection, outputFormat, applyRedaction);
+    const previewId = createPreviewId(
+      workspaceFsPath,
+      relativeSelection,
+      outputFormat,
+      applyRedaction,
+      configFingerprint
+    );
+    const digestKey = buildDigestKey(
+      workspaceFsPath,
+      absoluteSelection,
+      outputFormat,
+      applyRedaction,
+      configFingerprint
+    );
+    const progressId = createProgressToken(digestKey);
     const existingRun = inFlightDigestRuns.get(digestKey);
     if (existingRun) {
       services.diagnostics.add(
@@ -537,6 +570,20 @@ export function registerGenerateDigestCommand(
       );
       return existingRun;
     }
+
+    const selectionSummary = `${relativeSelection.length} file${relativeSelection.length === 1 ? "" : "s"}`;
+    services.webviewPanelManager.updateOperationState(DIGEST_OPERATION, {
+      status: "running",
+      message: `Generating digest (${selectionSummary})`,
+      progressId
+    });
+    services.webviewPanelManager.updateOperationProgress(DIGEST_OPERATION, progressId, {
+      phase: "scan",
+      message: PROGRESS_MESSAGES.scanning,
+      busy: true,
+      filesProcessed: 0,
+      totalFiles: 0
+    });
 
     const ensurePreviewContent = (content: string | undefined, stage: string): void => {
       const previewText = typeof content === "string" ? content.trim() : "";
@@ -559,7 +606,7 @@ export function registerGenerateDigestCommand(
       throw previewError;
     };
 
-    const runDigest = async () => {
+    const runDigest = async (operationToken: vscode.CancellationToken) => {
       services.workspaceManager.setRedactionOverride(redactionOverride);
       services.webviewPanelManager.setStateSnapshot({
         config: { ...configSnapshot, redactionOverride },
@@ -578,14 +625,39 @@ export function registerGenerateDigestCommand(
         services.errorReporter
       );
 
-      const updateProgress = (progress: GenerationProgress | null) => {
-        const state: Record<string, unknown> = {
-          progress: progress ? mapProgress(progress) : null
-        };
-        if (progress && progress.phase !== "complete") {
-          state.status = "digest-running";
+      let lastPhaseLabel: string | undefined;
+
+      const updateOperationMessage = (label: string | undefined): void => {
+        if (!label || label === lastPhaseLabel) {
+          return;
         }
-        services.webviewPanelManager.setStateSnapshot(state);
+        lastPhaseLabel = label;
+        services.webviewPanelManager.updateOperationState(DIGEST_OPERATION, {
+          status: "running",
+          message: label,
+          progressId
+        });
+      };
+
+      const reportProgress = (progress: GenerationProgress | null) => {
+        if (progress) {
+          if (operationToken.isCancellationRequested) {
+            throw new vscode.CancellationError();
+          }
+          const mapped = mapProgress(progress);
+          services.webviewPanelManager.updateOperationProgress(DIGEST_OPERATION, progressId, {
+            phase: mapped.phase,
+            message: mapped.message,
+            busy: mapped.busy,
+            filesProcessed: mapped.filesProcessed,
+            totalFiles: mapped.totalFiles,
+            ...(typeof mapped.percent === "number" ? { percent: mapped.percent } : {})
+          });
+          updateOperationMessage(mapped.message);
+          return;
+        }
+
+        services.webviewPanelManager.updateOperationProgress(DIGEST_OPERATION, progressId, null);
       };
 
       const initialProgress: GenerationProgress = {
@@ -595,7 +667,7 @@ export function registerGenerateDigestCommand(
         tokensProcessed: 0,
         timeElapsed: 0
       };
-      updateProgress(initialProgress);
+      reportProgress(initialProgress);
 
       try {
         const result = await vscode.window.withProgress(
@@ -604,15 +676,17 @@ export function registerGenerateDigestCommand(
             title: "Code Ingest: Generating digest",
             cancellable: false
           },
-          async () => {
+          async (progressReporter) => {
             const options: Parameters<typeof digestGenerator.generateDigest>[0] = {
               selectedFiles: absoluteSelection,
               outputFormat,
               applyRedaction,
               includeMetadata: true,
               binaryFilePolicy: configSnapshot.binaryFilePolicy as "skip" | "base64" | "placeholder",
+              cancellationToken: operationToken,
               progressCallback: (progress) => {
-                updateProgress(progress);
+                reportProgress(progress);
+                progressReporter.report({ message: mapProgress(progress).message });
               }
             };
 
@@ -624,7 +698,7 @@ export function registerGenerateDigestCommand(
           }
         );
 
-        updateProgress(null);
+        reportProgress(null);
 
         const formatter = createFormatter(outputFormat);
         const formatterSupportsStreaming =
@@ -638,8 +712,11 @@ export function registerGenerateDigestCommand(
         const target = services.outputWriter.resolveConfiguredTarget(outputFormat);
 
         const handleWriteProgress = (progress: WriteProgress) => {
+          if (operationToken.isCancellationRequested) {
+            throw new vscode.CancellationError();
+          }
           if (progress.phase === "complete") {
-            services.webviewPanelManager.setStateSnapshot({ progress: null, status: "digest-ready" });
+            services.webviewPanelManager.updateOperationProgress(DIGEST_OPERATION, progressId, null);
             return;
           }
 
@@ -647,16 +724,18 @@ export function registerGenerateDigestCommand(
           const percent =
             totalBytes > 0 ? Math.min(100, Math.round((progress.bytesWritten / totalBytes) * 100)) : undefined;
 
-          services.webviewPanelManager.setStateSnapshot({
-            progress: {
-              phase: "write",
-              percent,
-              message: progress.currentOperation,
-              busy: true,
-              filesProcessed: progress.bytesWritten,
-              totalFiles: totalBytes
-            },
-            status: "digest-writing"
+          services.webviewPanelManager.updateOperationState(DIGEST_OPERATION, {
+            status: "running",
+            message: progress.currentOperation ?? "Writing digest output…",
+            progressId
+          });
+          services.webviewPanelManager.updateOperationProgress(DIGEST_OPERATION, progressId, {
+            phase: "write",
+            message: progress.currentOperation,
+            busy: true,
+            filesProcessed: progress.bytesWritten,
+            totalFiles: totalBytes,
+            ...(typeof percent === "number" ? { percent } : {})
           });
         };
 
@@ -724,7 +803,6 @@ export function registerGenerateDigestCommand(
 
         services.webviewPanelManager.setStateSnapshot({
           preview: previewState,
-          status: "digest-ready",
           selection: services.workspaceManager.getSelection(),
           lastDigest: {
             generatedAt: result.content.metadata.generatedAt.toISOString(),
@@ -757,7 +835,7 @@ export function registerGenerateDigestCommand(
           );
         }
       } catch (error) {
-        updateProgress(null);
+        services.webviewPanelManager.updateOperationProgress(DIGEST_OPERATION, progressId, null);
         const message = error instanceof Error ? error.message : String(error);
         const errorCode = typeof error === "object" && error !== null ? (error as { code?: string }).code : undefined;
 
@@ -777,9 +855,33 @@ export function registerGenerateDigestCommand(
         throw error;
       }
     };
+    const digestPromise = services.workspaceManager.queueDigestOperation(async (operationToken) => {
+      try {
+        await runDigest(operationToken);
+        services.webviewPanelManager.updateOperationState(DIGEST_OPERATION, {
+          status: "completed",
+          message: "Digest ready"
+        });
+      } catch (error) {
+        if (error instanceof vscode.CancellationError) {
+          services.diagnostics.add("Digest run cancelled before completion.");
+          services.webviewPanelManager.updateOperationState(DIGEST_OPERATION, {
+            status: "cancelled",
+            message: "Digest cancelled"
+          });
+          return;
+        }
 
-    const digestPromise = runDigest().finally(() => {
-      inFlightDigestRuns.delete(digestKey);
+        const message = error instanceof Error ? error.message : String(error);
+        services.webviewPanelManager.updateOperationState(DIGEST_OPERATION, {
+          status: "failed",
+          message
+        });
+        throw error;
+      } finally {
+        services.webviewPanelManager.clearOperationProgress(progressId);
+        inFlightDigestRuns.delete(digestKey);
+      }
     });
     inFlightDigestRuns.set(digestKey, digestPromise);
     return digestPromise;

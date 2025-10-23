@@ -29,9 +29,9 @@ describe("ProgressHandler selection progress", () => {
   };
 
   beforeAll(async () => {
-    ({ ProgressHandler } = await import("../progressHandler.js"));
+    ({ ProgressHandler } = await import("../../handlers/progressHandler.js"));
     ({ UIRenderer } = await import("../../uiRenderer.js"));
-    ({ createMockStore } = await import("./testUtils.js"));
+    ({ createMockStore } = await import("../testUtils.js"));
     window.vscode = { postMessage: jest.fn() };
   });
 

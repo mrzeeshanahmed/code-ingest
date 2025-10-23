@@ -11,8 +11,8 @@ describe("IngestErrorHandler", () => {
   let createMockUIRenderer;
 
   beforeAll(async () => {
-    ({ IngestErrorHandler } = await import("../ingestErrorHandler.js"));
-    ({ createMockStore, createMockUIRenderer } = await import("./testUtils.js"));
+    ({ IngestErrorHandler } = await import("../../handlers/ingestErrorHandler.js"));
+    ({ createMockStore, createMockUIRenderer } = await import("../testUtils.js"));
   });
 
   it("appends error entries to the store and shows banner", async () => {

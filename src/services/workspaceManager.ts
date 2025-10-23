@@ -92,6 +92,8 @@ export class WorkspaceManager {
   private lastScanId = "";
   private redactionOverride: boolean;
   private selectionLock: Promise<void> = Promise.resolve();
+  private digestQueueTail: Promise<void> = Promise.resolve();
+  private digestCancellationSource: vscode.CancellationTokenSource | undefined;
   private knownFiles = new Set<string>();
 
   constructor(
@@ -254,6 +256,35 @@ export class WorkspaceManager {
     }
 
     return this.getStateSnapshot();
+  }
+
+  async queueDigestOperation<T>(operation: (token: vscode.CancellationToken) => Promise<T>): Promise<T> {
+    const priorTail = this.digestQueueTail;
+    const cancellation = new vscode.CancellationTokenSource();
+
+    if (this.digestCancellationSource) {
+      this.digestCancellationSource.cancel();
+      this.digestCancellationSource.dispose();
+    }
+    this.digestCancellationSource = cancellation;
+
+    const guardedRun = priorTail
+      .catch(() => undefined)
+      .then(() => operation(cancellation.token));
+
+    this.digestQueueTail = guardedRun.then(
+      () => undefined,
+      () => undefined
+    );
+
+    try {
+      return await guardedRun;
+    } finally {
+      if (this.digestCancellationSource === cancellation) {
+        this.digestCancellationSource = undefined;
+      }
+      cancellation.dispose();
+    }
   }
 
   updateSelection(filePath: string, selected: boolean): void {

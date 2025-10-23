@@ -7,8 +7,34 @@ import type { HostCommandId } from "../commands/commandMap";
 
 type PanelState = Record<string, unknown>;
 
+type OperationStatusValue = "idle" | "running" | "completed" | "failed" | "cancelled";
+
+interface OperationStatusEntry {
+  readonly operation: string;
+  readonly status: OperationStatusValue;
+  readonly message?: string;
+  readonly detail?: unknown;
+  readonly progressId?: string;
+  readonly updatedAt: number;
+}
+
+interface OperationProgressEntry {
+  readonly id: string;
+  readonly operation: string;
+  readonly phase?: string;
+  readonly message?: string;
+  readonly percent?: number;
+  readonly busy?: boolean;
+  readonly filesProcessed?: number;
+  readonly totalFiles?: number;
+  readonly cancellable?: boolean;
+  readonly cancelled?: boolean;
+}
+
 export class WebviewPanelManager {
   private stateSnapshot: PanelState | undefined;
+  private readonly operationStatus = new Map<string, OperationStatusEntry>();
+  private readonly progressRegistry = new Map<string, OperationProgressEntry>();
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -95,6 +121,150 @@ export class WebviewPanelManager {
     return this.stateSnapshot ? { ...this.stateSnapshot } : undefined;
   }
 
+  updateOperationState(
+    operation: string,
+    update: Partial<Omit<OperationStatusEntry, "operation" | "updatedAt">> & { status?: OperationStatusValue } | null,
+    options?: { emit?: boolean }
+  ): void {
+    if (!operation) {
+      return;
+    }
+
+    if (!update) {
+      if (this.operationStatus.delete(operation)) {
+        this.flushOperationSnapshot(options);
+      }
+      return;
+    }
+
+    const existing = this.operationStatus.get(operation);
+    const base: OperationStatusEntry = {
+      operation,
+      status: update.status ?? existing?.status ?? "idle",
+      updatedAt: Date.now(),
+      ...(update.message !== undefined
+        ? { message: update.message }
+        : existing?.message !== undefined
+          ? { message: existing.message }
+          : {}),
+      ...(update.detail !== undefined
+        ? { detail: update.detail }
+        : existing?.detail !== undefined
+          ? { detail: existing.detail }
+          : {}),
+      ...(update.progressId !== undefined
+        ? { progressId: update.progressId }
+        : existing?.progressId !== undefined
+          ? { progressId: existing.progressId }
+          : {})
+    };
+    this.operationStatus.set(operation, base);
+    this.flushOperationSnapshot(options);
+  }
+
+  updateOperationProgress(
+    operation: string,
+    progressId: string,
+    update: Partial<Omit<OperationProgressEntry, "operation" | "id" >> | null,
+    options?: { emit?: boolean }
+  ): void {
+    if (!progressId) {
+      return;
+    }
+
+    if (!update) {
+      this.clearOperationProgress(progressId, options);
+      return;
+    }
+
+    const existing = this.progressRegistry.get(progressId);
+    const snapshot: OperationProgressEntry = {
+      id: progressId,
+      operation: operation || existing?.operation || "unknown",
+      ...(update.phase !== undefined
+        ? { phase: update.phase }
+        : existing?.phase !== undefined
+          ? { phase: existing.phase }
+          : {}),
+      ...(update.message !== undefined
+        ? { message: update.message }
+        : existing?.message !== undefined
+          ? { message: existing.message }
+          : {}),
+      ...(update.percent !== undefined
+        ? { percent: update.percent }
+        : existing?.percent !== undefined
+          ? { percent: existing.percent }
+          : {}),
+      ...(update.busy !== undefined
+        ? { busy: update.busy }
+        : existing?.busy !== undefined
+          ? { busy: existing.busy }
+          : {}),
+      ...(update.filesProcessed !== undefined
+        ? { filesProcessed: update.filesProcessed }
+        : existing?.filesProcessed !== undefined
+          ? { filesProcessed: existing.filesProcessed }
+          : {}),
+      ...(update.totalFiles !== undefined
+        ? { totalFiles: update.totalFiles }
+        : existing?.totalFiles !== undefined
+          ? { totalFiles: existing.totalFiles }
+          : {}),
+      ...(update.cancellable !== undefined
+        ? { cancellable: update.cancellable }
+        : existing?.cancellable !== undefined
+          ? { cancellable: existing.cancellable }
+          : {}),
+      ...(update.cancelled !== undefined
+        ? { cancelled: update.cancelled }
+        : existing?.cancelled !== undefined
+          ? { cancelled: existing.cancelled }
+          : {})
+    };
+    this.progressRegistry.set(progressId, snapshot);
+
+    if (operation) {
+      const status = this.operationStatus.get(operation) ?? {
+        operation,
+        status: "idle" as OperationStatusValue,
+        updatedAt: Date.now()
+      };
+      this.operationStatus.set(operation, {
+        ...status,
+        progressId,
+        updatedAt: Date.now()
+      });
+    }
+
+    this.flushOperationSnapshot(options);
+  }
+
+  clearOperationProgress(progressId: string, options?: { emit?: boolean }): void {
+    if (!progressId) {
+      return;
+    }
+
+    const entry = this.progressRegistry.get(progressId);
+    if (!entry) {
+      return;
+    }
+
+    this.progressRegistry.delete(progressId);
+    const status = this.operationStatus.get(entry.operation);
+    if (status?.progressId === progressId) {
+      const nextStatus: OperationStatusEntry = {
+        operation: entry.operation,
+        status: status.status,
+        updatedAt: Date.now(),
+        ...(status.message !== undefined ? { message: status.message } : {}),
+        ...(status.detail !== undefined ? { detail: status.detail } : {})
+      };
+      this.operationStatus.set(entry.operation, nextStatus);
+    }
+    this.flushOperationSnapshot(options);
+  }
+
   tryRestoreState(): boolean {
     if (!this.stateSnapshot) {
       return false;
@@ -112,5 +282,74 @@ export class WebviewPanelManager {
     if (!deliveredToView && !deliveredToPanel) {
       console.warn("WebviewPanelManager: unable to deliver command", { command });
     }
+  }
+
+  private flushOperationSnapshot(options?: { emit?: boolean }): void {
+    const emit = options?.emit !== false;
+    const operationStatus = this.buildOperationStatusSnapshot();
+    const operationProgress = this.buildOperationProgressSnapshot();
+    const legacyPatch = this.buildLegacySnapshot(operationStatus, operationProgress);
+
+    const payload: PanelState = {
+      operationStatus,
+      operationProgress,
+      ...legacyPatch
+    };
+    this.setStateSnapshot(payload, { emit });
+  }
+
+  private buildOperationStatusSnapshot(): Record<string, OperationStatusEntry> {
+    const entries: Record<string, OperationStatusEntry> = {};
+    for (const [operation, snapshot] of this.operationStatus.entries()) {
+      entries[operation] = { ...snapshot };
+    }
+    return entries;
+  }
+
+  private buildOperationProgressSnapshot(): Record<string, OperationProgressEntry> {
+    const entries: Record<string, OperationProgressEntry> = {};
+    for (const [key, snapshot] of this.progressRegistry.entries()) {
+      entries[key] = { ...snapshot };
+    }
+    return entries;
+  }
+
+  private buildLegacySnapshot(
+    operationStatus: Record<string, OperationStatusEntry>,
+    operationProgress: Record<string, OperationProgressEntry>
+  ): PanelState {
+    const digestStatus = operationStatus.digest;
+    const digestProgress = digestStatus?.progressId ? operationProgress[digestStatus.progressId] : undefined;
+
+    const patch: PanelState = {};
+
+    if (digestStatus) {
+      const legacyStatusMap: Record<OperationStatusValue, string> = {
+        idle: "idle",
+        running: "digest-running",
+        completed: "digest-ready",
+        failed: "digest-failed",
+        cancelled: "digest-cancelled"
+      };
+      patch.status = legacyStatusMap[digestStatus.status] ?? "idle";
+    }
+
+    if (digestProgress) {
+      patch.progress = {
+        id: digestProgress.id,
+        phase: digestProgress.phase,
+        percent: digestProgress.percent,
+        message: digestProgress.message,
+        filesProcessed: digestProgress.filesProcessed,
+        totalFiles: digestProgress.totalFiles,
+        busy: digestProgress.busy,
+        cancellable: digestProgress.cancellable,
+        cancelled: digestProgress.cancelled
+      };
+    } else if (digestStatus && digestStatus.progressId) {
+      patch.progress = null;
+    }
+
+    return patch;
   }
 }

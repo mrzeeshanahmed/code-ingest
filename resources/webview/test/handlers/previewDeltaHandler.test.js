@@ -11,8 +11,8 @@ describe("PreviewDeltaHandler", () => {
   let createMockUIRenderer;
 
   beforeAll(async () => {
-    ({ PreviewDeltaHandler } = await import("../previewDeltaHandler.js"));
-    ({ createMockStore, createMockUIRenderer } = await import("./testUtils.js"));
+    ({ PreviewDeltaHandler } = await import("../../handlers/previewDeltaHandler.js"));
+    ({ createMockStore, createMockUIRenderer } = await import("../testUtils.js"));
   });
 
   it("applies preview changes", async () => {

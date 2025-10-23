@@ -8,11 +8,11 @@
 import { beforeAll, describe, expect, it, jest } from "@jest/globals";
 
 describe("HandlerRegistry buffering regression", () => {
-  /** @type {import('../handlerRegistry.js').HandlerRegistry} */
+  /** @type {import('../../handlers/handlerRegistry.js').HandlerRegistry} */
   let HandlerRegistry;
 
   beforeAll(async () => {
-    ({ HandlerRegistry } = await import("../handlerRegistry.js"));
+    ({ HandlerRegistry } = await import("../../handlers/handlerRegistry.js"));
   });
 
   const createHandler = (collector) => ({

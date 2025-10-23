@@ -86,8 +86,7 @@ const extensionConfig = {
     clean: true
   },
   externals: {
-    vscode: 'commonjs vscode',
-    '@dqbd/tiktoken': 'commonjs @dqbd/tiktoken'
+    vscode: 'commonjs vscode'
   },
   resolve: {
     extensions: ['.ts', '.js']

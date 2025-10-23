@@ -11,8 +11,8 @@ describe("ProgressHandler", () => {
   let createMockUIRenderer;
 
   beforeAll(async () => {
-    ({ ProgressHandler } = await import("../progressHandler.js"));
-    ({ createMockStore, createMockUIRenderer } = await import("./testUtils.js"));
+    ({ ProgressHandler } = await import("../../handlers/progressHandler.js"));
+    ({ createMockStore, createMockUIRenderer } = await import("../testUtils.js"));
   });
 
   it("updates progress state and UI", async () => {

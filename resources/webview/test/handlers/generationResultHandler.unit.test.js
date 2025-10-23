@@ -11,8 +11,8 @@ describe("GenerationResultHandler", () => {
   let createMockUIRenderer;
 
   beforeAll(async () => {
-    ({ GenerationResultHandler } = await import("../generationResultHandler.js"));
-    ({ createMockStore, createMockUIRenderer } = await import("./testUtils.js"));
+    ({ GenerationResultHandler } = await import("../../handlers/generationResultHandler.js"));
+    ({ createMockStore, createMockUIRenderer } = await import("../testUtils.js"));
   });
 
   it("stores generation result and updates preview", async () => {

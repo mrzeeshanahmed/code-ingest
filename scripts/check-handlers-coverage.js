@@ -7,7 +7,7 @@ class HandlersCoverage {
   constructor() {
     this.webviewDir = path.join(process.cwd(), 'resources', 'webview');
     this.testDirs = [
-      path.join(this.webviewDir, 'handlers', '__tests__'),
+      path.join(this.webviewDir, 'test', 'handlers'),
       path.join(process.cwd(), 'src', 'test', 'unit', 'webview'),
       path.join(process.cwd(), 'src', 'test', 'integration', 'webview')
     ];

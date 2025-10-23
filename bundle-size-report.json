@@ -1,10 +1,13 @@
 {
-  "timestamp": "2025-10-14T18:47:03.855Z",
+  "timestamp": "2025-10-21T00:00:00.000Z",
   "current": {
     "extension.js": 564575,
     "total": 564575
   },
-  "baseline": {},
+  "baseline": {
+    "extension.js": 564575,
+    "total": 564575
+  },
   "changes": {},
   "violations": []
 }

@@ -257,14 +257,25 @@ describe("registerGenerateDigestCommand", () => {
         awaitSelectionSnapshot: jest.fn(async () => workspaceSelection),
         waitForSelectionIdle: jest.fn(async () => undefined),
         getRedactionOverride: jest.fn(() => false),
-        setRedactionOverride: jest.fn()
+        setRedactionOverride: jest.fn(),
+        queueDigestOperation: jest.fn(async (operation: (token: vscode.CancellationToken) => Promise<unknown> | unknown) => {
+          const source = new vscode.CancellationTokenSource();
+          try {
+            return await operation(source.token);
+          } finally {
+            source.dispose();
+          }
+        })
       },
       webviewPanelManager: {
         createAndShowPanel: createPanelMock,
         setStateSnapshot: setStateSnapshotMock,
         sendCommand: sendCommandMock,
         getStateSnapshot: jest.fn(() => ({})),
-        tryRestoreState: jest.fn(() => false)
+        tryRestoreState: jest.fn(() => false),
+        updateOperationState: jest.fn(),
+        updateOperationProgress: jest.fn(),
+        clearOperationProgress: jest.fn()
       },
       performanceMonitor: {
         measureOperation: jest.fn(async (_name: string, fn: () => unknown | Promise<unknown>) => {
@@ -281,7 +292,8 @@ describe("registerGenerateDigestCommand", () => {
           respectGitIgnore: true,
           maxDepth: undefined,
           binaryFilePolicy: "skip"
-        }))
+        })),
+        getFingerprint: jest.fn(() => "test-fingerprint")
       },
       errorReporter: { report: jest.fn() },
       extensionUri: vscode.Uri.file("/extension"),
@@ -364,11 +376,11 @@ describe("registerGenerateDigestCommand", () => {
     expect(options.selectedFiles).toEqual([expectedAbsolute]);
     expect(services.workspaceManager.getRedactionOverride).toHaveBeenCalled();
     expect(services.outputWriter.writeOutput).toHaveBeenCalled();
-    const hasWritingStatus = setStateSnapshotMock.mock.calls.some(([payload]) => {
-      const state = payload as Record<string, unknown> | undefined;
-      return state?.status === "digest-writing";
+    const hasWritePhase = (services.webviewPanelManager.updateOperationProgress as jest.Mock).mock.calls.some((call) => {
+      const [operationId, , payload] = call as [string, string, { phase?: string } | null];
+      return operationId === "digest" && payload?.phase === "write";
     });
-    expect(hasWritingStatus).toBe(true);
+    expect(hasWritePhase).toBe(true);
 
     const updatePreviewCall = sendCommandMock.mock.calls.find((call) => call[0] === COMMAND_MAP.HOST_TO_WEBVIEW.UPDATE_PREVIEW);
     expect(updatePreviewCall).toBeDefined();

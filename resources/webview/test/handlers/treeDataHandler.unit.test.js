@@ -11,8 +11,8 @@ describe("TreeDataHandler", () => {
   let createMockUIRenderer;
 
   beforeAll(async () => {
-    ({ TreeDataHandler } = await import("../treeDataHandler.js"));
-    ({ createMockStore, createMockUIRenderer } = await import("./testUtils.js"));
+    ({ TreeDataHandler } = await import("../../handlers/treeDataHandler.js"));
+    ({ createMockStore, createMockUIRenderer } = await import("../testUtils.js"));
   });
 
   it("renders tree data and selection", async () => {

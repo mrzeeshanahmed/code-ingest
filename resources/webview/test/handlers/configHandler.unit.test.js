@@ -11,8 +11,8 @@ describe("ConfigHandler", () => {
   let createMockUIRenderer;
 
   beforeAll(async () => {
-    ({ ConfigHandler } = await import("../configHandler.js"));
-    ({ createMockStore, createMockUIRenderer } = await import("./testUtils.js"));
+    ({ ConfigHandler } = await import("../../handlers/configHandler.js"));
+    ({ createMockStore, createMockUIRenderer } = await import("../testUtils.js"));
   });
 
   it("applies configuration updates", async () => {

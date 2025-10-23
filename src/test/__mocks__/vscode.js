@@ -248,9 +248,14 @@ function executeCommandImplementation(commandId, ...args) {
   }
 }
 
+function getCommandsImplementation(_filterInternal) {
+  return Promise.resolve([...registeredCommands.keys()]);
+}
+
 const commands = {
   registerCommand: jest.fn(registerCommandImplementation),
-  executeCommand: jest.fn(executeCommandImplementation)
+  executeCommand: jest.fn(executeCommandImplementation),
+  getCommands: jest.fn(getCommandsImplementation)
 };
 
 commands.__getRegisteredCommands = () => new Map(registeredCommands);
@@ -385,6 +390,33 @@ class ThemeIcon {
   }
 }
 
+class Disposable {
+  constructor(callOnDispose) {
+    this._dispose = typeof callOnDispose === "function" ? callOnDispose : noop;
+  }
+
+  dispose() {
+    try {
+      this._dispose();
+    } catch (error) {
+      // Swallow dispose errors to align with VS Code behaviour.
+      void error;
+    }
+  }
+
+  static from(...disposables) {
+    return new Disposable(() => {
+      for (const entry of disposables) {
+        try {
+          entry?.dispose?.();
+        } catch (error) {
+          void error;
+        }
+      }
+    });
+  }
+}
+
 class CancellationError extends Error {
   constructor(message) {
     super(message ?? "Canceled");
@@ -437,6 +469,7 @@ const mockVSCode = {
   TreeItemCheckboxState,
   ThemeIcon,
   MarkdownString,
+  Disposable,
   CancellationToken,
   CancellationTokenSource,
   CancellationError,
@@ -487,6 +520,8 @@ mockVSCode.__reset = () => {
   commands.registerCommand.mockImplementation(registerCommandImplementation);
   commands.executeCommand.mockClear();
   commands.executeCommand.mockImplementation(executeCommandImplementation);
+  commands.getCommands.mockClear();
+  commands.getCommands.mockImplementation(getCommandsImplementation);
 
   extensions.__reset();
 

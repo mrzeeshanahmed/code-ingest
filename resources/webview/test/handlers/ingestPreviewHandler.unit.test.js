@@ -11,8 +11,8 @@ describe("IngestPreviewHandler", () => {
   let createMockUIRenderer;
 
   beforeAll(async () => {
-    ({ IngestPreviewHandler } = await import("../ingestPreviewHandler.js"));
-    ({ createMockStore, createMockUIRenderer } = await import("./testUtils.js"));
+    ({ IngestPreviewHandler } = await import("../../handlers/ingestPreviewHandler.js"));
+    ({ createMockStore, createMockUIRenderer } = await import("../testUtils.js"));
   });
 
   it("updates the store and preview UI on valid payload", async () => {

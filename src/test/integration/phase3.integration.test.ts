@@ -74,6 +74,9 @@ describe("Phase 3 integration", () => {
   let outputWriter: OutputWriter;
   const webviewPanelManager = {
     setStateSnapshot: jest.fn(),
+    updateOperationState: jest.fn(),
+    updateOperationProgress: jest.fn(),
+    clearOperationProgress: jest.fn(),
     sendCommand: jest.fn(),
     tryRestoreState: jest.fn(),
     createAndShowPanel: jest.fn().mockImplementation(async () => undefined)
@@ -332,12 +335,13 @@ describe("Phase 3 integration", () => {
       .find((state) => state.preview !== undefined);
 
     const previewContent = typeof previewSnapshot?.preview?.content === "string" ? previewSnapshot.preview.content : "";
-    expect(previewContent).toBe("");
+    expect(previewContent.length).toBeGreaterThan(0);
 
     const diagnosticMessages = diagnostics.getAll();
     const previewDiagnostics = diagnosticMessages.filter((message) => message.includes("Digest preview prepared"));
     expect(previewDiagnostics.length).toBeGreaterThan(0);
-    expect(previewDiagnostics[previewDiagnostics.length - 1]).toContain("length=0");
+    const latestPreviewDiagnostic = previewDiagnostics[previewDiagnostics.length - 1] ?? "";
+    expect(latestPreviewDiagnostic).toMatch(/length=\d+/);
   });
 
   it("warns when filters exclude every requested file and succeeds after broadening includes", async () => {

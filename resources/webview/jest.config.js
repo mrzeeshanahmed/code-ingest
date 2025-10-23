@@ -40,7 +40,6 @@ export default {
     }
   },
   testMatch: [
-    "<rootDir>/test/**/*.test.js",
-    "<rootDir>/handlers/__tests__/**/*.unit.test.js"
+    "<rootDir>/test/**/*.test.js"
   ]
 };

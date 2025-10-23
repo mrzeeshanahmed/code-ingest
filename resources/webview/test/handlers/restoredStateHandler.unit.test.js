@@ -11,8 +11,8 @@ describe("RestoredStateHandler", () => {
   let createMockUIRenderer;
 
   beforeAll(async () => {
-    ({ RestoredStateHandler } = await import("../restoredStateHandler.js"));
-    ({ createMockStore, createMockUIRenderer } = await import("./testUtils.js"));
+    ({ RestoredStateHandler } = await import("../../handlers/restoredStateHandler.js"));
+    ({ createMockStore, createMockUIRenderer } = await import("../testUtils.js"));
   });
 
   it("merges restored state and updates renderer", async () => {

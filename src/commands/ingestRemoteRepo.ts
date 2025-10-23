@@ -22,17 +22,8 @@ import { formatDigest } from "../utils/digestFormatters";
 import type { Logger } from "../utils/gitProcessManager";
 import { wrapError } from "../utils/errorHandling";
 
-let remoteIngestQueue: Promise<void> = Promise.resolve();
+const DIGEST_OPERATION = "digest";
 const inFlightRemoteIngestions = new Map<string, Promise<{ ok: boolean; reason?: string }>>();
-
-function enqueueRemoteIngestion<T>(task: () => Promise<T>): Promise<T> {
-  const run = remoteIngestQueue.then(() => task());
-  remoteIngestQueue = run.then(
-    () => undefined,
-    () => undefined
-  );
-  return run;
-}
 
 const EXCLUDED_DIRECTORIES = new Set([".git", "node_modules"]);
 const MAX_PREVIEW_LENGTH = 60_000;
@@ -343,6 +334,7 @@ export function registerIngestRemoteRepoCommand(
     const repoSlug = options.repoSlug;
     const trimmedRef = options.ref;
     const normalizedSubpath = options.sparsePaths[0] ?? "";
+    const progressId = `remote-${runId}`;
 
     if (options.sparsePaths.length > 1) {
       services.diagnostics.add(
@@ -350,328 +342,392 @@ export function registerIngestRemoteRepoCommand(
       );
     }
 
-    services.diagnostics.add(
-      `Starting remote ingestion for ${repoSlug}@${trimmedRef}${
-        normalizedSubpath ? ` (subpath: ${normalizedSubpath})` : ""
-      }.`
-    );
+    return services.workspaceManager.queueDigestOperation(async (operationToken) => {
+      services.diagnostics.add(
+        `Starting remote ingestion for ${repoSlug}@${trimmedRef}${
+          normalizedSubpath ? ` (subpath: ${normalizedSubpath})` : ""
+        }.`
+      );
 
-    await services.webviewPanelManager.createAndShowPanel();
-    services.webviewPanelManager.setStateSnapshot({
-      activeRunId: runId,
-      status: "digest-running",
-      preview: null,
-      progress: {
-        runId,
+      await services.webviewPanelManager.createAndShowPanel();
+      services.webviewPanelManager.setStateSnapshot({
+        activeRunId: runId,
+        preview: null
+      });
+      services.webviewPanelManager.updateOperationState(DIGEST_OPERATION, {
+        status: "running",
+        message: "Preparing remote ingestion…",
+        progressId
+      });
+      services.webviewPanelManager.updateOperationProgress(DIGEST_OPERATION, progressId, {
         phase: "ingest",
-        percent: undefined,
         message: "Preparing remote ingestion…",
         busy: true,
         filesProcessed: 0,
-        totalFiles: 0
-      }
-    });
-
-    let outcome: IngestOutcome | undefined;
-    try {
-      outcome = await vscode.window.withProgress<IngestOutcome>({
-        location: vscode.ProgressLocation.Notification,
-        title: `Code Ingest: Ingesting ${repoSlug}@${trimmedRef}`,
+        totalFiles: 0,
         cancellable: true
-      }, async (progress, cancellationToken) => {
-        let tempDir: string | undefined;
-        let token: string | undefined;
+      });
 
-        const updatePanelProgress = (message: string) => {
-          const safeMessage = message || "Remote ingestion in progress…";
-          services.webviewPanelManager.setStateSnapshot({
-            activeRunId: runId,
-            status: "digest-running",
-            progress: {
-              runId,
-              phase: "ingest",
-              percent: undefined,
-              message: safeMessage,
-              busy: true,
-              filesProcessed: 0,
-              totalFiles: 0
-            }
-          });
-          progress.report({ message: safeMessage });
-        };
+      const linkedCancellation = new vscode.CancellationTokenSource();
+      if (operationToken.isCancellationRequested) {
+        linkedCancellation.cancel();
+      }
+      const queueRegistration = operationToken.onCancellationRequested(() => linkedCancellation.cancel());
 
-        throwIfCancelled(cancellationToken);
-        updatePanelProgress("Authenticating with GitHub…");
-        token = await authenticate();
-        if (!token) {
-          throw new Error("GitHub authentication failed or was cancelled.");
-        }
-
-        throwIfCancelled(cancellationToken);
-        updatePanelProgress("Resolving repository reference…");
-        const sha = await resolveRefToSha(repoSlug, trimmedRef, token);
-
-        throwIfCancelled(cancellationToken);
-        updatePanelProgress("Cloning repository (blobless)…");
-        const { tempDir: cloneDir } = await partialClone(repoSlug, token);
-        tempDir = cloneDir;
-
-        try {
-          throwIfCancelled(cancellationToken);
-          updatePanelProgress("Fetching requested reference…");
-
-          try {
-            await spawnGitPromise(["-C", tempDir, "fetch", "--depth=1", "origin", trimmedRef], {
-              secretsToRedact: [token]
+      try {
+        const outcome = await vscode.window.withProgress<IngestOutcome>(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `Code Ingest: Ingesting ${repoSlug}@${trimmedRef}`,
+            cancellable: true
+          },
+          async (progress, progressToken) => {
+            const progressRegistration = progressToken.onCancellationRequested(() => {
+              linkedCancellation.cancel();
+              services.webviewPanelManager.updateOperationProgress(DIGEST_OPERATION, progressId, {
+                message: "Cancelling remote ingestion…",
+                cancellable: false,
+                busy: true
+              });
             });
-          } catch (fetchError) {
-            const fetchMessage = fetchError instanceof Error ? fetchError.message : String(fetchError);
-            services.diagnostics.add(`Fetch hint: ${fetchMessage}; retrying with full fetch.`);
-            await spawnGitPromise(["-C", tempDir, "fetch", "origin"], {
-              secretsToRedact: [token]
-            });
-          }
 
-          throwIfCancelled(cancellationToken);
-          updatePanelProgress("Checking out target commit…");
-          await spawnGitPromise(["-C", tempDir, "checkout", sha], {
-            secretsToRedact: [token]
-          });
+            let tempDir: string | undefined;
+            let authToken: string | undefined;
 
-          const repoRoot = path.resolve(tempDir);
-          const targetPath = normalizedSubpath ? path.resolve(repoRoot, normalizedSubpath) : repoRoot;
-          const relative = path.relative(repoRoot, targetPath);
-          if (relative.startsWith("..") || path.isAbsolute(relative)) {
-            throw new Error("The provided subpath escapes the repository root.");
-          }
+            const updatePanelProgress = (
+              message: string,
+              patch?: {
+                filesProcessed?: number;
+                totalFiles?: number;
+                percent?: number;
+                busy?: boolean;
+                cancellable?: boolean;
+                cancelled?: boolean;
+              }
+            ) => {
+              const safeMessage = message || "Remote ingestion in progress…";
+              services.webviewPanelManager.updateOperationState(DIGEST_OPERATION, {
+                status: "running",
+                message: safeMessage,
+                progressId
+              });
+              services.webviewPanelManager.updateOperationProgress(DIGEST_OPERATION, progressId, {
+                phase: "ingest",
+                message: safeMessage,
+                ...(patch?.busy !== undefined ? { busy: patch.busy } : {}),
+                ...(patch?.cancellable !== undefined ? { cancellable: patch.cancellable } : {}),
+                ...(patch?.filesProcessed !== undefined ? { filesProcessed: patch.filesProcessed } : {}),
+                ...(patch?.totalFiles !== undefined ? { totalFiles: patch.totalFiles } : {}),
+                ...(patch?.percent !== undefined ? { percent: patch.percent } : {}),
+                ...(patch?.cancelled !== undefined ? { cancelled: patch.cancelled } : {})
+              });
+              progress.report({ message: safeMessage });
+            };
 
-          throwIfCancelled(cancellationToken);
-          const targetStats = await stat(targetPath).catch(() => null);
-          if (!targetStats) {
-            throw new Error(
-              normalizedSubpath
-                ? `The subpath "${normalizedSubpath}" does not exist in the repository.`
-                : "Failed to access repository contents after cloning."
-            );
-          }
+            try {
+              const combinedToken = linkedCancellation.token;
 
-          const workspaceRoot = targetStats.isDirectory() ? targetPath : path.dirname(targetPath);
-          let filesToProcess: string[];
-          if (targetStats.isDirectory()) {
-            filesToProcess = await collectFilesRecursive(targetPath, cancellationToken);
-          } else if (targetStats.isFile()) {
-            filesToProcess = [targetPath];
-          } else {
-            throw new Error("The selected path is not a regular file or directory.");
-          }
+              throwIfCancelled(combinedToken);
+              updatePanelProgress("Authenticating with GitHub…");
+              authToken = await authenticate();
+              if (!authToken) {
+                throw new Error("GitHub authentication failed or was cancelled.");
+              }
 
-          if (filesToProcess.length === 0) {
-            throw new Error("No files found to ingest in the selected scope.");
-          }
+              throwIfCancelled(combinedToken);
+              updatePanelProgress("Resolving repository reference…");
+              const sha = await resolveRefToSha(repoSlug, trimmedRef, authToken);
 
-          throwIfCancelled(cancellationToken);
-          updatePanelProgress("Preparing ingestion pipeline…");
+              throwIfCancelled(combinedToken);
+              updatePanelProgress("Cloning repository (blobless)…");
+              const { tempDir: cloneDir } = await partialClone(repoSlug, authToken);
+              tempDir = cloneDir;
 
-          const uniqueFiles = Array.from(new Set(filesToProcess.map((filePath) => path.resolve(filePath))));
-          const configurationMessages: string[] = [];
-          const configurationService = new ConfigurationService(
-            {
-              ...DEFAULT_CONFIG,
-              workspaceRoot,
-              repoName: repoSlug,
-              include: ["**/*"],
-              exclude: [".git/**", "node_modules/**"],
-              sectionSeparator: "\n\n"
-            },
-            {
-              addError: (message: string) => configurationMessages.push(`config error: ${message}`),
-              addWarning: (message: string) => configurationMessages.push(`config warning: ${message}`)
-            }
-          );
+              try {
+                throwIfCancelled(combinedToken);
+                updatePanelProgress("Fetching requested reference…");
 
-          const resolvedConfig = configurationService.loadConfig();
-          const maxFiles = resolvedConfig.maxFiles ?? uniqueFiles.length;
-          const selectedFiles = uniqueFiles.slice(0, maxFiles);
-          if (selectedFiles.length < uniqueFiles.length) {
-            configurationMessages.push(
-              `config warning: File list truncated to ${selectedFiles.length} entries (maxFiles=${maxFiles}).`
-            );
-          }
-
-          const gitignoreService = new GitignoreService();
-          const filterService = new FilterService({ workspaceRoot, gitignoreService });
-          const fileScanner = new FileScanner(vscode.Uri.file(workspaceRoot));
-          const processor = new ContentProcessor();
-          const analyzer = new TokenAnalyzer({ includeDefaultAdapters: true, enableCaching: true });
-          const outputChannel = vscode.window.createOutputChannel("Code Ingest: Remote Repo");
-          const logger: Logger = {
-            debug: (message, context) => outputChannel.appendLine(`[debug] ${message}${formatLogContext(context)}`),
-            info: (message, context) => outputChannel.appendLine(`[info] ${message}${formatLogContext(context)}`),
-            warn: (message, context) => outputChannel.appendLine(`[warn] ${message}${formatLogContext(context)}`),
-            error: (message, context) => outputChannel.appendLine(`[error] ${message}${formatLogContext(context)}`)
-          };
-          const errorReporter = new ErrorReporter(configurationService, logger);
-
-          try {
-            throwIfCancelled(cancellationToken);
-            updatePanelProgress("Generating repository digest…");
-
-            const digestGenerator = new DigestGenerator(
-              fileScanner,
-              filterService,
-              processor,
-              NotebookProcessor,
-              analyzer,
-              configurationService,
-              errorReporter
-            );
-
-            const digestResult = await digestGenerator.generateDigest({
-              selectedFiles,
-              outputFormat: "markdown",
-              applyRedaction: true,
-              includeMetadata: true,
-              binaryFilePolicy: (resolvedConfig.binaryFilePolicy ?? "skip") as BinaryFilePolicy,
-              maxFiles,
-              progressCallback: (update) => {
-                if (cancellationToken.isCancellationRequested) {
-                  throw new vscode.CancellationError();
+                try {
+                  await spawnGitPromise(["-C", tempDir, "fetch", "--depth=1", "origin", trimmedRef], {
+                    secretsToRedact: [authToken]
+                  });
+                } catch (fetchError) {
+                  const fetchMessage = fetchError instanceof Error ? fetchError.message : String(fetchError);
+                  services.diagnostics.add(`Fetch hint: ${fetchMessage}; retrying with full fetch.`);
+                  await spawnGitPromise(["-C", tempDir, "fetch", "origin"], {
+                    secretsToRedact: [authToken]
+                  });
                 }
 
-                const segments = [
-                  `Phase: ${update.phase}`,
-                  update.totalFiles ? `${update.filesProcessed}/${update.totalFiles} files` : undefined,
-                  update.tokensProcessed ? `${update.tokensProcessed} tokens` : undefined
-                ].filter(Boolean);
+                throwIfCancelled(combinedToken);
+                updatePanelProgress("Checking out target commit…");
+                await spawnGitPromise(["-C", tempDir, "checkout", sha], {
+                  secretsToRedact: [authToken]
+                });
 
-                updatePanelProgress(segments.join(" · "));
+                const repoRoot = path.resolve(tempDir);
+                const targetPath = normalizedSubpath ? path.resolve(repoRoot, normalizedSubpath) : repoRoot;
+                const relative = path.relative(repoRoot, targetPath);
+                if (relative.startsWith("..") || path.isAbsolute(relative)) {
+                  throw new Error("The provided subpath escapes the repository root.");
+                }
+
+                throwIfCancelled(combinedToken);
+                const targetStats = await stat(targetPath).catch(() => null);
+                if (!targetStats) {
+                  throw new Error(
+                    normalizedSubpath
+                      ? `The subpath "${normalizedSubpath}" does not exist in the repository.`
+                      : "Failed to access repository contents after cloning."
+                  );
+                }
+
+                const workspaceRoot = targetStats.isDirectory() ? targetPath : path.dirname(targetPath);
+                let filesToProcess: string[];
+                if (targetStats.isDirectory()) {
+                  filesToProcess = await collectFilesRecursive(targetPath, combinedToken);
+                } else if (targetStats.isFile()) {
+                  filesToProcess = [targetPath];
+                } else {
+                  throw new Error("The selected path is not a regular file or directory.");
+                }
+
+                if (filesToProcess.length === 0) {
+                  throw new Error("No files found to ingest in the selected scope.");
+                }
+
+                throwIfCancelled(combinedToken);
+                updatePanelProgress("Preparing ingestion pipeline…", {
+                  filesProcessed: 0,
+                  totalFiles: filesToProcess.length
+                });
+
+                const uniqueFiles = Array.from(new Set(filesToProcess.map((filePath) => path.resolve(filePath))));
+                const configurationMessages: string[] = [];
+                const configurationService = new ConfigurationService(
+                  {
+                    ...DEFAULT_CONFIG,
+                    workspaceRoot,
+                    repoName: repoSlug,
+                    include: ["**/*"],
+                    exclude: [".git/**", "node_modules/**"],
+                    sectionSeparator: "\n\n"
+                  },
+                  {
+                    addError: (message: string) => configurationMessages.push(`config error: ${message}`),
+                    addWarning: (message: string) => configurationMessages.push(`config warning: ${message}`)
+                  }
+                );
+
+                const resolvedConfig = configurationService.loadConfig();
+                const maxFiles = resolvedConfig.maxFiles ?? uniqueFiles.length;
+                const selectedFiles = uniqueFiles.slice(0, maxFiles);
+                if (selectedFiles.length < uniqueFiles.length) {
+                  configurationMessages.push(
+                    `config warning: File list truncated to ${selectedFiles.length} entries (maxFiles=${maxFiles}).`
+                  );
+                }
+
+                const gitignoreService = new GitignoreService();
+                const filterService = new FilterService({ workspaceRoot, gitignoreService });
+                const fileScanner = new FileScanner(vscode.Uri.file(workspaceRoot));
+                const processor = new ContentProcessor();
+                const analyzer = new TokenAnalyzer({ includeDefaultAdapters: true, enableCaching: true });
+                const outputChannel = vscode.window.createOutputChannel("Code Ingest: Remote Repo");
+                const logger: Logger = {
+                  debug: (message, context) => outputChannel.appendLine(`[debug] ${message}${formatLogContext(context)}`),
+                  info: (message, context) => outputChannel.appendLine(`[info] ${message}${formatLogContext(context)}`),
+                  warn: (message, context) => outputChannel.appendLine(`[warn] ${message}${formatLogContext(context)}`),
+                  error: (message, context) => outputChannel.appendLine(`[error] ${message}${formatLogContext(context)}`)
+                };
+                const errorReporter = new ErrorReporter(configurationService, logger);
+
+                try {
+                  throwIfCancelled(combinedToken);
+                  updatePanelProgress("Generating repository digest…");
+
+                  const digestGenerator = new DigestGenerator(
+                    fileScanner,
+                    filterService,
+                    processor,
+                    NotebookProcessor,
+                    analyzer,
+                    configurationService,
+                    errorReporter
+                  );
+
+                  const digestResult = await digestGenerator.generateDigest({
+                    selectedFiles,
+                    outputFormat: "markdown",
+                    applyRedaction: true,
+                    includeMetadata: true,
+                    binaryFilePolicy: (resolvedConfig.binaryFilePolicy ?? "skip") as BinaryFilePolicy,
+                    maxFiles,
+                    progressCallback: (update) => {
+                      throwIfCancelled(combinedToken);
+                      const segments = [
+                        `Phase: ${update.phase}`,
+                        update.totalFiles ? `${update.filesProcessed}/${update.totalFiles} files` : undefined,
+                        update.tokensProcessed ? `${update.tokensProcessed} tokens` : undefined
+                      ].filter(Boolean);
+
+                      const percent =
+                        update.totalFiles && update.totalFiles > 0
+                          ? Math.min(100, Math.round((update.filesProcessed / update.totalFiles) * 100))
+                          : undefined;
+
+                      updatePanelProgress(segments.join(" · "), {
+                        filesProcessed: update.filesProcessed,
+                        totalFiles: update.totalFiles,
+                        ...(percent !== undefined ? { percent } : {})
+                      });
+                    }
+                  });
+
+                  updatePanelProgress("Remote ingestion complete.", {
+                    busy: false,
+                    cancellable: false,
+                    percent: 100
+                  });
+
+                  const formattedDigest = formatDigest(digestResult, { format: "markdown" });
+                  const pipelineDiagnostics = [
+                    ...configurationMessages,
+                    ...digestResult.statistics.warnings.map((warning) => `warning: ${warning}`),
+                    ...digestResult.statistics.errors.map((error) => `error: ${error}`)
+                  ];
+
+                  return {
+                    digest: formattedDigest,
+                    digestResult,
+                    repoSlug,
+                    sha,
+                    totalTokens: digestResult.statistics.totalTokens,
+                    diagnostics: pipelineDiagnostics,
+                    workspaceRoot,
+                    runId
+                  } satisfies IngestOutcome;
+                } finally {
+                  outputChannel.dispose();
+                }
+              } finally {
+                if (tempDir) {
+                  try {
+                    await rm(tempDir, { recursive: true, force: true });
+                  } catch (cleanupError) {
+                    const cleanupMessage =
+                      cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+                    services.diagnostics.add(`Cleanup warning: ${cleanupMessage}`);
+                  }
+                }
               }
-            });
-
-            const formattedDigest = formatDigest(digestResult, { format: "markdown" });
-            const pipelineDiagnostics = [
-              ...configurationMessages,
-              ...digestResult.statistics.warnings.map((warning) => `warning: ${warning}`),
-              ...digestResult.statistics.errors.map((error) => `error: ${error}`)
-            ];
-
-            return {
-              digest: formattedDigest,
-              digestResult,
-              repoSlug,
-              sha,
-              totalTokens: digestResult.statistics.totalTokens,
-              diagnostics: pipelineDiagnostics,
-              workspaceRoot,
-              runId
-            } satisfies IngestOutcome;
-          } finally {
-            outputChannel.dispose();
-          }
-        } finally {
-          if (tempDir) {
-            try {
-              await rm(tempDir, { recursive: true, force: true });
-            } catch (cleanupError) {
-              const cleanupMessage =
-                cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-              services.diagnostics.add(`Cleanup warning: ${cleanupMessage}`);
+            } finally {
+              progressRegistration.dispose();
             }
           }
+        );
+
+        if (!outcome) {
+          services.webviewPanelManager.updateOperationState(DIGEST_OPERATION, {
+            status: "failed",
+            message: "Remote ingestion completed without producing a digest."
+          });
+          return { ok: false, reason: "unknown" };
         }
-      });
-    } catch (error) {
-      if (error instanceof vscode.CancellationError) {
+
+        const preview = buildPreviewFromOutcome(outcome);
+        const overview = outcome.digestResult.content.summary.overview;
+
+        services.webviewPanelManager.updateOperationState(DIGEST_OPERATION, {
+          status: "completed",
+          message: `Digest ready for ${outcome.repoSlug}@${outcome.sha}`
+        });
         services.webviewPanelManager.setStateSnapshot({
-          activeRunId: runId,
-          progress: {
-            runId,
-            phase: "ingest",
-            percent: undefined,
+          activeRunId: outcome.runId,
+          preview,
+          lastDigest: {
+            runId: outcome.runId,
+            generatedAt: outcome.digestResult.content.metadata.generatedAt.toISOString(),
+            redactionApplied: outcome.digestResult.redactionApplied,
+            truncationApplied: outcome.digestResult.truncationApplied,
+            totalTokens: outcome.digestResult.statistics.totalTokens,
+            totalFiles: overview.includedFiles
+          }
+        });
+
+        for (const diagnostic of outcome.diagnostics) {
+          services.diagnostics.add(diagnostic);
+        }
+
+        const document = await vscode.workspace.openTextDocument({
+          language: "markdown",
+          content: outcome.digest
+        });
+        await vscode.window.showTextDocument(document, { preview: false });
+
+        services.diagnostics.add(
+          `Remote digest generated for ${outcome.repoSlug}@${outcome.sha} (${outcome.totalTokens} tokens).`
+        );
+
+        const formattedTokens = TokenAnalyzer.formatEstimate(outcome.totalTokens);
+        void vscode.window.showInformationMessage(
+          `Code Ingest: Generated digest for ${outcome.repoSlug} @ ${outcome.sha} (${formattedTokens}).`
+        );
+
+        return { ok: true };
+      } catch (error) {
+        if (error instanceof vscode.CancellationError) {
+          services.diagnostics.add("Remote ingestion cancelled by the user.");
+          services.webviewPanelManager.updateOperationState(DIGEST_OPERATION, {
+            status: "cancelled",
+            message: "Remote ingestion cancelled"
+          });
+          services.webviewPanelManager.updateOperationProgress(DIGEST_OPERATION, progressId, {
             message: "Remote ingestion cancelled",
             busy: false,
-            filesProcessed: 0,
-            totalFiles: 0,
             cancellable: false,
             cancelled: true
-          },
-          status: "ingest-cancelled"
+          });
+          return { ok: false, reason: "cancelled" };
+        }
+
+        const wrapped = wrapError(error, {
+          command: "ingestRemoteRepo",
+          stage: "pipeline",
+          repoSlug,
+          ref: trimmedRef,
+          runId
         });
-        services.diagnostics.add("Remote ingestion cancelled by the user.");
-        return { ok: false, reason: "cancelled" };
-      }
+        const message = wrapped.message ?? "Remote ingestion failed";
 
-      const wrapped = wrapError(error, {
-        command: "ingestRemoteRepo",
-        stage: "pipeline",
-        repoSlug,
-        ref: trimmedRef,
-        runId
-      });
-      const message = wrapped.message ?? "Remote ingestion failed";
-      services.webviewPanelManager.setStateSnapshot({
-        activeRunId: runId,
-        progress: null,
-        status: null
-      });
-      services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
-        title: "Remote ingestion failed",
-        message,
-        runId
-      });
-      services.diagnostics.add(`Remote ingestion failed: ${message}`);
-      services.errorReporter.report(wrapped, {
-        source: "ingestRemoteRepo",
-        command: "ingestRemoteRepo",
-        metadata: { repoSlug, ref: trimmedRef, runId }
-      });
-      void vscode.window.showErrorMessage(`Code Ingest: Failed to ingest repository. ${message}`);
-      (wrapped as { handledByHost?: boolean }).handledByHost = true;
-      throw wrapped;
-    }
-
-    if (!outcome) {
-      return { ok: false, reason: "unknown" };
-    }
-
-    const preview = buildPreviewFromOutcome(outcome);
-    const overview = outcome.digestResult.content.summary.overview;
-    services.webviewPanelManager.setStateSnapshot({
-      activeRunId: outcome.runId,
-      preview,
-      progress: null,
-      status: "digest-ready",
-      lastDigest: {
-        runId: outcome.runId,
-        generatedAt: outcome.digestResult.content.metadata.generatedAt.toISOString(),
-        redactionApplied: outcome.digestResult.redactionApplied,
-        truncationApplied: outcome.digestResult.truncationApplied,
-        totalTokens: outcome.digestResult.statistics.totalTokens,
-        totalFiles: overview.includedFiles
+        services.webviewPanelManager.updateOperationState(DIGEST_OPERATION, {
+          status: "failed",
+          message
+        });
+        services.webviewPanelManager.setStateSnapshot({
+          activeRunId: runId,
+          preview: null
+        });
+        services.webviewPanelManager.sendCommand(COMMAND_MAP.HOST_TO_WEBVIEW.SHOW_ERROR, {
+          title: "Remote ingestion failed",
+          message,
+          runId
+        });
+        services.diagnostics.add(`Remote ingestion failed: ${message}`);
+        services.errorReporter.report(wrapped, {
+          source: "ingestRemoteRepo",
+          command: "ingestRemoteRepo",
+          metadata: { repoSlug, ref: trimmedRef, runId }
+        });
+        void vscode.window.showErrorMessage(`Code Ingest: Failed to ingest repository. ${message}`);
+        (wrapped as { handledByHost?: boolean }).handledByHost = true;
+        throw wrapped;
+      } finally {
+        queueRegistration.dispose();
+        linkedCancellation.dispose();
+        services.webviewPanelManager.clearOperationProgress(progressId);
       }
     });
-
-    for (const diagnostic of outcome.diagnostics) {
-      services.diagnostics.add(diagnostic);
-    }
-
-    const document = await vscode.workspace.openTextDocument({
-      language: "markdown",
-      content: outcome.digest
-    });
-
-    await vscode.window.showTextDocument(document, { preview: false });
-
-    services.diagnostics.add(
-      `Remote digest generated for ${outcome.repoSlug}@${outcome.sha} (${outcome.totalTokens} tokens).`
-    );
-
-    const formattedTokens = TokenAnalyzer.formatEstimate(outcome.totalTokens);
-    void vscode.window.showInformationMessage(
-      `Code Ingest: Generated digest for ${outcome.repoSlug} @ ${outcome.sha} (${formattedTokens}).`
-    );
-
-    return { ok: true };
   };
 
   const createHandler = (origin: "webview" | "extension") => async (...args: unknown[]) => {
@@ -687,7 +743,7 @@ export function registerIngestRemoteRepoCommand(
       return existingRun;
     }
 
-    const runPromise = enqueueRemoteIngestion(() => executeIngestion(options, runId));
+    const runPromise = executeIngestion(options, runId);
     inFlightRemoteIngestions.set(runId, runPromise);
 
     const cleanup = () => {
@@ -704,10 +760,3 @@ export function registerIngestRemoteRepoCommand(
   registerCommand(COMMAND_MAP.EXTENSION_ONLY.INGEST_REMOTE_REPO, createHandler("extension"));
   registerCommand(COMMAND_MAP.WEBVIEW_TO_HOST.LOAD_REMOTE_REPO, createHandler("webview"));
 }
-
-export const __testing = {
-  enqueueRemoteIngestion,
-  resetRemoteIngestQueue: () => {
-    remoteIngestQueue = Promise.resolve();
-  }
-};

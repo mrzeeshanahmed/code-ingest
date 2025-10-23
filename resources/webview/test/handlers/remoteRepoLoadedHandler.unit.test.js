@@ -11,8 +11,8 @@ describe("RemoteRepoLoadedHandler", () => {
   let createMockUIRenderer;
 
   beforeAll(async () => {
-    ({ RemoteRepoLoadedHandler } = await import("../remoteRepoLoadedHandler.js"));
-    ({ createMockStore, createMockUIRenderer } = await import("./testUtils.js"));
+    ({ RemoteRepoLoadedHandler } = await import("../../handlers/remoteRepoLoadedHandler.js"));
+    ({ createMockStore, createMockUIRenderer } = await import("../testUtils.js"));
   });
 
   it("updates repo metadata and enables actions", async () => {

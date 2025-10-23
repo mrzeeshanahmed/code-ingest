@@ -9,7 +9,7 @@ describe("HandlerRegistry readiness", () => {
   let HandlerRegistry;
 
   beforeAll(async () => {
-    ({ HandlerRegistry } = await import("../handlerRegistry.js"));
+    ({ HandlerRegistry } = await import("../../handlers/handlerRegistry.js"));
   });
 
   const createHandler = (collector) => ({

@@ -6,8 +6,11 @@ import { spawnSync } from "node:child_process";
 import * as vscode from "vscode";
 import * as ts from "typescript";
 import { COMMAND_MAP } from "../../commands/commandMap";
+import { markSelectionHandlersReady, __testing as selectionTesting } from "../../commands/selectionCommands";
 import { ConfigurationService } from "../../services/configurationService";
 import { DEFAULT_CONFIG } from "../../config/constants";
+import { DigestGenerator, type DigestResult } from "../../services/digestGenerator";
+import { WorkspaceManager } from "../../services/workspaceManager";
 import {
   activateExtension,
   cleanupTempWorkspaces,
@@ -64,6 +67,47 @@ async function ensureBuildArtifacts(): Promise<void> {
   }
 }
 
+function createMockDigestResult(workspaceRoot: string): DigestResult {
+  const generatedAt = new Date();
+  return {
+    content: {
+      files: [],
+      summary: {
+        overview: {
+          totalFiles: 1,
+          includedFiles: 1,
+          skippedFiles: 0,
+          binaryFiles: 0,
+          totalTokens: 32
+        },
+        tableOfContents: [],
+        notes: []
+      },
+      metadata: {
+        generatedAt,
+        workspaceRoot,
+        totalFiles: 1,
+        includedFiles: 1,
+        skippedFiles: 0,
+        binaryFiles: 0,
+        tokenEstimate: 32,
+        processingTime: 1,
+        redactionApplied: false,
+        generatorVersion: "test"
+      }
+    },
+    statistics: {
+      filesProcessed: 1,
+      totalTokens: 32,
+      processingTime: 1,
+      warnings: [],
+      errors: []
+    },
+    redactionApplied: false,
+    truncationApplied: false
+  } satisfies DigestResult;
+}
+
 describe("Sprint 0 integration", () => {
   let workspaceRoot: string;
   let restoreWorkspace: (() => void) | undefined;
@@ -82,12 +126,23 @@ describe("Sprint 0 integration", () => {
   }, 30000);
 
   beforeEach(async () => {
+    selectionTesting.resetReadiness();
     restoreWorkspace = mockWorkspaceFolders(workspaceRoot);
     context = createMockExtensionContext(PROJECT_ROOT);
     await activateExtension(context);
+    markSelectionHandlersReady();
+    jest.spyOn(DigestGenerator.prototype, "generateDigest").mockResolvedValue(createMockDigestResult(workspaceRoot));
+    jest
+      .spyOn(WorkspaceManager.prototype, "selectAll")
+      .mockImplementation(async (onProgress?: (processed: number, total: number) => void) => {
+        onProgress?.(1, 1);
+        return ["src/example.ts"];
+      });
   });
 
   afterEach(async () => {
+    selectionTesting.resetReadiness();
+    jest.restoreAllMocks();
     await deactivateExtension();
     restoreWorkspace?.();
     restoreWorkspace = undefined;
@@ -128,8 +183,8 @@ describe("Sprint 0 integration", () => {
     }).__getCreatedTreeViews?.();
     expect(createdTreeViews?.size ?? 0).toBe(0);
 
-  const providers = getRegisteredWebviewProviders();
-  expect(providers.has("codeIngestDashboard")).toBe(false);
+    const providers = getRegisteredWebviewProviders();
+    expect(providers.has("codeIngestDashboard")).toBe(false);
   });
 
   it("Webview resource loading test", () => {
@@ -168,9 +223,9 @@ describe("Sprint 0 integration", () => {
       outputFormat: DEFAULT_CONFIG.outputFormat
     });
 
-  const outputChannel = getOutputChannel("Code Ingest") as { appendLine: jest.Mock } | undefined;
-  expect(outputChannel).toBeDefined();
-  outputChannel!.appendLine.mockClear();
+    const outputChannel = getOutputChannel("Code Ingest") as { appendLine: jest.Mock } | undefined;
+    expect(outputChannel).toBeDefined();
+    outputChannel!.appendLine.mockClear();
 
     const workspaceMock = vscode.workspace as unknown as {
       __fireConfigurationChange?: (event: { affectsConfiguration(section: string): boolean }) => void;
@@ -179,7 +234,7 @@ describe("Sprint 0 integration", () => {
       affectsConfiguration: (section: string) => section === "codeIngest"
     });
 
-  expect(outputChannel!.appendLine).toHaveBeenCalledWith(expect.stringContaining("codeIngest configuration changed"));
+    expect(outputChannel!.appendLine).toHaveBeenCalledWith(expect.stringContaining("codeIngest configuration changed"));
   });
 
   it("Build artifact validation", async () => {
@@ -209,21 +264,26 @@ describe("Sprint 0 integration", () => {
     ];
 
     for (const commandId of commandsToExecute) {
+      if (commandId === COMMAND_MAP.EXTENSION_ONLY.SELECT_ALL) {
+        await expect(vscode.commands.executeCommand(commandId)).resolves.toMatchObject({ ok: true });
+        continue;
+      }
+
       await expect(vscode.commands.executeCommand(commandId)).resolves.toBeUndefined();
     }
 
-  const toggleResult = await vscode.commands.executeCommand("codeIngest.toggleRedactionOverride");
-  expect(typeof toggleResult).toBe("boolean");
+    const toggleResult = await vscode.commands.executeCommand("codeIngest.toggleRedactionOverride");
+    expect(typeof toggleResult).toBe("boolean");
 
-  const globalState = context.globalState;
-  expect(globalState.get<boolean>("codeIngest.redactionOverride")).toBe(toggleResult);
+    const globalState = context.globalState;
+    expect(globalState.get<boolean>("codeIngest.redactionOverride")).toBe(toggleResult);
 
     const windowMock = vscode.window as unknown as {
       showInputBox: jest.Mock;
     };
 
-  (windowMock.showInputBox as jest.Mock).mockImplementationOnce(async () => undefined);
-  await expect(vscode.commands.executeCommand("codeIngest.loadRemoteRepo")).resolves.toBeUndefined();
-  expect((vscode.window as unknown as { showErrorMessage: jest.Mock }).showErrorMessage).not.toHaveBeenCalled();
+    (windowMock.showInputBox as jest.Mock).mockImplementationOnce(async () => undefined);
+    await expect(vscode.commands.executeCommand("codeIngest.loadRemoteRepo")).resolves.toBeUndefined();
+    expect((vscode.window as unknown as { showErrorMessage: jest.Mock }).showErrorMessage).not.toHaveBeenCalled();
   });
 });

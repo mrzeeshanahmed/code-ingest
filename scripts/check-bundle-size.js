@@ -16,6 +16,10 @@ class BundleSizeChecker {
     this.reportPath = path.join(process.cwd(), 'bundle-size-report.json');
   }
 
+  hasBaselineEntries(candidate) {
+    return candidate && typeof candidate === 'object' && Object.keys(candidate).length > 0;
+  }
+
   async checkBundleSize() {
     console.log('🔍 Checking bundle sizes...');
 
@@ -68,33 +72,56 @@ class BundleSizeChecker {
     try {
       if (fs.existsSync(this.baselinePath)) {
         const content = fs.readFileSync(this.baselinePath, 'utf8');
-        return JSON.parse(content);
+        const parsed = JSON.parse(content);
+        if (this.hasBaselineEntries(parsed)) {
+          console.log('ℹ️  Using baseline from bundle-size-baseline.json');
+          return parsed;
+        }
       }
     } catch (error) {
-      console.warn('⚠️  Could not load baseline sizes:', error.message);
+      console.warn('⚠️  Could not load baseline sizes from bundle-size-baseline.json:', error.message);
     }
 
+    try {
+      if (fs.existsSync(this.reportPath)) {
+        const content = fs.readFileSync(this.reportPath, 'utf8');
+        const parsed = JSON.parse(content);
+        if (parsed && this.hasBaselineEntries(parsed.baseline)) {
+          console.log('ℹ️  Using baseline from bundle-size-report.json');
+          return parsed.baseline;
+        }
+      }
+    } catch (error) {
+      console.warn('⚠️  Could not load baseline sizes from bundle-size-report.json:', error.message);
+    }
+
+    console.log('ℹ️  Baseline not found; current bundle sizes will seed a new baseline.');
     return {};
   }
 
   generateReport(current, baseline) {
+    const effectiveBaseline = this.hasBaselineEntries(baseline) ? baseline : { ...current };
+
     const report = {
       timestamp: new Date().toISOString(),
       current,
-      baseline,
+      baseline: effectiveBaseline,
       changes: {},
       violations: []
     };
 
     for (const [key, size] of Object.entries(current)) {
-      if (baseline[key]) {
-        const change = size - baseline[key];
-        const percentBase = baseline[key] === 0 ? 0 : (change / baseline[key]) * 100;
-        report.changes[key] = {
-          absolute: change,
-          percent: percentBase,
-          size
-        };
+      if (Object.prototype.hasOwnProperty.call(effectiveBaseline, key)) {
+        const baselineSize = effectiveBaseline[key];
+        if (typeof baselineSize === 'number') {
+          const change = size - baselineSize;
+          const percentBase = baselineSize === 0 ? 0 : (change / baselineSize) * 100;
+          report.changes[key] = {
+            absolute: change,
+            percent: percentBase,
+            size
+          };
+        }
       }
     }
 

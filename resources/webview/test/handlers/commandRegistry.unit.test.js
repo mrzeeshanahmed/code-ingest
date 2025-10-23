@@ -83,7 +83,7 @@ describe("CommandRegistry", () => {
     const firstPromise = registry.execute("test.command", { seq: 1 });
     const secondPromise = registry.execute("test.command", { seq: 2 });
 
-  await tick();
+    await tick();
 
     expect(firstPromise).not.toBe(secondPromise);
     expect(posted).toHaveLength(1);
@@ -92,7 +92,7 @@ describe("CommandRegistry", () => {
     registry.handleResponse({ id: posted[0].id, payload: { ok: true } });
     await expect(firstPromise).resolves.toEqual({ ok: true });
 
-  await tick();
+    await tick();
 
     expect(posted).toHaveLength(2);
     expect(posted[1].payload).toEqual(expect.objectContaining({ seq: 2 }));

@@ -11,8 +11,8 @@ describe("StateHandler", () => {
   let createMockUIRenderer;
 
   beforeAll(async () => {
-    ({ StateHandler } = await import("../stateHandler.js"));
-    ({ createMockStore, createMockUIRenderer } = await import("./testUtils.js"));
+    ({ StateHandler } = await import("../../handlers/stateHandler.js"));
+    ({ createMockStore, createMockUIRenderer } = await import("../testUtils.js"));
   });
 
   it("handles full state updates", async () => {

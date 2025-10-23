@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it, jest } from "@jest/globals";
+import { describe, expect, it, jest } from "@jest/globals";
 import * as vscode from "vscode";
 import { COMMAND_MAP } from "../../../commands/commandMap";
-import { registerIngestRemoteRepoCommand, __testing as ingestRemoteTesting } from "../../../commands/ingestRemoteRepo";
+import { registerIngestRemoteRepoCommand } from "../../../commands/ingestRemoteRepo";
 import type { CommandServices } from "../../../commands/types";
 
 jest.mock("../../../services/githubService", () => ({
@@ -15,10 +15,6 @@ jest.mock("../../../utils/procRedact", () => ({
 }));
 
 describe("ingestRemoteRepo command", () => {
-  beforeEach(() => {
-    ingestRemoteTesting.resetRemoteIngestQueue();
-  });
-
   it("rejects payloads without repoUrl", async () => {
     const harness = createServiceHarness();
     const handlers = new Map<string, (...args: unknown[]) => unknown | Promise<unknown>>();
@@ -56,60 +52,67 @@ describe("ingestRemoteRepo command", () => {
     );
   });
 
-  it("queues remote ingestion tasks sequentially", async () => {
-    const events: string[] = [];
-    let releaseFirst: (() => void) | undefined;
-
-    const firstTask = ingestRemoteTesting.enqueueRemoteIngestion(async () => {
-      events.push("first-start");
-      await new Promise<void>((resolve) => {
-        releaseFirst = () => {
-          events.push("first-end");
-          resolve();
-        };
-      });
+  it("delegates execution through the workspace digest queue", async () => {
+    const queueDigestOperation = jest.fn(async () => ({ ok: true }));
+    const harness = createServiceHarness({
+      workspaceManager: { queueDigestOperation } as unknown as CommandServices["workspaceManager"]
     });
+    const handlers = new Map<string, (...args: unknown[]) => unknown | Promise<unknown>>();
 
-    const secondTask = ingestRemoteTesting.enqueueRemoteIngestion(async () => {
-      events.push("second-start");
-      events.push("second-end");
-    });
+    registerIngestRemoteRepoCommand(
+      { subscriptions: [] } as unknown as vscode.ExtensionContext,
+      harness.services,
+      (commandId, handler) => {
+        handlers.set(commandId, handler);
+        return { dispose: jest.fn() } as unknown as vscode.Disposable;
+      }
+    );
 
-    await Promise.resolve();
-    expect(events).toEqual(["first-start"]);
-    releaseFirst?.();
-    await Promise.all([firstTask, secondTask]);
+    const handler = handlers.get(COMMAND_MAP.WEBVIEW_TO_HOST.LOAD_REMOTE_REPO);
+    expect(handler).toBeDefined();
 
-    expect(events).toEqual(["first-start", "first-end", "second-start", "second-end"]);
+    await handler?.({ repoUrl: "https://github.com/acme/project", ref: "main" });
+
+  expect(queueDigestOperation).toHaveBeenCalledTimes(1);
+  const call = queueDigestOperation.mock.calls[0] as unknown[];
+  expect(typeof call[0]).toBe("function");
   });
 });
 
-function createServiceHarness() {
+function createServiceHarness(overrides?: Partial<CommandServices>) {
   const diagnostics = { add: jest.fn(), clear: jest.fn(), getAll: jest.fn(() => []) };
   const webviewPanelManager = {
     sendCommand: jest.fn(),
     setStateSnapshot: jest.fn(),
+    updateOperationState: jest.fn(),
+    updateOperationProgress: jest.fn(),
+    clearOperationProgress: jest.fn(),
     createAndShowPanel: jest.fn(),
     getStateSnapshot: jest.fn(),
     tryRestoreState: jest.fn(() => false)
   };
 
+  const defaultWorkspaceManager = {
+    queueDigestOperation: jest.fn(async () => ({ ok: true }))
+  };
+
   const services: CommandServices = {
     diagnostics: diagnostics as unknown as CommandServices["diagnostics"],
     gitignoreService: {} as CommandServices["gitignoreService"],
-    workspaceManager: {} as CommandServices["workspaceManager"],
-    webviewPanelManager: webviewPanelManager as unknown as CommandServices["webviewPanelManager"],
-    performanceMonitor: {} as CommandServices["performanceMonitor"],
-    diagnosticService: {} as CommandServices["diagnosticService"],
-    configurationService: {} as CommandServices["configurationService"],
-    errorReporter: {} as CommandServices["errorReporter"],
-    extensionUri: vscode.Uri.file("/ext"),
-    outputWriter: {} as CommandServices["outputWriter"]
+    workspaceManager: (overrides?.workspaceManager ?? (defaultWorkspaceManager as unknown as CommandServices["workspaceManager"])),
+    webviewPanelManager: (overrides?.webviewPanelManager ?? (webviewPanelManager as unknown as CommandServices["webviewPanelManager"])),
+    performanceMonitor: overrides?.performanceMonitor ?? ({} as CommandServices["performanceMonitor"]),
+    diagnosticService: overrides?.diagnosticService ?? ({} as CommandServices["diagnosticService"]),
+    configurationService: overrides?.configurationService ?? ({} as CommandServices["configurationService"]),
+    errorReporter: overrides?.errorReporter ?? ({} as CommandServices["errorReporter"]),
+    extensionUri: overrides?.extensionUri ?? vscode.Uri.file("/ext"),
+    outputWriter: overrides?.outputWriter ?? ({} as CommandServices["outputWriter"])
   };
 
   return {
     services,
     diagnostics,
-    webviewPanelManager
+    webviewPanelManager,
+    workspaceManager: services.workspaceManager
   };
 }
