@@ -1,12 +1,8 @@
-import { beforeEach, describe, expect, jest, test } from "@jest/globals";
+import { afterEach, beforeEach, describe, expect, jest, test } from "@jest/globals";
 import * as vscode from "vscode";
 
 import { TelemetryService, type TelemetryEvent } from "../services/telemetryService";
 import { ConfigurationService } from "../services/configurationService";
-import type { Logger } from "../utils/gitProcessManager";
-import type { PerformanceMonitor, PerformanceMetrics as OperationMetrics, PerformanceReport } from "../services/performanceMonitor";
-import type { ErrorReporter } from "../services/errorReporter";
-import { ErrorSeverity, ErrorCategory, type ErrorClassification } from "../utils/errorHandler";
 
 class InMemoryConfigurationService extends ConfigurationService {
   private readonly store = new Map<string, unknown>();
@@ -27,62 +23,44 @@ class InMemoryConfigurationService extends ConfigurationService {
 
 describe("TelemetryService", () => {
   let configService: InMemoryConfigurationService;
-  let logger: Logger;
-  let performanceMonitor: PerformanceMonitor;
-  let errorReporter: ErrorReporter;
   let telemetry: TelemetryService;
-
-  const zeroMemory: NodeJS.MemoryUsage = {
-    rss: 0,
-    heapTotal: 0,
-    heapUsed: 0,
-    external: 0,
-    arrayBuffers: 0
-  };
-
-  const createMetrics = (overrides: Partial<OperationMetrics> = {}): OperationMetrics => ({
-    operationId: "op-1",
-    operationType: "digest",
-    startTime: 0,
-    endTime: 100,
-    duration: 1000,
-    memoryUsage: {
-      start: zeroMemory,
-      end: zeroMemory,
-      peak: { ...zeroMemory, heapUsed: 1024 }
-    },
-    resourceUsage: {
-      cpuTime: 1,
-      fileOperations: 0,
-      networkRequests: 0
-    },
-    metadata: {},
-    ...overrides
-  });
-
-  const createPerformanceReport = (metrics: OperationMetrics[]): PerformanceReport => ({
-    sessionId: "session-1",
-    timestamp: new Date(),
-    overall: {
-      totalOperations: metrics.length,
-      totalDuration: metrics.reduce((sum, metric) => sum + metric.duration, 0),
-      averageDuration: metrics.length === 0 ? 0 : metrics.reduce((sum, metric) => sum + metric.duration, 0) / metrics.length,
-      slowestOperation: metrics[0] ?? createMetrics(),
-      fastestOperation: metrics[0] ?? createMetrics()
-    },
-    byOperation: new Map(),
-    bottlenecks: [],
-    recommendations: []
-  });
+  let context: vscode.ExtensionContext;
+  let state: Map<string, unknown>;
 
   const telemetryConfigValues: Record<string, unknown> = {
-    enabled: true,
+  enabled: true,
+  level: "all",
     enabledInDevelopment: true,
     enabledInTests: true,
     collectionInterval: 0,
-    maxEventsPerSession: 10,
-    maxEventAge: 10_000,
+    maxEventsPerSession: 25,
+    maxEventsPerFlush: 25,
     endpoint: undefined
+  };
+
+  const createExtensionContext = () => {
+    const internalState = new Map<string, unknown>();
+
+    const globalState = {
+      get: jest.fn(<T>(key: string, defaultValue?: T) => {
+        return (internalState.has(key) ? (internalState.get(key) as T) : defaultValue) as T | undefined;
+      }),
+      update: jest.fn(async (key: string, value: unknown) => {
+        if (value === undefined) {
+          internalState.delete(key);
+        } else {
+          internalState.set(key, value);
+        }
+      })
+    };
+
+    const extensionContext = {
+      globalState: globalState as unknown,
+      subscriptions: [] as vscode.Disposable[],
+      extensionMode: vscode.ExtensionMode.Production
+    } as unknown as vscode.ExtensionContext;
+
+    return { context: extensionContext, state: internalState, globalState };
   };
 
   beforeEach(async () => {
@@ -108,26 +86,26 @@ describe("TelemetryService", () => {
       } as unknown as vscode.WorkspaceConfiguration;
     });
 
-    configService = new InMemoryConfigurationService();
-    await configService.updateGlobalValue("codeIngest.telemetryConsent", true);
+    const contextResult = createExtensionContext();
+    context = contextResult.context;
+    state = contextResult.state;
 
-    logger = {
-      debug: jest.fn(),
-      info: jest.fn(),
-      warn: jest.fn(),
-      error: jest.fn()
+    const consentSnapshot = {
+      granted: true,
+      version: "1.0",
+      timestamp: new Date().toISOString(),
+      level: "usage"
     };
+    state.set("codeIngest.telemetry.userId", "user-12345");
+    state.set("codeIngest.telemetry.lastConsent", JSON.stringify(consentSnapshot));
 
-    performanceMonitor = {
-      getMetricsHistory: jest.fn().mockReturnValue([]),
-      generateReport: jest.fn().mockReturnValue(createPerformanceReport([]))
-    } as unknown as PerformanceMonitor;
+    configService = new InMemoryConfigurationService();
+    telemetry = new TelemetryService(configService, context);
+    await telemetry.initialize();
+  });
 
-    errorReporter = {
-      getErrorBuffer: jest.fn().mockReturnValue([])
-    } as unknown as ErrorReporter;
-
-    telemetry = new TelemetryService(configService, logger, performanceMonitor, errorReporter);
+  afterEach(() => {
+    telemetry.dispose();
   });
 
   test("sanitizes sensitive strings before storing events", async () => {
@@ -137,69 +115,42 @@ describe("TelemetryService", () => {
       note: "a".repeat(150)
     });
 
-  await (telemetry as unknown as { flushBufferedEvents: () => Promise<void> }).flushBufferedEvents();
+    await telemetry.flush();
 
-  const events = await (telemetry as unknown as { storage: { loadEvents: () => Promise<TelemetryEvent[]> } }).storage.loadEvents();
+    const events = await (telemetry as unknown as { storage: { loadEvents: () => Promise<TelemetryEvent[]> } }).storage.loadEvents();
     expect(events).toHaveLength(1);
     expect(events[0].properties.email).toBe("[REDACTED]");
     expect(events[0].properties.path).toBe("[REDACTED]");
-  const noteValue = events[0].properties.note as string;
-  expect(noteValue.length).toBeLessThanOrEqual(103);
+    const noteValue = events[0].properties.note as string;
+    expect(noteValue.length).toBeLessThanOrEqual(103);
   });
 
   test("aggregates usage, performance and error metrics", async () => {
-    const metrics = [
-      createMetrics({ operationId: "op-1", duration: 1200 }),
-      createMetrics({ operationId: "op-2", duration: 800 })
-    ];
-
-    (performanceMonitor.getMetricsHistory as jest.Mock).mockReturnValue(metrics);
-    (performanceMonitor.generateReport as jest.Mock).mockReturnValue(createPerformanceReport(metrics));
-
-    const errorClassification: ErrorClassification = {
-      category: ErrorCategory.SYSTEM,
-      severity: ErrorSeverity.CRITICAL,
-      userFriendlyMessage: "boom",
-      technicalDetails: "boom",
-      suggestedActions: [],
-      isRecoverable: false,
-      isRetryable: false
-    };
-
-    (errorReporter.getErrorBuffer as jest.Mock).mockReturnValue([
-      {
-        context: { classification: errorClassification, recoverable: false },
-        classification: errorClassification
-      }
-    ]);
-
     telemetry.trackFeatureUsage("digest-generation", { filePath: "/Users/me/file" });
-    telemetry.recordOutputFormatUsage("Markdown");
-    telemetry.trackOperation("digest", 1200, true, { filePath: "/Users/me/file" });
-    telemetry.trackOperation("digest", 800, false);
-    telemetry.trackError(new Error("boom"), { component: "test", operation: "digest" }, false);
+    telemetry.trackOperationDuration("digest", 1_200, true);
+    telemetry.trackOperationDuration("digest", 800, false);
+    telemetry.trackError(new Error("boom"), { component: "test", operation: "digest" });
+    telemetry.trackEvent("pipeline.fileProcessed", { filePath: "/repo/file.ts" }, {});
+    telemetry.trackEvent("performance.snapshot", {}, { memoryUsageMB: 128, cpuTimeMs: 45, fileSizeBytes: 4096 });
 
-  await (telemetry as unknown as { flushBufferedEvents: () => Promise<void> }).flushBufferedEvents();
+    const aggregated = await telemetry.getAggregatedMetrics();
 
-  const aggregated = await telemetry.exportUserData();
-
-    expect(aggregated.sessionCount).toBeGreaterThanOrEqual(1);
-    expect(aggregated.totalOperations).toBe(2);
+    expect(aggregated.sessionCount).toBe(1);
+    expect(aggregated.operationCounts.digest).toBe(2);
     expect(aggregated.averageOperationDuration).toBeGreaterThan(0);
     expect(aggregated.errorRate).toBeGreaterThan(0);
-    expect(aggregated.featureUsage["digest-generation"]).toBe(1);
-    expect(aggregated.performanceProfile.totalOperations).toBe(2);
-    expect(["fair", "good", "excellent", "poor"]).toContain(aggregated.performanceProfile.performanceGrade);
+    expect(aggregated.featureUsageFrequency["digest-generation"]).toBe(1);
+    expect(aggregated.performanceProfile.averageMemoryUsage).toBeGreaterThan(0);
+    expect(aggregated.performanceProfile.mostFilesProcessedInSession).toBe(1);
   });
 
   test("disabling telemetry stops event collection", async () => {
-    telemetry.setTelemetryEnabled(false);
+    await telemetry.setTelemetryEnabled(false);
     telemetry.trackEvent("disabled", { foo: "bar" });
 
-  await (telemetry as unknown as { flushBufferedEvents: () => Promise<void> }).flushBufferedEvents();
+    await telemetry.flush();
 
-  const events = await (telemetry as unknown as { storage: { loadEvents: () => Promise<TelemetryEvent[]> } }).storage.loadEvents();
+    const events = await (telemetry as unknown as { storage: { loadEvents: () => Promise<TelemetryEvent[]> } }).storage.loadEvents();
     expect(events).toHaveLength(0);
-    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining("telemetry.event.rejected"), expect.anything());
   });
 });

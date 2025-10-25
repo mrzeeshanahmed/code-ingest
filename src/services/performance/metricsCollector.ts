@@ -48,13 +48,15 @@ export class MetricsCollector {
   private readonly completedOperations: OperationMetrics[] = [];
   private readonly systemMetrics: SystemMetrics[] = [];
   private readonly alerts: PerformanceAlert[] = [];
-  private systemMonitor?: NodeJS.Timeout;
+  private systemMonitor: NodeJS.Timeout | null = null;
   private lastCpuSample: CpuSample = {
     usage: process.cpuUsage(),
     timestamp: Date.now()
   };
   private lastDiagnostics: string[] = [];
   private lastDiagnosticsTimestamp = 0;
+  private disposed = false;
+  private pendingDiagnostics: Promise<void> | null = null;
 
   private readonly MAX_HISTORY = 1_000;
   private readonly DIAGNOSTIC_REFRESH_INTERVAL_MS = 60_000;
@@ -68,6 +70,7 @@ export class MetricsCollector {
   }
 
   startOperation(name: string, metadata?: Record<string, unknown>): string {
+    this.ensureNotDisposed();
     const operationId = this.performanceMonitor.startOperation(name, metadata ?? {});
     const startMemory = this.snapshotMemory();
     const operation: OperationMetrics = {
@@ -87,6 +90,7 @@ export class MetricsCollector {
   }
 
   updateOperationProgress(operationId: string, progress: number): void {
+    this.ensureNotDisposed();
     const operation = this.activeOperations.get(operationId);
     if (!operation) {
       return;
@@ -95,6 +99,7 @@ export class MetricsCollector {
   }
 
   completeOperation(operationId: string, success: boolean): void {
+    this.ensureNotDisposed();
     const operation = this.activeOperations.get(operationId);
     const completedMetrics = this.performanceMonitor.endOperation(operationId);
 
@@ -126,6 +131,7 @@ export class MetricsCollector {
   }
 
   getCurrentMetrics(): DashboardMetrics {
+    this.ensureNotDisposed();
     const activeOperations = this.buildActiveOperations();
     const sessionSummary = this.performanceMonitor.getSessionSummary();
     const metricsHistory = this.performanceMonitor.getMetricsHistory();
@@ -168,6 +174,7 @@ export class MetricsCollector {
   }
 
   getHistoricalTrends(hours: number = DEFAULT_TREND_SPAN_HOURS): TrendData[] {
+    this.ensureNotDisposed();
     const windowMs = hours * 60 * 60 * 1_000;
     const cutoff = Date.now() - windowMs;
     const history = this.performanceMonitor.getMetricsHistory();
@@ -186,16 +193,49 @@ export class MetricsCollector {
   }
 
   detectBottlenecks(): Bottleneck[] {
+    this.ensureNotDisposed();
     return this.performanceMonitor.generateReport().bottlenecks;
   }
 
   generateRecommendations(): PerformanceRecommendation[] {
+    this.ensureNotDisposed();
     return this.generateRecommendationsFromReport(this.performanceMonitor.generateReport());
   }
 
-  private startSystemMonitoring(): void {
+  dispose(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+
     if (this.systemMonitor) {
       clearInterval(this.systemMonitor);
+      this.systemMonitor = null;
+    }
+
+    for (const operationId of this.activeOperations.keys()) {
+      try {
+        this.performanceMonitor.endOperation(operationId);
+      } catch {
+        // Swallow errors during disposal to avoid surfacing noise during shutdown.
+      }
+    }
+
+    this.activeOperations.clear();
+    this.completedOperations.length = 0;
+    this.systemMetrics.length = 0;
+    this.alerts.length = 0;
+    this.lastDiagnostics = [];
+    this.pendingDiagnostics = null;
+  }
+
+  private startSystemMonitoring(): void {
+    if (this.disposed) {
+      return;
+    }
+    if (this.systemMonitor) {
+      clearInterval(this.systemMonitor);
+      this.systemMonitor = null;
     }
 
     const interval = setInterval(() => {
@@ -210,10 +250,11 @@ export class MetricsCollector {
       interval.unref();
     }
 
-    this.systemMonitor = interval;
+  this.systemMonitor = interval;
   }
 
   private collectSystemMetrics(): SystemMetrics {
+    this.ensureNotDisposed();
     const currentCpu = process.cpuUsage();
     const now = Date.now();
     const elapsedMs = now - this.lastCpuSample.timestamp;
@@ -247,6 +288,7 @@ export class MetricsCollector {
   }
 
   private buildActiveOperations(): ActiveOperation[] {
+    this.ensureNotDisposed();
     const snapshots = this.performanceMonitor.getActiveOperationsSnapshot();
     const now = Date.now();
 
@@ -279,6 +321,7 @@ export class MetricsCollector {
   }
 
   private buildHistoricalTrends(metricsHistory: PerformanceMetrics[]): DashboardMetrics["historical"] {
+    this.ensureNotDisposed();
     const operationTrends = metricsHistory.map((metric) => ({
       timestamp: this.resolveTimestamp(metric),
       value: metric.duration,
@@ -392,6 +435,7 @@ export class MetricsCollector {
   }
 
   private computeAlerts(systemMetrics: SystemMetrics, bottlenecks: Bottleneck[], report: PerformanceReport): PerformanceAlert[] {
+    this.ensureNotDisposed();
     const alerts: PerformanceAlert[] = [];
 
     if (Date.now() - this.lastDiagnosticsTimestamp > this.DIAGNOSTIC_REFRESH_INTERVAL_MS) {
@@ -467,19 +511,47 @@ export class MetricsCollector {
   }
 
   private async refreshDiagnostics(): Promise<void> {
-    try {
-      const report = await this.diagnosticService.runDiagnostics(["system"]);
-      this.lastDiagnostics = report.diagnostics.map((diagnostic) => {
-        const status = diagnostic.status.toUpperCase();
-        return `${status}: ${diagnostic.message}`;
-      });
-      this.lastDiagnosticsTimestamp = Date.now();
-    } catch (error) {
-      this.lastDiagnosticsTimestamp = Date.now();
-      this.lastDiagnostics.push(`DIAGNOSTICS_FAILED: ${(error as Error).message}`);
-      if (this.lastDiagnostics.length > MAX_ALERT_HISTORY) {
-        this.lastDiagnostics.splice(0, this.lastDiagnostics.length - MAX_ALERT_HISTORY);
+    if (this.disposed) {
+      return;
+    }
+
+    const refreshTask = (async () => {
+      try {
+        const report = await this.diagnosticService.runDiagnostics(["system"]);
+        if (this.disposed) {
+          return;
+        }
+        this.lastDiagnostics = report.diagnostics.map((diagnostic) => {
+          const status = diagnostic.status.toUpperCase();
+          return `${status}: ${diagnostic.message}`;
+        });
+        this.lastDiagnosticsTimestamp = Date.now();
+      } catch (error) {
+        if (this.disposed) {
+          return;
+        }
+        this.lastDiagnosticsTimestamp = Date.now();
+        this.lastDiagnostics.push(`DIAGNOSTICS_FAILED: ${(error as Error).message}`);
+        if (this.lastDiagnostics.length > MAX_ALERT_HISTORY) {
+          this.lastDiagnostics.splice(0, this.lastDiagnostics.length - MAX_ALERT_HISTORY);
+        }
       }
+    })();
+
+    this.pendingDiagnostics = refreshTask;
+
+    try {
+      await refreshTask;
+    } finally {
+      if (this.pendingDiagnostics === refreshTask) {
+        this.pendingDiagnostics = null;
+      }
+    }
+  }
+
+  private ensureNotDisposed(): void {
+    if (this.disposed) {
+      throw new Error("MetricsCollector has been disposed");
     }
   }
 

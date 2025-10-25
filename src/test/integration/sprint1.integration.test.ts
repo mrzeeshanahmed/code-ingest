@@ -8,13 +8,14 @@ import * as path from "node:path";
 import { performance } from "node:perf_hooks";
 import * as vscode from "vscode";
 
-import { FileScanner } from "../../services/fileScanner";
+import { FileScanner, type FileNode } from "../../services/fileScanner";
 import { GitignoreService } from "../../services/gitignoreService";
 import { FilterService } from "../../services/filterService";
 import { CodeIngestTreeProvider, type TreeSelectionChange } from "../../providers/treeDataProvider";
 import { SelectionManager } from "../../providers/selectionManager";
 import { ExpandState } from "../../providers/expandState";
 import { DirectoryCache } from "../../providers/directoryCache";
+import { DependencyScanner } from "../../services/security/dependencyScanner";
 import type { Diagnostics } from "../../utils/validateConfig";
 import { configureWorkspaceEnvironment, resetWorkspaceEnvironment } from "../support/workspaceEnvironment";
 
@@ -375,6 +376,137 @@ describe("Sprint 1 Integration: Scanning Pipeline", () => {
     const cacheEntry = await directoryCache.getDirectoryPage(srcPath, 0, 10);
     expect(cacheEntry.nodes.length).toBeGreaterThan(0);
     expect(directoryCache.has(srcPath)).toBe(true);
+  });
+
+  it("preserves directory cache pagination when later pages load before earlier ones", async () => {
+    const pagingDir = "cache-paging";
+    await workspace.createDirectory(pagingDir);
+
+    const fileCount = 12;
+    for (let index = 0; index < fileCount; index += 1) {
+      const fileName = `file-${index.toString().padStart(2, "0")}.txt`;
+      await workspace.createFile(path.join(pagingDir, fileName), `content-${index}`);
+    }
+
+    const dirPath = path.join(workspace.root, pagingDir);
+    const offset = 6;
+    const pageSize = 3;
+
+    const laterPage = await directoryCache.getDirectoryPage(dirPath, offset, pageSize);
+    const expectedLaterCount = Math.max(0, Math.min(pageSize, laterPage.totalCount - offset));
+    const laterNodes = laterPage.nodes.filter((node): node is FileNode => Boolean(node));
+    expect(laterNodes).toHaveLength(expectedLaterCount);
+    expect(laterNodes.map((node) => node.name)).toEqual([
+      "file-06.txt",
+      "file-07.txt",
+      "file-08.txt"
+    ]);
+    expect(laterPage.nextOffset).toBe(0);
+
+    const snapshotAfterLater = directoryCache
+      .inspectCache()
+      .find((entry) => entry.dirPath === path.normalize(dirPath))?.entry;
+    expect(snapshotAfterLater).toBeDefined();
+    for (let index = 0; index < offset; index += 1) {
+      expect(snapshotAfterLater!.nodes[index]).toBeUndefined();
+    }
+    for (let index = offset; index < offset + pageSize; index += 1) {
+      expect(snapshotAfterLater!.nodes[index]).toBeDefined();
+    }
+
+    const firstPage = await directoryCache.getDirectoryPage(dirPath, 0, pageSize);
+    const firstNodes = firstPage.nodes.filter((node): node is FileNode => Boolean(node));
+    expect(firstNodes.map((node) => node.name)).toEqual([
+      "file-00.txt",
+      "file-01.txt",
+      "file-02.txt"
+    ]);
+    expect(firstPage.nextOffset).toBe(pageSize);
+
+    const snapshotAfterFirst = directoryCache
+      .inspectCache()
+      .find((entry) => entry.dirPath === path.normalize(dirPath))?.entry;
+    expect(snapshotAfterFirst).toBeDefined();
+    for (let index = 0; index < pageSize; index += 1) {
+      expect(snapshotAfterFirst!.nodes[index]).toBeDefined();
+    }
+    for (let index = offset; index < offset + pageSize; index += 1) {
+      expect(snapshotAfterFirst!.nodes[index]).toBeDefined();
+    }
+
+    const loadMoreBatch = await directoryCache.loadMoreFiles(dirPath, pageSize);
+    expect(loadMoreBatch.map((node) => node.name)).toEqual([
+      "file-03.txt",
+      "file-04.txt",
+      "file-05.txt"
+    ]);
+
+    const finalEntry = directoryCache
+      .inspectCache()
+      .find((entry) => entry.dirPath === path.normalize(dirPath))?.entry;
+    expect(finalEntry).toBeDefined();
+    expect(finalEntry!.nextOffset).toBe(offset + pageSize);
+    for (let index = 0; index < offset + pageSize; index += 1) {
+      expect(finalEntry!.nodes[index]).toBeDefined();
+    }
+  });
+
+  it("evaluates dependency vulnerabilities across semver ranges", async () => {
+    const manifest = {
+      name: "integration-test",
+      version: "1.0.0",
+      dependencies: {
+        lodash: "^4.17.20",
+        minimist: "^1.2.3"
+      },
+      devDependencies: {
+        minimist: "1.2.3-beta.0"
+      }
+    };
+
+    await workspace.createFile("package.json", JSON.stringify(manifest, null, 2));
+
+    const addError = jest.fn();
+    const addWarning = jest.fn();
+    const diagnostics: Diagnostics = { addError, addWarning };
+    const scanner = new DependencyScanner(diagnostics);
+
+    const originalCwd = process.cwd();
+    process.chdir(workspace.root);
+    try {
+      const results = await scanner.scanDependencies();
+      const lodashEntry = results.find((entry) => entry.dependency.name === "lodash" && !entry.dependency.dev);
+      expect(lodashEntry?.vulnerabilities.map((item) => item.id)).toContain("ADVISORY-2021-23337");
+
+      const minimistProd = results.find((entry) => entry.dependency.name === "minimist" && !entry.dependency.dev);
+      expect(minimistProd?.vulnerabilities ?? []).toHaveLength(0);
+
+      const minimistDev = results.find((entry) => entry.dependency.name === "minimist" && entry.dependency.dev);
+      expect(minimistDev?.vulnerabilities.map((item) => item.id)).toContain("ADVISORY-2020-7598");
+    } finally {
+      process.chdir(originalCwd);
+    }
+
+    expect(addError).not.toHaveBeenCalled();
+    expect(addWarning).not.toHaveBeenCalled();
+  });
+
+  it("emits diagnostics when package manifest is unavailable", async () => {
+    const addError = jest.fn();
+    const diagnostics: Diagnostics = { addError, addWarning: jest.fn() };
+    const scanner = new DependencyScanner(diagnostics);
+
+    const originalCwd = process.cwd();
+    process.chdir(workspace.root);
+    try {
+      const results = await scanner.scanDependencies();
+      expect(results).toEqual([]);
+    } finally {
+      process.chdir(originalCwd);
+    }
+
+    expect(addError).toHaveBeenCalledTimes(1);
+    expect(addError.mock.calls[0][0]).toContain("DependencyScanner failed to read package.json");
   });
 
   it("handles large repository simulation with performance and cancellation guarantees", async () => {

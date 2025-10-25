@@ -1,5 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as semver from "semver";
+import * as vscode from "vscode";
 
 import type {
   CVEEntry,
@@ -12,6 +14,31 @@ import type {
   SecurityPipelineContext,
   SecurityReportingResult
 } from "./types";
+import { Diagnostics } from "../../utils/validateConfig";
+
+const DEFAULT_DIAGNOSTICS: Diagnostics = {
+  addError: (message: string) => console.error(message),
+  addWarning: (message: string) => console.warn(message)
+};
+
+function resolveMinVersion(range: string): semver.SemVer | null {
+  const trimmed = range.trim();
+  const min = semver.minVersion(trimmed);
+  if (min) {
+    return min;
+  }
+  return semver.coerce(trimmed);
+}
+
+function parseFixedVersion(spec: string): semver.SemVer | null {
+  const trimmed = spec.trim();
+  const normalized = trimmed.startsWith(">=") ? trimmed.slice(2).trim() : trimmed;
+  const parsed = semver.parse(normalized);
+  if (parsed) {
+    return parsed;
+  }
+  return semver.coerce(normalized);
+}
 
 class VulnerabilityDB {
   private readonly advisories: Record<string, KnownVulnerability[]> = {
@@ -58,16 +85,23 @@ class VulnerabilityDB {
     if (!fixedIn) {
       return true;
     }
-    if (!fixedIn.startsWith(">=")) {
+    const safeVersion = parseFixedVersion(fixedIn);
+    const candidate = resolveMinVersion(version);
+    if (!safeVersion || !candidate) {
       return true;
     }
-    const minVersion = fixedIn.replace(">=", "").trim();
-    return version < minVersion;
+    return semver.lt(candidate, safeVersion);
   }
+}
+
+interface PopulateReportingOptions {
+  abortSignal?: AbortSignal;
 }
 
 export class DependencyScanner {
   private readonly vulnerabilityDatabase = new VulnerabilityDB();
+
+  constructor(private readonly diagnostics: Diagnostics = DEFAULT_DIAGNOSTICS) {}
 
   async scanDependencies(): Promise<DependencyVulnerability[]> {
     const dependencies = this.parseDependencies();
@@ -89,19 +123,34 @@ export class DependencyScanner {
     return this.buildMaliciousPackages(dependencies);
   }
 
-  async populateReporting(context: SecurityPipelineContext, reporting: SecurityReportingResult): Promise<void> {
+  async populateReporting(
+    context: SecurityPipelineContext,
+    reporting: SecurityReportingResult,
+    options: PopulateReportingOptions = {}
+  ): Promise<void> {
     if (context.stages.staticAnalysis.status !== "COMPLETED" || context.stages.dynamicTesting.status !== "COMPLETED") {
       throw new Error("Security reporting requires analysis stages to complete");
     }
 
+    this.ensureNotCancelled(options.abortSignal);
+
     const dependencies = this.parseDependencies();
+    this.ensureNotCancelled(options.abortSignal);
     reporting.dependencies = this.buildDependencyVulnerabilities(dependencies);
+    this.ensureNotCancelled(options.abortSignal);
     reporting.licenseCompliance = this.buildLicenseCompliance(dependencies);
+    this.ensureNotCancelled(options.abortSignal);
     reporting.maliciousPackages = this.buildMaliciousPackages(dependencies);
 
     const vulnerableCount = reporting.dependencies.filter((entry) => entry.vulnerabilities.length > 0).length;
     reporting.summary.totalDependencies = dependencies.length;
     reporting.summary.vulnerableDependencies = vulnerableCount;
+  }
+
+  private ensureNotCancelled(signal: AbortSignal | undefined): void {
+    if (signal?.aborted) {
+      throw new vscode.CancellationError();
+    }
   }
 
   private parseDependencies(): Dependency[] {
@@ -115,20 +164,16 @@ export class DependencyScanner {
 
       const results: Dependency[] = [];
       for (const [name, version] of Object.entries(manifest.dependencies ?? {})) {
-        results.push({ name, version: version.replace(/^[^0-9]*/, ""), dev: false });
+        results.push({ name, version: version.trim(), dev: false });
       }
       for (const [name, version] of Object.entries(manifest.devDependencies ?? {})) {
-        results.push({ name, version: version.replace(/^[^0-9]*/, ""), dev: true });
+        results.push({ name, version: version.trim(), dev: true });
       }
       return results;
-    } catch {
-      return [
-        {
-          name: "package-json-read-error",
-          version: "0.0.0",
-          dev: true
-        }
-      ];
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.diagnostics.addError?.(`DependencyScanner failed to read package.json: ${message}`);
+      return [];
     }
   }
 
@@ -153,12 +198,22 @@ export class DependencyScanner {
   }
 
   private buildMaliciousPackages(dependencies: Dependency[]): MaliciousPackage[] {
-    const malicious = dependencies.filter((dependency) => dependency.name === "event-stream" && dependency.version === "3.3.6");
+    const malicious = dependencies.filter((dependency) =>
+      dependency.name === "event-stream" && this.isMaliciousVersion(dependency.version)
+    );
     return malicious.map((dependency) => ({
       dependency,
       reason: "Known malicious version detected",
       evidence: ["Version 3.3.6 contained credential-stealing payload"]
     } satisfies MaliciousPackage));
+  }
+
+  private isMaliciousVersion(range: string): boolean {
+    const candidate = resolveMinVersion(range);
+    if (candidate) {
+      return candidate.version === "3.3.6";
+    }
+    return range.trim() === "3.3.6";
   }
 
   private readLicense(packageName: string): string | undefined {

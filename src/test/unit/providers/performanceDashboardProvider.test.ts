@@ -7,6 +7,8 @@ import type { PerformanceMonitor, PerformanceReport } from "../../../services/pe
 import type { MetricsCollector } from "../../../services/performance/metricsCollector";
 import type { DashboardMetrics } from "../../../services/performance/types";
 
+const mockDashboardHtml = "<!DOCTYPE html><html><body><div>dashboard</div></body></html>";
+
 jest.mock("vscode", () => {
   const encode = (value: string): Uint8Array => new TextEncoder().encode(value);
   const template = `<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src {{CSP_SOURCE}}; script-src 'nonce-{{NONCE}}';"><link rel="stylesheet" href="{{STYLE_URI}}"></head><body><div class="dashboard-container"></div><script nonce="{{NONCE}}" src="{{SCRIPT_URI}}"></script></body></html>`;
@@ -22,7 +24,8 @@ jest.mock("vscode", () => {
 
   const window = {
     showWarningMessage: jest.fn<(message: string) => Promise<void> | void>(),
-    showTextDocument: jest.fn<(doc: unknown) => Promise<void>>().mockResolvedValue(undefined)
+    showTextDocument: jest.fn<(doc: unknown) => Promise<void>>().mockResolvedValue(undefined),
+    showErrorMessage: jest.fn<(message: string) => Promise<void> | void>()
   };
 
   const Uri = {
@@ -47,6 +50,25 @@ jest.mock("vscode", () => {
   };
 });
 
+jest.mock("../../../providers/webviewHelpers", () => {
+  const actual = jest.requireActual("../../../providers/webviewHelpers") as Record<string, unknown>;
+  return {
+    ...actual,
+    setWebviewHtml: jest.fn()
+  };
+});
+
+const { setWebviewHtml: setWebviewHtmlMock } = jest.requireMock("../../../providers/webviewHelpers") as {
+  setWebviewHtml: jest.MockedFunction<(
+    webview: Webview,
+    extensionUri: ExtensionContext["extensionUri"],
+    htmlRelativePath: string,
+    initialState?: object
+  ) => string>;
+};
+
+setWebviewHtmlMock.mockReturnValue(mockDashboardHtml);
+
 type WorkspaceMock = {
   fs: { readFile: jest.Mock<(uri: unknown) => Promise<Uint8Array>> };
   openTextDocument: jest.Mock<(uri: unknown) => Promise<{ uri: { toString: () => string } }>>;
@@ -55,6 +77,7 @@ type WorkspaceMock = {
 type WindowMock = {
   showWarningMessage: jest.Mock<(message: string) => Promise<void> | void>;
   showTextDocument: jest.Mock<(doc: unknown) => Promise<void>>;
+  showErrorMessage: jest.Mock<(message: string) => Promise<void> | void>;
 };
 
 const { workspace, window: vscodeWindow } = jest.requireMock("vscode") as {
@@ -205,6 +228,7 @@ describe("PerformanceDashboardProvider", () => {
   let messageListener: ((message: unknown) => void) | undefined;
   let disposeCallbacks: Array<() => void>;
   let visibilityListeners: Array<() => void>;
+  let ensureResourcesReady: jest.MockedFunction<() => Promise<void>>;
 
   beforeEach(() => {
     jest.useFakeTimers();
@@ -212,7 +236,8 @@ describe("PerformanceDashboardProvider", () => {
     const metrics = createSampleMetrics();
 
     metricsCollector = {
-      getCurrentMetrics: jest.fn().mockReturnValue(metrics)
+      getCurrentMetrics: jest.fn().mockReturnValue(metrics),
+      dispose: jest.fn()
     } as unknown as jest.Mocked<MetricsCollector>;
 
     const report: PerformanceReport = {
@@ -246,6 +271,7 @@ describe("PerformanceDashboardProvider", () => {
 
     disposeCallbacks = [];
     visibilityListeners = [];
+  ensureResourcesReady = jest.fn(async () => {}) as jest.MockedFunction<() => Promise<void>>;
 
     webview = {
       options: {},
@@ -273,12 +299,19 @@ describe("PerformanceDashboardProvider", () => {
       }
     } as unknown as WebviewView;
 
-    model = new PerformanceDashboardProvider(context, performanceMonitor, diagnosticService, metricsCollector);
+    model = new PerformanceDashboardProvider(
+      context,
+      performanceMonitor,
+      diagnosticService,
+      metricsCollector,
+      ensureResourcesReady
+    );
   });
 
   afterEach(() => {
     jest.useRealTimers();
     jest.clearAllMocks();
+    setWebviewHtmlMock.mockClear();
   });
 
   async function resolveView(): Promise<void> {
@@ -289,9 +322,15 @@ describe("PerformanceDashboardProvider", () => {
   test("loads metrics and posts initial update", async () => {
     await resolveView();
 
-    expect(workspace.fs.readFile).toHaveBeenCalled();
+    expect(ensureResourcesReady).toHaveBeenCalledTimes(1);
+    expect(setWebviewHtmlMock).toHaveBeenCalledWith(
+      webview,
+      context.extensionUri,
+      "out/resources/webview/performanceDashboard/index.html"
+    );
     expect(metricsCollector.getCurrentMetrics).toHaveBeenCalled();
     expect(webview.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: "metricsUpdate" }));
+    expect(vscodeWindow.showErrorMessage).not.toHaveBeenCalled();
   });
 
   test("sends periodic updates when real-time is enabled", async () => {
@@ -325,5 +364,12 @@ describe("PerformanceDashboardProvider", () => {
     jest.advanceTimersByTime(2_000);
     await Promise.resolve();
     expect((webview.postMessage as jest.Mock).mock.calls.length).toBe(callsBeforeDispose);
+  });
+
+  test("renders dashboard without triggering fallback when assets are available", async () => {
+    await resolveView();
+    expect(setWebviewHtmlMock).toHaveBeenCalled();
+    expect(setWebviewHtmlMock.mock.results[0]?.value).toBe(mockDashboardHtml);
+    expect(vscodeWindow.showErrorMessage).not.toHaveBeenCalled();
   });
 });

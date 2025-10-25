@@ -181,10 +181,16 @@ export class SecurityReportGenerator {
     };
   }
 
-  private async persistArtifact(filename: string, content: string): Promise<void> {
+  private async persistArtifact(filename: string, content: string | Buffer): Promise<vscode.Uri> {
     const storagePath = path.join(process.cwd(), "out", "security-reports");
     await fs.mkdir(storagePath, { recursive: true });
-    await fs.writeFile(path.join(storagePath, filename), content, "utf8");
+    const targetPath = path.join(storagePath, filename);
+    if (typeof content === "string") {
+      await fs.writeFile(targetPath, content, "utf8");
+    } else {
+      await fs.writeFile(targetPath, content);
+    }
+    return vscode.Uri.file(targetPath);
   }
 
   private async generatePDF(html: string): Promise<Buffer> {
@@ -196,7 +202,7 @@ export class SecurityReportGenerator {
   async generateHTML(template: string, data: Record<string, unknown>): Promise<string> {
     let rendered = template;
     for (const [key, value] of Object.entries(data)) {
-      const placeholder = new RegExp(`{{\s*${key}\s*}}`, "g");
+      const placeholder = new RegExp(`{{\\s*${this.escapePlaceholderKey(key)}\\s*}}`, "g");
       rendered = rendered.replace(placeholder, String(value));
     }
     await this.persistArtifact("report.html", rendered);
@@ -215,6 +221,11 @@ export class SecurityReportGenerator {
     const technicalDetails = await this.generateTechnicalReport();
     const complianceSummary = await this.generateComplianceReport();
     const remediationPlan = await this.generateRemediationPlan();
+    const pdfHtml = await this.generateHTML("<html><body>{{content}}</body></html>", {
+      content: executiveSummary
+    });
+    const pdfBuffer = await this.generatePDF(pdfHtml);
+    const pdfUri = await this.persistArtifact("executive-summary.pdf", pdfBuffer);
 
     const report: SecurityReport = {
       executiveSummary,
@@ -226,10 +237,14 @@ export class SecurityReportGenerator {
         technicalHtml: technicalDetails,
         complianceHtml: complianceSummary,
         remediationHtml: remediationPlan,
-        executivePdfPath: vscode.Uri.file(path.join(process.cwd(), "out", "security-reports", "executive-summary.md"))
+        executivePdfPath: pdfUri
       }
     };
 
     return report;
+  }
+
+  private escapePlaceholderKey(key: string): string {
+    return key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 }

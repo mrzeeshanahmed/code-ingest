@@ -5,6 +5,7 @@ import { hydrateRedactionOverride } from "./commands/redactionCommands";
 import type { CommandServices } from "./commands/types";
 import { COMMAND_MAP } from "./commands/commandMap";
 import { DashboardViewProvider } from "./providers/dashboardViewProvider";
+import { PerformanceDashboardProvider } from "./providers/performanceDashboardProvider";
 import { CodeIngestPanel } from "./providers/codeIngestPanel";
 import { loadCommandValidator } from "./providers/commandValidator";
 import { ConfigurationService } from "./services/configurationService";
@@ -497,7 +498,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     DashboardViewProvider.viewType,
     dashboardViewProvider
   );
-  context.subscriptions.push(dashboardDisposable, { dispose: () => dashboardViewProvider.dispose() });
+  const performanceDashboardProvider = new PerformanceDashboardProvider(
+    context,
+    performanceMonitor,
+    diagnosticService,
+    undefined,
+    ensureWebviewResourcesReady
+  );
+  const performanceDashboardDisposable = vscode.window.registerWebviewViewProvider(
+    PerformanceDashboardProvider.viewType,
+    performanceDashboardProvider
+  );
+  context.subscriptions.push(
+    dashboardDisposable,
+    performanceDashboardDisposable,
+    { dispose: () => dashboardViewProvider.dispose() },
+    performanceDashboardProvider
+  );
 
   const buildPanelState = (): Record<string, unknown> => {
     const configSnapshot = configurationService.getConfig();
@@ -555,8 +572,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     [
       "codeIngest.showPerformanceDashboard",
       async () => {
+        await ensureWebviewResourcesReady();
         await vscode.commands.executeCommand("workbench.view.extension.codeIngest");
-        await vscode.commands.executeCommand(`${DashboardViewProvider.viewType}.focus`);
+        await vscode.commands.executeCommand(`${PerformanceDashboardProvider.viewType}.focus`);
       }
     ],
     ["codeIngest.flushErrorReports", async () => {

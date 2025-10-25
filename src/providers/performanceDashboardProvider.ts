@@ -4,6 +4,7 @@ import { DiagnosticService } from "../services/diagnosticService";
 import { PerformanceMonitor } from "../services/performanceMonitor";
 import { MetricsCollector } from "../services/performance/metricsCollector";
 import type { DashboardMetrics } from "../services/performance/types";
+import { detectFallbackHtml, setWebviewHtml } from "./webviewHelpers";
 
 interface WebviewMessage {
   type: string;
@@ -18,14 +19,18 @@ export class PerformanceDashboardProvider implements vscode.WebviewViewProvider 
   private readonly metricsCollector: MetricsCollector;
   private readonly disposables: vscode.Disposable[] = [];
   private isRealTimeEnabled = true;
+  private readonly ensureResourcesReady: () => Promise<void>;
+  private hasRenderedFallback = false;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly performanceMonitor: PerformanceMonitor,
     private readonly diagnosticService: DiagnosticService,
-    metricsCollector?: MetricsCollector
+    metricsCollector?: MetricsCollector,
+    ensureResourcesReady?: () => Promise<void>
   ) {
     this.metricsCollector = metricsCollector ?? new MetricsCollector(this.performanceMonitor, this.diagnosticService);
+    this.ensureResourcesReady = ensureResourcesReady ?? (async () => {});
 
     this.disposables.push(
       this.performanceMonitor.onDidRecordMetrics(() => this.pushMetricsUpdate()),
@@ -37,17 +42,23 @@ export class PerformanceDashboardProvider implements vscode.WebviewViewProvider 
     this.webview = webviewView.webview;
     this.webview.options = {
       enableScripts: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(this.context.extensionUri, "out", "resources", "webview"),
-        vscode.Uri.joinPath(this.context.extensionUri, "out", "resources", "webview", "performanceDashboard")
-      ]
+      localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, "out", "resources", "webview")]
     };
 
     try {
-      this.webview.html = await this.generateDashboardHTML();
+      await this.ensureResourcesReady();
+      const html = setWebviewHtml(
+        this.webview,
+        this.context.extensionUri,
+        "out/resources/webview/performanceDashboard/index.html"
+      );
+      this.handleInitialRender(html);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.webview.html = `<html><body><h2>Performance Dashboard</h2><p>Failed to load dashboard resources: ${message}</p></body></html>`;
+      void vscode.window.showErrorMessage(
+        `Code Ingest: Performance dashboard failed to load required assets. ${message}`
+      );
       return;
     }
 
@@ -82,52 +93,7 @@ export class PerformanceDashboardProvider implements vscode.WebviewViewProvider 
     this.stopRealTimeUpdates();
     this.disposables.forEach((disposable) => disposable.dispose());
     this.disposables.length = 0;
-  }
-
-  private async generateDashboardHTML(): Promise<string> {
-    const webview = this.webview;
-    if (!webview) {
-      return "";
-    }
-
-    const nonce = this.generateNonce();
-    const htmlUri = vscode.Uri.joinPath(
-      this.context.extensionUri,
-      "resources",
-      "webview",
-      "performanceDashboard",
-      "index.html"
-    );
-    const rawContent = await vscode.workspace.fs.readFile(htmlUri);
-    const decoder = new TextDecoder("utf-8");
-    let html = decoder.decode(rawContent);
-
-    const scriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(
-        this.context.extensionUri,
-        "resources",
-        "webview",
-        "performanceDashboard",
-        "performanceDashboard.js"
-      )
-    );
-    const styleUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(
-        this.context.extensionUri,
-        "resources",
-        "webview",
-        "performanceDashboard",
-        "styles.css"
-      )
-    );
-
-    const cspSource = webview.cspSource;
-    html = html.replace(/{{SCRIPT_URI}}/g, `${scriptUri}`);
-    html = html.replace(/{{STYLE_URI}}/g, `${styleUri}`);
-    html = html.replace(/{{NONCE}}/g, nonce);
-    html = html.replace(/{{CSP_SOURCE}}/g, cspSource);
-
-    return html;
+    this.metricsCollector.dispose();
   }
 
   private startRealTimeUpdates(): void {
@@ -221,7 +187,22 @@ export class PerformanceDashboardProvider implements vscode.WebviewViewProvider 
     this.webview?.postMessage({ type: "historicalData", data: metrics.historical });
   }
 
-  private generateNonce(): string {
-    return Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+  private handleInitialRender(html: string): void {
+    const detection = detectFallbackHtml(html);
+    if (!detection.isFallback) {
+      this.hasRenderedFallback = false;
+      return;
+    }
+
+    if (this.hasRenderedFallback) {
+      return;
+    }
+
+    this.hasRenderedFallback = true;
+    const reason = detection.reason ?? "unknown";
+    console.error("PerformanceDashboardProvider: Webview rendered fallback UI", { reason });
+    void vscode.window.showErrorMessage(
+      `Code Ingest: Performance dashboard assets missing (${reason}). Run "npm run build:webview" and try again.`
+    );
   }
 }

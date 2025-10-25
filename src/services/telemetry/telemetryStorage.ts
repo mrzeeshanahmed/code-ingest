@@ -25,6 +25,7 @@ function decodeEvents(serialized: string): TelemetryEvent[] {
 export class TelemetryStorage {
   private readonly STORAGE_KEY = "codeIngest.telemetry.events";
   private readonly MAX_EVENTS = 1_000;
+  private writeLock: Promise<void> = Promise.resolve();
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -33,13 +34,21 @@ export class TelemetryStorage {
       return;
     }
 
-    const current = await this.loadEvents();
-    const combined = [...current, ...events]
-      .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
-      .slice(0, this.MAX_EVENTS);
+    const writeOperation = this.writeLock.then(async () => {
+      const current = await this.loadEvents();
+      const combined = [...current, ...events]
+        .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+        .slice(0, this.MAX_EVENTS);
 
-    const serialized = encodeEvents(combined);
-    await this.context.globalState.update(this.STORAGE_KEY, serialized);
+      const serialized = encodeEvents(combined);
+      await this.context.globalState.update(this.STORAGE_KEY, serialized);
+    });
+
+    this.writeLock = writeOperation.catch(() => {
+      // Swallow rejection so later calls can proceed; the awaiting caller will receive the error.
+    });
+
+    await writeOperation;
   }
 
   async loadEvents(): Promise<TelemetryEvent[]> {

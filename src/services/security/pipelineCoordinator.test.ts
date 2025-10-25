@@ -1,3 +1,13 @@
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 import { describe, expect, it, jest } from "@jest/globals";
 
 import { ComplianceChecker } from "./complianceChecker";
@@ -94,9 +104,14 @@ describe("SecurityPipelineCoordinator", () => {
     } as unknown as DynamicSecurityTester;
 
     const dependencyScanner = {
-      populateReporting: jest.fn(async (context: SecurityPipelineContext, reporting: SecurityReportingResult) => {
+      populateReporting: jest.fn(async (
+        context: SecurityPipelineContext,
+        reporting: SecurityReportingResult,
+        options?: { abortSignal?: AbortSignal }
+      ) => {
         callOrder.push("reporting-dependencies");
         expect(context.stages.staticAnalysis.status).toBe("COMPLETED");
+        expect(options?.abortSignal).toBeDefined();
         reporting.dependencies = dependencyVulnerabilities;
         reporting.licenseCompliance = [];
         reporting.maliciousPackages = [];
@@ -106,9 +121,14 @@ describe("SecurityPipelineCoordinator", () => {
     } as unknown as DependencyScanner;
 
     const complianceChecker = {
-      populateReporting: jest.fn(async (context: SecurityPipelineContext, reporting: SecurityReportingResult) => {
+      populateReporting: jest.fn(async (
+        context: SecurityPipelineContext,
+        reporting: SecurityReportingResult,
+        options?: { abortSignal?: AbortSignal }
+      ) => {
         callOrder.push("reporting-compliance");
         expect(context.stages.dynamicTesting.status).toBe("COMPLETED");
+        expect(options?.abortSignal).toBeDefined();
         reporting.compliance = complianceResults;
         return complianceResults;
       })
@@ -132,5 +152,63 @@ describe("SecurityPipelineCoordinator", () => {
     expect(context.stages.reporting.result?.summary.vulnerableDependencies).toBe(1);
     expect(context.stages.reporting.result?.summary.averageComplianceCoverage).toBe(70);
     expect(context.stages.reporting.status).toBe("COMPLETED");
+  });
+
+  it("rejects with CancellationError when aborted and prevents overlapping executions", async () => {
+    const signal = {
+      aborted: false,
+      addEventListener: jest.fn(),
+      removeEventListener: jest.fn()
+    } as unknown as AbortSignal;
+
+    let dependencySignal: AbortSignal | undefined;
+
+    const staticAnalyzer = {
+      scanCodebase: jest.fn<() => Promise<SecurityFinding[]>>().mockResolvedValue([])
+    } as unknown as StaticSecurityAnalyzer;
+
+    const dynamicTester = {
+      runSecurityTests: jest.fn<() => Promise<DynamicTestResult[]>>().mockResolvedValue([])
+    } as unknown as DynamicSecurityTester;
+
+    const dependencyStage = createDeferred<void>();
+    const dependencyEntered = createDeferred<void>();
+    const dependencyScanner = {
+      populateReporting: jest.fn(async (
+        _context: SecurityPipelineContext,
+        _reporting: SecurityReportingResult,
+        options?: { abortSignal?: AbortSignal }
+      ) => {
+        dependencySignal = options?.abortSignal;
+        dependencyEntered.resolve();
+        await dependencyStage.promise;
+      })
+    } as unknown as DependencyScanner;
+
+    const complianceChecker = {
+      populateReporting: jest.fn<() => Promise<ComplianceResult[]>>().mockResolvedValue([])
+    } as unknown as ComplianceChecker;
+
+    const coordinator = new SecurityPipelineCoordinator({
+      staticAnalyzer,
+      dynamicTester,
+      dependencyScanner,
+      complianceChecker
+    });
+
+    const firstRun = coordinator.run({ abortSignal: signal });
+    coordinator.run();
+    expect(staticAnalyzer.scanCodebase).toHaveBeenCalledTimes(1);
+
+  await dependencyEntered.promise;
+  expect(signal.addEventListener).toHaveBeenCalledTimes(1);
+  expect(signal.addEventListener).toHaveBeenCalledWith("abort", expect.any(Function), { once: true });
+  expect(dependencySignal).toBeDefined();
+    dependencyStage.resolve();
+
+    await expect(firstRun).resolves.toBeDefined();
+    expect(dynamicTester.runSecurityTests).toHaveBeenCalledTimes(1);
+    expect(dependencyScanner.populateReporting).toHaveBeenCalledTimes(1);
+    expect(complianceChecker.populateReporting).toHaveBeenCalledTimes(1);
   });
 });

@@ -151,6 +151,7 @@ describe("MetricsCollector", () => {
   });
 
   afterEach(() => {
+    collector.dispose();
     jest.useRealTimers();
   });
 
@@ -176,5 +177,13 @@ describe("MetricsCollector", () => {
 
     expect(bottlenecks).toHaveLength(1);
     expect(recommendations).toHaveLength(1);
+  });
+
+  test("disposes monitoring resources and blocks further usage", () => {
+    const operationId = collector.startOperation("digest");
+    collector.dispose();
+
+    expect(performanceMonitor.endOperation).toHaveBeenCalledWith(operationId);
+    expect(() => collector.getCurrentMetrics()).toThrow("MetricsCollector has been disposed");
   });
 });

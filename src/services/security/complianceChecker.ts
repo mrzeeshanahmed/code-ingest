@@ -1,3 +1,5 @@
+import * as vscode from "vscode";
+
 import type {
   ComplianceFramework,
   ComplianceRequirement,
@@ -12,6 +14,10 @@ interface ComplianceEvidence {
   satisfied: boolean;
   evidence: string;
   recommendations: SecurityRecommendation[];
+}
+
+interface PopulateComplianceOptions {
+  abortSignal?: AbortSignal;
 }
 
 export class ComplianceChecker {
@@ -48,19 +54,36 @@ export class ComplianceChecker {
     return this.buildResult(framework, evidence);
   }
 
-  async populateReporting(context: SecurityPipelineContext, reporting: SecurityReportingResult): Promise<ComplianceResult[]> {
+  async populateReporting(
+    context: SecurityPipelineContext,
+    reporting: SecurityReportingResult,
+    options: PopulateComplianceOptions = {}
+  ): Promise<ComplianceResult[]> {
     if (context.stages.dynamicTesting.status !== "COMPLETED") {
       throw new Error("Compliance checks require dynamic security testing to complete");
     }
 
-    const results = [
-      await this.checkOWASPCompliance(),
-      await this.checkCWECompliance(),
-      await this.checkDataProtectionCompliance()
-    ];
+    this.ensureNotCancelled(options.abortSignal);
+
+    const results: ComplianceResult[] = [];
+
+    results.push(await this.checkOWASPCompliance());
+    this.ensureNotCancelled(options.abortSignal);
+
+    results.push(await this.checkCWECompliance());
+    this.ensureNotCancelled(options.abortSignal);
+
+    results.push(await this.checkDataProtectionCompliance());
+    this.ensureNotCancelled(options.abortSignal);
 
     reporting.compliance = results;
     return results;
+  }
+
+  private ensureNotCancelled(signal: AbortSignal | undefined): void {
+    if (signal?.aborted) {
+      throw new vscode.CancellationError();
+    }
   }
 
   private buildResult(framework: ComplianceFramework, evidence: ComplianceEvidence[]): ComplianceResult {

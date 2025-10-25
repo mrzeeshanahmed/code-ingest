@@ -7,7 +7,7 @@ import { Diagnostics } from "../utils/validateConfig";
 import { wrapError } from "../utils/errorHandling";
 
 export interface DirectoryEntry {
-  nodes: FileNode[];
+  nodes: Array<FileNode | undefined>;
   totalCount: number;
   lastScanned: Date;
   isComplete: boolean;
@@ -201,24 +201,21 @@ export class DirectoryCache implements vscode.Disposable {
 
     const key = this.normalizePath(dirPath);
     let cached = this.getCachedDirectory(key);
-    if (cached && cached.nodes.length >= offset + effectiveLimit) {
-      return {
-        ...cached,
-        nodes: cached.nodes.slice(0, offset + effectiveLimit)
-      };
+    if (cached && this.isRangeLoaded(cached, offset, effectiveLimit)) {
+      return this.toPageResult(cached, offset, effectiveLimit);
     }
 
     cached = await this.populateSegment(key, offset, effectiveLimit, token);
-    return cached;
+    return this.toPageResult(cached, offset, effectiveLimit);
   }
 
   async loadMoreFiles(dirPath: string, additionalCount: number, token?: vscode.CancellationToken): Promise<FileNode[]> {
     const key = this.normalizePath(dirPath);
     let entry = this.getCachedDirectory(key);
-    const offset = entry ? entry.nodes.length : 0;
+    const offset = entry ? this.getNextContiguousOffset(entry.nodes) : 0;
 
     entry = await this.populateSegment(key, offset, additionalCount, token);
-    return entry.nodes.slice(offset);
+    return this.collectRange(entry, offset, additionalCount);
   }
 
   isDirectoryFullyLoaded(dirPath: string): boolean {
@@ -293,11 +290,11 @@ export class DirectoryCache implements vscode.Disposable {
       for (let index = 0; index < result.nodes.length; index += 1) {
         mergedNodes[startIndex + index] = result.nodes[index];
       }
-      const totalCount = result.total;
-      const isComplete = !result.hasMore;
-      const nextOffset = result.nextOffset;
+      const totalCount = Math.max(existing.totalCount, result.total);
+      const nextOffset = Math.min(this.getNextContiguousOffset(mergedNodes), totalCount);
+      const isComplete = nextOffset >= totalCount;
       const entry: DirectoryEntry = {
-        nodes: mergedNodes.filter(Boolean),
+        nodes: mergedNodes,
         totalCount,
         isComplete,
         nextOffset,
@@ -326,7 +323,7 @@ export class DirectoryCache implements vscode.Disposable {
       nodes: result.nodes,
       totalCount: result.total,
       isComplete: !result.hasMore,
-      nextOffset: result.nextOffset,
+      nextOffset: Math.min(result.nextOffset, result.total),
       lastScanned: new Date()
     };
   }
@@ -485,6 +482,52 @@ export class DirectoryCache implements vscode.Disposable {
       return vscode.Uri.parse(dirPath).fsPath;
     }
     return path.normalize(dirPath);
+  }
+
+  private isRangeLoaded(entry: DirectoryEntry, offset: number, limit: number): boolean {
+    if (limit <= 0) {
+      return true;
+    }
+    const end = Math.min(offset + limit, entry.totalCount);
+    for (let index = offset; index < end; index += 1) {
+      if (!entry.nodes[index]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private collectRange(entry: DirectoryEntry, offset: number, limit: number): FileNode[] {
+    if (limit <= 0) {
+      return [];
+    }
+    const end = Math.min(offset + limit, entry.totalCount);
+    const collected: FileNode[] = [];
+    for (let index = offset; index < end; index += 1) {
+      const node = entry.nodes[index];
+      if (node) {
+        collected.push(node);
+      }
+    }
+    return collected;
+  }
+
+  private getNextContiguousOffset(nodes: Array<FileNode | undefined>): number {
+    let index = 0;
+    while (index < nodes.length && nodes[index]) {
+      index += 1;
+    }
+    return index;
+  }
+
+  private toPageResult(entry: DirectoryEntry, offset: number, limit: number): DirectoryEntry {
+    return {
+      nodes: this.collectRange(entry, offset, limit),
+      totalCount: entry.totalCount,
+      isComplete: entry.isComplete,
+      nextOffset: entry.nextOffset,
+      lastScanned: entry.lastScanned
+    };
   }
 
   private estimateEntrySize(entry: DirectoryEntry): number {

@@ -453,7 +453,10 @@ export class SelectionManager implements vscode.Disposable {
     this.excluded.clear();
     snapshot.excludedFiles.forEach((file) => this.excluded.add(file));
     this.lastModified = snapshot.lastModified;
-    this.emitChange("restored", [...this.selected], "restore", { scheduleSave: false });
+    this.emitChange("restored", [...this.selected], "restore", {
+      scheduleSave: false,
+      updateTimestamp: false
+    });
     if (this.preview.size > 0) {
       this.onDidChangePreviewEmitter.fire(this.getPreviewUris());
     }
@@ -498,12 +501,15 @@ export class SelectionManager implements vscode.Disposable {
     type: SelectionChangeEvent["type"],
     files: string[],
     source: SelectionChangeSource,
-    options: { scheduleSave?: boolean } = {}
+    options: { scheduleSave?: boolean; updateTimestamp?: boolean } = {}
   ): void {
     if (files.length === 0) {
       return;
     }
-    this.lastModified = new Date();
+    const shouldUpdateTimestamp = options.updateTimestamp ?? true;
+    if (shouldUpdateTimestamp) {
+      this.lastModified = new Date();
+    }
     const relatives = files.map((key) => this.getRelativeFromKey(key));
     const selectedUris = this.getSelectedUris();
     const selectedRelative = selectedUris.map((key) => this.getRelativeFromKey(key));

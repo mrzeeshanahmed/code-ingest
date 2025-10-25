@@ -56,10 +56,10 @@ export class SecurityAuditService {
     const pipelineContext = await this.pipelineCoordinator.run();
     const categories = this.buildCategoryMap(pipelineContext);
 
-    const vulnerabilities = this.collectVulnerabilities(categories);
-    const recommendations = this.collectRecommendations(categories);
-    const score = this.calculateOverallScore(categories);
-    const overall = score >= 90 ? "SECURE" : score >= 70 ? "VULNERABLE" : "CRITICAL";
+  const vulnerabilities = this.collectVulnerabilities(categories);
+  const recommendations = this.collectRecommendations(categories);
+  const score = this.calculateOverallScore(categories);
+  const overall = this.resolveOverallStatus(categories, score);
 
     return {
       overall,
@@ -216,9 +216,11 @@ export class SecurityAuditService {
     const evidence = reporting.compliance;
     const findings = this.buildComplianceFindings(evidence);
     const score = evidence.length === 0 ? 0 : reporting.summary.averageComplianceCoverage;
-    const owasp = evidence.find((item) => item.framework === "OWASP");
-    const cwe = evidence.find((item) => item.framework === "CWE");
-    const dataProtection = evidence.find((item) => item.framework === "DATA_PROTECTION");
+    const locateFramework = (keyword: string) =>
+      evidence.find((item) => item.framework.toLowerCase().includes(keyword));
+    const owasp = locateFramework("owasp");
+    const cwe = locateFramework("cwe");
+    const dataProtection = locateFramework("data protection");
     const summaryParts = [
       owasp ? `OWASP coverage ${owasp.coverage}%` : undefined,
       cwe ? `CWE coverage ${cwe.coverage}%` : undefined,
@@ -382,5 +384,27 @@ export class SecurityAuditService {
     const scores = Object.values(categories).map((category) => category.score);
     const total = scores.reduce((sum, value) => sum + value, 0);
     return Math.round(total / scores.length);
+  }
+
+  private resolveOverallStatus(categories: CategoryCollection, score: number): "SECURE" | "WARNING" | "VULNERABLE" | "CRITICAL" {
+    const categoryList = Object.values(categories);
+    const hasCriticalFinding = categoryList.some((category) =>
+      category.findings.some((finding) => finding.severity === "CRITICAL")
+    );
+    if (hasCriticalFinding || score < 40) {
+      return "CRITICAL";
+    }
+
+    const hasVulnerableCategory = categoryList.some((category) => category.status === "VULNERABLE");
+
+    if (score >= 90 && !hasVulnerableCategory) {
+      return "SECURE";
+    }
+
+    if (score >= 70) {
+      return hasVulnerableCategory ? "VULNERABLE" : "WARNING";
+    }
+
+    return score >= 50 ? "VULNERABLE" : "CRITICAL";
   }
 }

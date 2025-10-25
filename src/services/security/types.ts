@@ -45,7 +45,7 @@ export interface CategoryResult {
 }
 
 export interface SecurityAuditResult {
-  overall: "SECURE" | "VULNERABLE" | "CRITICAL";
+  overall: "SECURE" | "WARNING" | "VULNERABLE" | "CRITICAL";
   score: number;
   timestamp: Date;
   categories: {

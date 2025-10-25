@@ -27,6 +27,7 @@ export class SecurityPipelineCoordinator {
   private readonly dependencyScanner: DependencyScanner;
   private readonly complianceChecker: ComplianceChecker;
   private inFlightExecution: Promise<SecurityPipelineContext> | undefined;
+  private currentAbortController: AbortController | undefined;
 
   constructor(dependencies: SecurityPipelineDependencies = {}) {
     this.staticAnalyzer = dependencies.staticAnalyzer ?? new StaticSecurityAnalyzer();
@@ -40,47 +41,63 @@ export class SecurityPipelineCoordinator {
       throw new vscode.CancellationError();
     }
 
-    if (!this.inFlightExecution) {
-      this.inFlightExecution = this.execute(context).finally(() => {
-        this.inFlightExecution = undefined;
-      });
+    if (this.inFlightExecution) {
+      return this.inFlightExecution;
     }
 
-    if (context?.abortSignal) {
-      context.abortSignal.addEventListener("abort", () => {
-        this.inFlightExecution = undefined;
-      }, { once: true });
-    }
+    const abortController = new AbortController();
+    const cleanUpLinkedSignal = this.linkExternalAbortSignal(context?.abortSignal, abortController);
+    this.currentAbortController = abortController;
 
-    return this.inFlightExecution;
+    const execution = this.execute(abortController.signal);
+    this.inFlightExecution = execution;
+    void execution.catch(() => undefined);
+
+    void execution.finally(() => {
+      cleanUpLinkedSignal?.();
+      if (this.inFlightExecution === execution) {
+        this.inFlightExecution = undefined;
+      }
+      if (this.currentAbortController === abortController) {
+        this.currentAbortController = undefined;
+      }
+    });
+
+    return execution;
   }
 
-  private async execute(context?: { abortSignal?: AbortSignal }): Promise<SecurityPipelineContext> {
+  private async execute(abortSignal: AbortSignal): Promise<SecurityPipelineContext> {
     const pipelineContext = this.createInitialContext();
 
     try {
       const staticStage = pipelineContext.stages.staticAnalysis;
       this.markStageRunning(staticStage);
-      const staticFindings = await this.staticAnalyzer.scanCodebase();
-      this.throwIfCancelled(context?.abortSignal);
+      const staticFindings = await this.runStageWithCancellation(() => this.staticAnalyzer.scanCodebase(), abortSignal);
       this.markStageCompleted(staticStage, staticFindings);
+      this.throwIfCancelled(abortSignal);
 
       const dynamicStage = pipelineContext.stages.dynamicTesting;
       this.markStageRunning(dynamicStage);
-      const dynamicResults = await this.dynamicTester.runSecurityTests();
-      this.throwIfCancelled(context?.abortSignal);
+      const dynamicResults = await this.runStageWithCancellation(() => this.dynamicTester.runSecurityTests(), abortSignal);
       this.markStageCompleted(dynamicStage, dynamicResults);
+      this.throwIfCancelled(abortSignal);
 
       const reportingStage = pipelineContext.stages.reporting;
       this.markStageRunning(reportingStage);
       const reportingResult = createEmptySecurityReportingResult();
       reportingStage.result = reportingResult;
 
-      await this.dependencyScanner.populateReporting(pipelineContext, reportingResult);
-      this.throwIfCancelled(context?.abortSignal);
+      await this.runStageWithCancellation(
+        () => this.dependencyScanner.populateReporting(pipelineContext, reportingResult, { abortSignal }),
+        abortSignal
+      );
+      this.throwIfCancelled(abortSignal);
 
-      const complianceResults = await this.complianceChecker.populateReporting(pipelineContext, reportingResult);
-      this.throwIfCancelled(context?.abortSignal);
+      const complianceResults = await this.runStageWithCancellation(
+        () => this.complianceChecker.populateReporting(pipelineContext, reportingResult, { abortSignal }),
+        abortSignal
+      );
+      this.throwIfCancelled(abortSignal);
 
       reportingResult.summary.averageComplianceCoverage = this.calculateAverageCoverage(complianceResults);
       reportingResult.generatedAt = new Date();
@@ -97,6 +114,33 @@ export class SecurityPipelineCoordinator {
     if (signal?.aborted) {
       throw new vscode.CancellationError();
     }
+  }
+
+  private linkExternalAbortSignal(signal: AbortSignal | undefined, controller: AbortController): (() => void) | undefined {
+    if (!signal) {
+      return undefined;
+    }
+
+    if (signal.aborted) {
+      controller.abort();
+      return undefined;
+    }
+
+    const handleAbort = () => {
+      controller.abort();
+    };
+    signal.addEventListener("abort", handleAbort, { once: true });
+
+    return () => {
+      signal.removeEventListener("abort", handleAbort);
+    };
+  }
+
+  private async runStageWithCancellation<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
+    this.throwIfCancelled(signal);
+    const result = await operation();
+    this.throwIfCancelled(signal);
+    return result;
   }
 
   private createInitialContext(): SecurityPipelineContext {
