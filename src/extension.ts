@@ -250,6 +250,7 @@ async function spawnBackend(context: vscode.ExtensionContext): Promise<{ proc: C
 	}
 
 	const urlRegex = new RegExp(`https?:\\/\\/${LOCAL_HOST}:(\\d+)`, 'i');
+	const startupRegex = /BACKEND_STARTUP port=(\d+)/i;
 	let stdoutBuffer = '';
 
 	proc.stdout?.setEncoding('utf8');
@@ -293,6 +294,19 @@ async function spawnBackend(context: vscode.ExtensionContext): Promise<{ proc: C
 				backendUrl = detectedUrl;
 				channel.appendLine(`Backend is ready at ${detectedUrl}`);
 				resolve(detectedUrl);
+			}
+
+			if (!resolved) {
+				const startupMatch = stdoutBuffer.match(startupRegex);
+				if (startupMatch) {
+					const port = startupMatch[1];
+					const detectedUrl = `http://${LOCAL_HOST}:${port}`;
+					resolved = true;
+					clearTimeout(timeout);
+					backendUrl = detectedUrl;
+					channel.appendLine(`Backend is ready at ${detectedUrl}`);
+					resolve(detectedUrl);
+				}
 			}
 		};
 
