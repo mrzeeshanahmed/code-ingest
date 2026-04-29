@@ -293,10 +293,15 @@
     "package": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\" && vsce package --out dist/code-ingest.vsix"
   },
   "dependencies": {
+    "@vscode/prompt-tsx": "^0.4.0-alpha.8",
+    "@vscode/tree-sitter-wasm": "^0.3.1",
     "better-sqlite3": "^12.9.0",
+    "hnswlib-wasm": "^0.8.2",
     "ignore": "^7.0.5",
     "minimatch": "^9.0.4",
-    "sqlite-vec": "^0.1.9"
+    "sqlite-vec": "^0.1.9",
+    "wa-sqlite": "^1.0.0",
+    "web-tree-sitter": "^0.26.8"
   },
   "devDependencies": {
     "@babel/core": "^7.28.4",

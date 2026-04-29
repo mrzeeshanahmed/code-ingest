@@ -19,6 +19,11 @@ export const DEFAULT_CONFIG: DigestConfig = {
 
 export const GRAPH_SCHEMA_VERSION = 1;
 
+export const VFS_DRAIN_TIMEOUT_MS = 5_000;
+export const KNOWLEDGE_MAX_CONCURRENT_SYNTHESIZES = 2;
+export const HNSW_COMPACTION_DOC_THRESHOLD = 5_000;
+export const HNSW_COMPACTION_STALENESS_RATIO = 0.3;
+
 export const GRAPH_DEFAULTS = {
   hopDepth: 3,
   defaultNodeMode: "file",
