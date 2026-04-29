@@ -1,0 +1,58 @@
+export const COMMAND_MAP = {
+  HOST_TO_WEBVIEW: {
+    UPDATE_PREVIEW: "codeIngest.updatePreview",
+    UPDATE_PROGRESS: "codeIngest.updateProgress",
+    UPDATE_TREE_DATA: "codeIngest.updateTreeData",
+    UPDATE_CONFIG: "codeIngest.updateConfig",
+    SHOW_ERROR: "codeIngest.showError",
+    RESTORE_STATE: "codeIngest.restoreState"
+  },
+  WEBVIEW_TO_HOST: {
+    GENERATE_DIGEST: "codeIngest.generateDigest",
+    TOGGLE_REDACTION: "codeIngest.toggleRedactionOverride",
+    APPLY_PRESET: "codeIngest.applyPreset",
+    UPDATE_SELECTION: "codeIngest.updateSelection",
+    REFRESH_TREE: "codeIngest.refreshTree",
+    EXPAND_ALL: "codeIngest.expandAll",
+    COLLAPSE_ALL: "codeIngest.collapseAll",
+    REFRESH_PREVIEW: "codeIngest.refreshPreview",
+  COPY_PREVIEW: "codeIngest.copyPreview",
+    SELECT_ALL: "codeIngest.selectAll",
+    DESELECT_ALL: "codeIngest.deselectAll",
+    WEBVIEW_READY: "codeIngest.webviewReady",
+    FLUSH_ERROR_REPORTS: "codeIngest.flushErrorReports",
+    VIEW_METRICS: "codeIngest.viewMetrics",
+    OPEN_DASHBOARD_PANEL: "codeIngest.openDashboardPanel",
+    EXPORT_RAW: "codeIngest.exportRaw",
+    EXPORT_CLEAN: "codeIngest.exportClean",
+    EXPORT_GRAPH: "codeIngest.exportGraph"
+  },
+  EXTENSION_ONLY: {
+    REFRESH_TREE: "codeIngest.refreshTree",
+    OPEN_DASHBOARD: "codeIngest.openDashboard",
+    EXPAND_ALL: "codeIngest.expandAll",
+    COLLAPSE_ALL: "codeIngest.collapseAll",
+    REFRESH_PREVIEW: "codeIngest.refreshPreview",
+  COPY_PREVIEW: "codeIngest.copyPreview",
+    SELECT_ALL: "codeIngest.selectAll",
+    DESELECT_ALL: "codeIngest.deselectAll",
+    VIEW_METRICS: "codeIngest.viewMetrics",
+    TREE_LOAD_MORE: "codeIngest.tree.loadMore",
+    TREE_RETRY_DIRECTORY: "codeIngest.tree.retryDirectory",
+    SELECT_NONE: "codeIngest.selectNone",
+    INVERT_SELECTION: "codeIngest.invertSelection",
+    SHOW_PERFORMANCE_DASHBOARD: "codeIngest.showPerformanceDashboard",
+    EXPORT_RAW: "codeIngest.exportRaw",
+    EXPORT_CLEAN: "codeIngest.exportClean",
+    EXPORT_GRAPH: "codeIngest.exportGraph"
+  }
+} as const;
+
+export type HostCommandKey = keyof typeof COMMAND_MAP.HOST_TO_WEBVIEW;
+export type HostCommandId = (typeof COMMAND_MAP.HOST_TO_WEBVIEW)[HostCommandKey];
+
+export type WebviewCommandKey = keyof typeof COMMAND_MAP.WEBVIEW_TO_HOST;
+export type WebviewCommandId = (typeof COMMAND_MAP.WEBVIEW_TO_HOST)[WebviewCommandKey];
+
+export type ExtensionCommandKey = keyof typeof COMMAND_MAP.EXTENSION_ONLY;
+export type ExtensionCommandId = (typeof COMMAND_MAP.EXTENSION_ONLY)[ExtensionCommandKey];

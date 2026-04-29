@@ -1,0 +1,329 @@
+{
+  "name": "code-ingest",
+  "displayName": "Code-Ingest",
+  "description": "Local graph-aware codebase analysis for VS Code and GitHub Copilot Chat",
+  "version": "1.1.0",
+  "publisher": "mrzeeshanahmed",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mrzeeshanahmed/code-ingest.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mrzeeshanahmed/code-ingest/issues"
+  },
+  "homepage": "https://github.com/mrzeeshanahmed/code-ingest#readme",
+  "keywords": [
+    "copilot",
+    "code-graph",
+    "codebase",
+    "dependency-graph",
+    "sqlite",
+    "cytoscape"
+  ],
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "files": [
+    "out/**/*",
+    "assets/**/*",
+    "README.md",
+    "CHANGELOG.md",
+    "package.json",
+    "native/**/*.node"
+  ],
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "code-ingest",
+        "name": "Code-Ingest",
+        "fullName": "Code-Ingest Graph Assistant",
+        "description": "Query your codebase graph for structural context, impact analysis, and dependency awareness.",
+        "isSticky": false,
+        "commands": [
+          {
+            "name": "context",
+            "description": "Inject graph context for the active file"
+          },
+          {
+            "name": "focus",
+            "description": "Focus the graph view on a specific file"
+          },
+          {
+            "name": "impact",
+            "description": "Analyze what depends on the current file"
+          },
+          {
+            "name": "explain",
+            "description": "Explain the current code subgraph"
+          },
+          {
+            "name": "depth",
+            "description": "Override traversal depth for this query"
+          },
+          {
+            "name": "search",
+            "description": "Semantic search across graph nodes"
+          }
+        ]
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "code-ingest-sidebar",
+          "title": "Code-Ingest",
+          "icon": "assets/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "code-ingest-sidebar": [
+        {
+          "id": "codeIngest.sidebarView",
+          "name": "Code-Ingest",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "code-ingest.rebuildGraph",
+        "title": "Code-Ingest: Rebuild Graph",
+        "category": "Code-Ingest"
+      },
+      {
+        "command": "code-ingest.openGraphView",
+        "title": "Code-Ingest: Open Graph View",
+        "category": "Code-Ingest"
+      },
+      {
+        "command": "code-ingest.focusCurrentFile",
+        "title": "Code-Ingest: Focus Current File",
+        "category": "Code-Ingest"
+      },
+      {
+        "command": "code-ingest.openSettings",
+        "title": "Code-Ingest: Open Settings",
+        "category": "Code-Ingest"
+      },
+      {
+        "command": "code-ingest.sendToChat",
+        "title": "Code-Ingest: Send Context to Copilot",
+        "category": "Code-Ingest"
+      },
+      {
+        "command": "code-ingest.generateDigest",
+        "title": "Code-Ingest: Generate Digest",
+        "category": "Code-Ingest"
+      },
+      {
+        "command": "code-ingest.showLogs",
+        "title": "Code-Ingest: Show Logs",
+        "category": "Code-Ingest"
+      },
+      {
+        "command": "code-ingest.exportGraphPng",
+        "title": "Code-Ingest: Export Graph as PNG",
+        "category": "Code-Ingest"
+      },
+      {
+        "command": "code-ingest.clearDatabase",
+        "title": "Code-Ingest: Clear Graph Database",
+        "category": "Code-Ingest"
+      },
+      {
+        "command": "code-ingest.showGraphStats",
+        "title": "Code-Ingest: Show Graph Statistics",
+        "category": "Code-Ingest"
+      }
+    ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "code-ingest.focusCurrentFile",
+          "group": "code-ingest@1",
+          "when": "editorIsOpen"
+        },
+        {
+          "command": "code-ingest.sendToChat",
+          "group": "code-ingest@2",
+          "when": "editorIsOpen"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Code-Ingest",
+      "properties": {
+        "codeIngest.graph.hopDepth": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "maximum": 5,
+          "description": "Default traversal depth for graph context."
+        },
+        "codeIngest.graph.defaultNodeMode": {
+          "type": "string",
+          "default": "file",
+          "enum": [
+            "file",
+            "function"
+          ],
+          "description": "Default graph node granularity."
+        },
+        "codeIngest.graph.maxNodes": {
+          "type": "number",
+          "default": 500,
+          "minimum": 100,
+          "maximum": 2000,
+          "description": "Maximum nodes rendered in the graph view."
+        },
+        "codeIngest.graph.enableVectorSearch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable semantic vector search when embeddings are available."
+        },
+        "codeIngest.graph.layout": {
+          "type": "string",
+          "default": "cose",
+          "enum": [
+            "cose",
+            "radial"
+          ],
+          "description": "Default graph layout."
+        },
+        "codeIngest.indexing.maxFileSizeKB": {
+          "type": "number",
+          "default": 10240,
+          "minimum": 1,
+          "maximum": 102400,
+          "description": "Files larger than this are indexed only at file level."
+        },
+        "codeIngest.indexing.maxFiles": {
+          "type": "number",
+          "default": 10000,
+          "minimum": 100,
+          "maximum": 10000,
+          "description": "Maximum files considered during graph indexing."
+        },
+        "codeIngest.indexing.watcherDebounceMs": {
+          "type": "number",
+          "default": 800,
+          "minimum": 200,
+          "maximum": 5000,
+          "description": "Debounce delay for file watcher driven delta indexing."
+        },
+        "codeIngest.indexing.excludePatterns": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Additional glob patterns excluded from indexing."
+        },
+        "codeIngest.indexing.rebuildOnActivation": {
+          "type": "boolean",
+          "default": false,
+          "description": "Force a full graph rebuild whenever the workspace opens."
+        },
+        "codeIngest.copilot.tokenBudget": {
+          "type": "number",
+          "default": 8192,
+          "minimum": 1024,
+          "maximum": 32768,
+          "description": "Maximum token budget used for Copilot context payloads."
+        },
+        "codeIngest.copilot.includeSourceContent": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include source content in the graph context payload."
+        },
+        "codeIngest.copilot.redactSecrets": {
+          "type": "boolean",
+          "default": true,
+          "description": "Redact secrets before source content is injected into context."
+        },
+        "codeIngest.copilot.semanticResultCount": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Number of semantic matches to include in the context."
+        },
+        "codeIngest.display.showCircularDepsWarning": {
+          "type": "boolean",
+          "default": true,
+          "description": "Highlight circular dependencies in the graph view."
+        },
+        "codeIngest.display.focusModeOpacity": {
+          "type": "number",
+          "default": 0.15,
+          "minimum": 0.05,
+          "maximum": 0.5,
+          "description": "Opacity applied to out-of-focus nodes."
+        },
+        "codeIngest.display.autoFocusOnEditorChange": {
+          "type": "boolean",
+          "default": true,
+          "description": "Refocus the graph when the active editor changes."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "clean": "rimraf out dist .npm-cache",
+    "lint": "eslint \"./src/**/*.{ts,tsx}\"",
+    "type-check": "tsc --noEmit",
+    "build:webview": "node scripts/copyWebviewResources.js",
+    "build": "webpack --mode production && npm run build:webview",
+    "build:dev": "webpack --mode development && npm run build:webview",
+    "build:watch": "webpack --mode development --watch",
+    "test": "npm run test:unit && npm run test:webview",
+    "test:unit": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --runInBand --testPathPattern=src/test/vnext",
+    "test:webview": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js -c resources/webview/jest.config.js --runInBand --testPathPattern=test/vnext",
+    "test:integration": "node --experimental-vm-modules ./node_modules/jest/bin/jest.js --runInBand --testPathPattern=src/test/vnext/integration",
+    "ci": "npm run type-check && npm run test && npm run build",
+    "package": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\" && vsce package --out dist/code-ingest.vsix"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.9.0",
+    "ignore": "^7.0.5",
+    "minimatch": "^9.0.4",
+    "sqlite-vec": "^0.1.9"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.28.4",
+    "@babel/preset-env": "^7.28.3",
+    "@types/jest": "^29.5.14",
+    "@types/jsdom": "^21.1.7",
+    "@types/node": "^20.17.30",
+    "@types/vscode": "1.90.0",
+    "@typescript-eslint/eslint-plugin": "^8.42.0",
+    "@typescript-eslint/parser": "^8.42.0",
+    "@vscode/test-cli": "^0.0.11",
+    "@vscode/test-electron": "^2.5.2",
+    "babel-jest": "^29.7.0",
+    "copy-webpack-plugin": "^11.0.0",
+    "cytoscape": "^3.33.2",
+    "cytoscape-cose-bilkent": "^4.1.0",
+    "eslint": "^9.12.0",
+    "eslint-config-prettier": "^9.1.0",
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0",
+    "jsdom": "^24.1.1",
+    "rimraf": "^5.0.5",
+    "ts-jest": "^29.4.1",
+    "ts-loader": "^9.5.1",
+    "typescript": "^5.6.3",
+    "vsce": "^2.15.0",
+    "webpack": "^5.94.0",
+    "webpack-cli": "^5.1.4"
+  }
+}

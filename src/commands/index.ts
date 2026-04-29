@@ -1,0 +1,21 @@
+import * as vscode from "vscode";
+import { registerRefreshCommand } from "./refreshCommand";
+import { registerGenerateDigestCommand } from "./generateDigest";
+import { registerSelectionCommands, markSelectionHandlersReady } from "./selectionCommands";
+import { registerRedactionCommands } from "./redactionCommands";
+import { registerPreviewCommands } from "./previewCommands";
+import type { CommandRegistrar, CommandServices } from "./types";
+
+export function registerAllCommands(
+  context: vscode.ExtensionContext,
+  services: CommandServices,
+  registerCommand: CommandRegistrar
+): void {
+  registerRefreshCommand(context, services, registerCommand);
+  registerGenerateDigestCommand(context, services, registerCommand);
+  registerSelectionCommands(context, services, registerCommand);
+  registerRedactionCommands(context, services, registerCommand);
+  registerPreviewCommands(context, services, registerCommand);
+}
+
+export { markSelectionHandlersReady };

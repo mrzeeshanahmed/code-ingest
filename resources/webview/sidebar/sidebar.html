@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Code-Ingest Sidebar</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 14px;
+      font-family: var(--vscode-font-family, "Segoe UI", sans-serif);
+      color: var(--vscode-foreground);
+      background: linear-gradient(180deg, var(--vscode-sideBar-background), color-mix(in srgb, var(--vscode-sideBar-background) 86%, black));
+    }
+
+    .panel {
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 14px;
+      padding: 12px;
+      margin-bottom: 12px;
+      background: color-mix(in srgb, var(--vscode-editorWidget-background) 85%, transparent);
+    }
+
+    h2, h3 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      opacity: 0.8;
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--vscode-testing-iconPassed);
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      font-size: 12px;
+    }
+
+    .pill-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .pill {
+      border-radius: 999px;
+      padding: 4px 8px;
+      background: color-mix(in srgb, var(--vscode-badge-background) 75%, transparent);
+      color: var(--vscode-badge-foreground);
+      font-size: 11px;
+      border: 0;
+      cursor: pointer;
+    }
+
+    .controls {
+      display: grid;
+      gap: 8px;
+    }
+
+    .field-row {
+      display: grid;
+      gap: 6px;
+      font-size: 12px;
+    }
+
+    input,
+    select {
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid var(--vscode-input-border, transparent);
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+    }
+
+    .pattern-editor {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .segmented {
+      display: inline-flex;
+      border: 1px solid var(--vscode-button-border, transparent);
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .segmented button {
+      margin: 0;
+      border-radius: 0;
+    }
+
+    .segmented button.active {
+      background: var(--vscode-button-background);
+      color: var(--vscode-button-foreground);
+    }
+
+    button {
+      width: 100%;
+      margin-top: 8px;
+      padding: 8px 10px;
+      border: 0;
+      border-radius: 10px;
+      cursor: pointer;
+      color: var(--vscode-button-foreground);
+      background: var(--vscode-button-background);
+    }
+
+    button.secondary {
+      background: var(--vscode-button-secondaryBackground);
+      color: var(--vscode-button-secondaryForeground);
+    }
+
+    .primary {
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .muted {
+      font-size: 12px;
+      opacity: 0.75;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+  <section class="panel">
+    <h2>Index Status</h2>
+    <div class="status"><span class="dot" id="statusDot"></span><span id="statusText">Starting…</span></div>
+    <div class="stats">
+      <div>Nodes<br><strong id="nodeCount">0</strong></div>
+      <div>Edges<br><strong id="edgeCount">0</strong></div>
+      <div>Files<br><strong id="fileCount">0</strong></div>
+      <div>Last Indexed<br><strong id="lastIndexed">Never</strong></div>
+      <div>DB Size<br><strong id="dbSize">0 KB</strong></div>
+    </div>
+    <button id="rebuildButton" class="secondary">Rebuild Graph</button>
+  </section>
+
+  <section class="panel">
+    <h3>Active File</h3>
+    <div id="activeFile" class="muted">No editor open</div>
+    <div class="stats" style="margin-top: 8px;">
+      <div>Dependencies<br><strong id="dependencyCount">0</strong></div>
+      <div>Dependents<br><strong id="dependentCount">0</strong></div>
+    </div>
+    <button id="openGraphButton">Open in Graph View</button>
+    <button id="sendToChatButton" class="secondary">Send to Copilot</button>
+  </section>
+
+  <section class="panel">
+    <h3>Exclusion Patterns</h3>
+    <div id="excludePatterns" class="pill-list"></div>
+    <div class="pattern-editor">
+      <input id="excludePatternInput" type="text" placeholder="Add glob like **/*.snap">
+      <button id="addPatternButton" class="secondary">Add</button>
+    </div>
+    <button id="editIgnoreButton" class="secondary">Edit .codeingestignore</button>
+  </section>
+
+  <section class="panel">
+    <h3>Unified Export</h3>
+    <div class="controls">
+      <div class="field-row">
+        <label for="exportPiiPolicySelect">PII Policy</label>
+        <select id="exportPiiPolicySelect">
+          <option value="strict">Strict</option>
+          <option value="mask">Mask</option>
+          <option value="allow">Allow</option>
+        </select>
+      </div>
+      <button id="exportCleanButton">Clean Export (PII Compliant)</button>
+      <button id="exportGraphButton" class="secondary">Graph Export</button>
+      <button id="exportRawButton" class="secondary">Raw Export (Legacy)</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h3>Quick Traversal</h3>
+    <div class="controls">
+      <div class="field-row">
+        <label for="hopDepthSelect">Hop Depth</label>
+        <select id="hopDepthSelect">
+          <option value="1">1 hop</option>
+          <option value="2">2 hops</option>
+          <option value="3">3 hops</option>
+          <option value="4">4 hops</option>
+          <option value="5">5 hops</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <span>Node Mode</span>
+        <div class="segmented" id="nodeModeToggle">
+          <button data-mode="file" class="active">Files</button>
+          <button data-mode="function">Functions</button>
+        </div>
+      </div>
+      <div class="pill-list">
+        <span id="hopDepthPill" class="pill">Depth: 2</span>
+        <span id="nodeModePill" class="pill">Mode: file</span>
+      </div>
+    </div>
+    <button id="openSettingsButton" class="secondary">Open Settings</button>
+  </section>
+
+  <button id="primaryOpenGraph" class="primary">Open Graph View</button>
+  <script src="./sidebar.js"></script>
+</body>
+</html>

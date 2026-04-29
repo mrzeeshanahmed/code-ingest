@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src {{CSP_SOURCE}} data:; style-src {{CSP_SOURCE}} 'unsafe-inline'; script-src 'nonce-{{NONCE}}';">
+  <title>Performance Dashboard</title>
+  <link rel="stylesheet" href="{{STYLE_URI}}">
+</head>
+<body>
+  <div class="dashboard-container">
+    <header class="dashboard-header">
+      <h1>Performance Dashboard</h1>
+      <div class="controls">
+        <button id="refresh-btn">Refresh</button>
+        <button id="export-btn">Export Report</button>
+        <label>
+          <input type="checkbox" id="realtime-toggle" checked>
+          Real-time Updates
+        </label>
+      </div>
+    </header>
+
+    <div class="metrics-grid">
+      <div class="metric-card realtime">
+        <h3>Current Session</h3>
+        <div class="metric-value" id="session-duration">--</div>
+        <div class="metric-label">Duration</div>
+      </div>
+
+      <div class="metric-card realtime">
+        <h3>Active Operations</h3>
+        <div class="metric-value" id="active-operations">0</div>
+        <div class="metric-label">Running</div>
+      </div>
+
+      <div class="metric-card realtime">
+        <h3>Memory Usage</h3>
+        <div class="metric-value" id="memory-usage">-- MB</div>
+        <div class="metric-label">Current</div>
+      </div>
+
+      <div class="metric-card realtime">
+        <h3>Operations/Min</h3>
+        <div class="metric-value" id="operations-rate">--</div>
+        <div class="metric-label">Throughput</div>
+      </div>
+    </div>
+
+    <div class="charts-container">
+      <div class="chart-panel">
+        <h3>Operation Performance</h3>
+        <canvas id="performance-chart" width="400" height="200"></canvas>
+      </div>
+
+      <div class="chart-panel">
+        <h3>Memory Usage Trend</h3>
+        <canvas id="memory-chart" width="400" height="200"></canvas>
+      </div>
+
+      <div class="chart-panel">
+        <h3>Active Operations</h3>
+        <div id="operations-list" class="operations-container">
+          <!-- Dynamic operations list -->
+        </div>
+      </div>
+
+      <div class="chart-panel">
+        <h3>System Health</h3>
+        <div id="health-indicators" class="health-container">
+          <!-- Health indicators -->
+        </div>
+      </div>
+    </div>
+
+    <div class="insights-section">
+      <div class="bottlenecks-panel">
+        <h3>Performance Bottlenecks</h3>
+        <div id="bottlenecks-list">
+          <!-- Dynamic bottlenecks list -->
+        </div>
+      </div>
+
+      <div class="recommendations-panel">
+        <h3>Recommendations</h3>
+        <div id="recommendations-list">
+          <!-- Dynamic recommendations -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script nonce="{{NONCE}}" src="{{SCRIPT_URI}}"></script>
+</body>
+</html>

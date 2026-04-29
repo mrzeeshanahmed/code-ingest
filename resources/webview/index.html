@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="code-ingest:required-resources" content="./styles.css, ./store.js, ./commandRegistry.js, ./commandMap.generated.js, ./main.js" />
+        <!-- CSP will be injected by webviewHelpers.ts -->
+        <title>Code Ingest Control Center</title>
+        <link rel="stylesheet" href="./styles.css" />
+        <script type="module" src="./store.js" defer></script>
+        <script type="module" src="./commandRegistry.js" defer></script>
+        <script src="./commandMap.generated.js" defer></script>
+        <script type="module" src="./main.js" defer></script>
+    </head>
+    <body data-app-theme="dark">
+        <!-- INITIAL_STATE -->
+        <svg aria-hidden="true" focusable="false" class="sprite-sheet">
+            <defs>
+                <symbol id="icon-folder" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M1.75 3a.75.75 0 0 0-.75.75v8.5c0 .414.336.75.75.75h12.5a.75.75 0 0 0 .75-.75V5.5a.75.75 0 0 0-.75-.75h-5.69l-1.22-1.464A1.25 1.25 0 0 0 6.324 3H1.75Z" />
+                </symbol>
+                <symbol id="icon-file" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M4.75 1A1.75 1.75 0 0 0 3 2.75v10.5c0 .966.784 1.75 1.75 1.75h6.5A1.75 1.75 0 0 0 13 13.25V6.56a1.75 1.75 0 0 0-.513-1.238l-3.81-3.81A1.75 1.75 0 0 0 7.438 1H4.75Zm4.5 1.56 2.44 2.44h-2.19a.25.25 0 0 1-.25-.25V2.56Z" />
+                </symbol>
+                <symbol id="icon-refresh" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M7.75 2a5.75 5.75 0 1 0 4.06 9.81.75.75 0 1 0-1.08-1.04 4.25 4.25 0 1 1 0-6.04l-.18.19a.75.75 0 1 0 1.08 1.04l1.06-1.06a.75.75 0 0 0 0-1.06L11.63 2.7a.75.75 0 1 0-1.06 1.06l.18.18A5.72 5.72 0 0 0 7.75 2Z" />
+                </symbol>
+                <symbol id="icon-link" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M6.25 3.5h1.5v1.75h-1.5a1.75 1.75 0 0 0 0 3.5h1.5v1.75h-1.5a3.5 3.5 0 0 1 0-7Z" />
+                    <path d="M8.25 11.75v-1.75h1.5a1.75 1.75 0 1 0 0-3.5h-1.5V4.75h1.5a3.5 3.5 0 0 1 0 7Z" />
+                </symbol>
+                <symbol id="icon-shield" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M8 1.25 2.5 3.25v4c0 3.6 2.52 6.92 5.5 8.5 2.98-1.58 5.5-4.9 5.5-8.5v-4Z" />
+                </symbol>
+                <symbol id="icon-stats" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M2.75 12.5a.75.75 0 0 0 .75.75h1.5a.75.75 0 0 0 .75-.75V7a.75.75 0 0 0-.75-.75H3.5A.75.75 0 0 0 2.75 7Zm4 0a.75.75 0 0 0 .75.75h1.5a.75.75 0 0 0 .75-.75V3a.75.75 0 0 0-.75-.75H7.5A.75.75 0 0 0 6.75 3Zm4 0a.75.75 0 0 0 .75.75h1.5a.75.75 0 0 0 .75-.75V9a.75.75 0 0 0-.75-.75h-1.5A.75.75 0 0 0 10.75 9Z" />
+                </symbol>
+                <symbol id="icon-warning" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M7.13 2.08 1.4 12.83A1 1 0 0 0 2.27 14h11.46a1 1 0 0 0 .87-1.17L8.87 2.08a1 1 0 0 0-1.74 0ZM8.75 11.5a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm-.25-5.75v3.5h-1v-3.5Z" />
+                </symbol>
+                <symbol id="icon-copy" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M4 2a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-1v1a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h1Zm2-1a1 1 0 0 0-1 1v2h6a2 2 0 0 1 2 2v6h1a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1Z" />
+                </symbol>
+                <symbol id="icon-close" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 0 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z" />
+                </symbol>
+                <symbol id="icon-chevron-down" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708Z" />
+                </symbol>
+                <symbol id="icon-chevron-up" viewBox="0 0 16 16" fill="currentColor">
+                    <path d="M7.646 11.354a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 .708-.708L7.5 10.293l5.646-5.647a.5.5 0 0 1 .708.708Z" />
+                </symbol>
+            </defs>
+        </svg>
+
+        <div id="dashboard" class="layout">
+            <header class="layout__bar layout__bar--top" role="banner">
+                <div class="layout__identity">
+                    <span class="layout__logo" aria-hidden="true">
+                        <img src="./icons/icon.svg" alt="" />
+                    </span>
+                    <div class="layout__identity-text">
+                        <p class="layout__title">Code Ingest</p>
+                        <p class="layout__subtitle" id="workspace-slug" aria-live="polite">Workspace ready</p>
+                    </div>
+                </div>
+                <nav class="layout__actions" role="toolbar" aria-label="Primary actions">
+                    <button type="button" class="action-link" data-action="refresh">Refresh</button>
+                    <button type="button" class="action-link action-link--accent" data-action="generate">Generate digest</button>
+                    <button type="button" class="action-link" data-action="load-remote">Load remote</button>
+                    <button type="button" class="action-link" data-action="toggle-redaction" aria-pressed="false">Toggle redaction</button>
+                    <button type="button" class="action-link" data-action="view-metrics">View metrics</button>
+                    <button type="button" class="action-link" data-action="flush-errors">Flush errors</button>
+                </nav>
+            </header>
+
+            <section class="status-strip" role="status" aria-live="polite">
+                <div class="status-strip__items">
+                    <span class="status-chip" data-element="status-primary">Idle</span>
+                    <span class="status-chip status-chip--muted" data-element="status-repo">No remote repository</span>
+                    <span class="status-chip status-chip--muted" data-element="status-config">Using defaults</span>
+                </div>
+                <div class="status-strip__actions" role="group" aria-label="Quick actions">
+                    <button type="button" class="action-link action-link--quiet" data-action="open-dashboard">Open dashboard</button>
+                    <button type="button" class="action-link action-link--quiet" data-action="flush-errors">Copy errors</button>
+                </div>
+            </section>
+
+            <main class="layout__grid" role="main">
+                <details class="block block--span-12" id="panel-status" open>
+                    <summary class="block__summary">
+                        <span class="block__title">Pipeline status</span>
+                        <span class="block__meta">Scans, filters, and generation</span>
+                    </summary>
+                    <div class="block__content block__content--stack">
+                        <div class="progress" role="group" aria-label="Pipeline progress monitor">
+                            <div class="progress__track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="Pipeline progress">
+                                <div class="progress__indicator"></div>
+                            </div>
+                            <p class="progress__message status__message">Waiting for operation.</p>
+                        </div>
+                        <div class="progress__log status__log" data-element="status-log"></div>
+                    </div>
+                </details>
+
+                <details class="block block--span-7" id="panel-files" open>
+                    <summary class="block__summary">
+                        <span class="block__title">Workspace files</span>
+                        <span class="block__meta">Define inputs for the digest</span>
+                    </summary>
+                    <div class="block__content block__content--stack">
+                        <div class="control-column" role="group" aria-label="Tree commands">
+                            <div class="control-line">
+                                <span class="control-label">Structure</span>
+                                <div class="control-actions">
+                                    <button type="button" class="action-link" data-action="expand-all">Expand all</button>
+                                    <button type="button" class="action-link" data-action="collapse-all">Collapse all</button>
+                                </div>
+                            </div>
+                            <div class="control-line">
+                                <span class="control-label">Selection</span>
+                                <div class="control-actions">
+                                    <button type="button" class="action-link" data-action="select-all">Select all</button>
+                                    <button type="button" class="action-link" data-action="select-none">Clear</button>
+                                </div>
+                            </div>
+                            <div class="control-line">
+                                <label class="control-label" for="preset-select">Preset</label>
+                                <select id="preset-select" class="control-input" data-action="apply-preset">
+                                    <option value="default">Default</option>
+                                    <option value="code">Code focus</option>
+                                    <option value="docs">Documentation</option>
+                                    <option value="tests">Test coverage</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="tree-surface">
+                            <div class="tree-placeholder" data-element="tree-placeholder">Run a scan to populate the file tree.</div>
+                            <div id="file-tree-host" class="file-tree-host" aria-live="polite"></div>
+                        </div>
+                        <footer class="block__footer">
+                            <p class="block__meta">Totals update after each scan.</p>
+                            <button type="button" class="action-link action-link--quiet" data-action="refresh-tree">Rescan workspace</button>
+                        </footer>
+                    </div>
+                </details>
+
+                <details class="block block--span-5" id="panel-preview" open>
+                    <summary class="block__summary">
+                        <span class="block__title">Digest preview</span>
+                        <span class="block__meta">Review before export</span>
+                    </summary>
+                    <div class="block__content block__content--stack">
+                        <div class="control-line control-line--inline" role="group" aria-label="Preview actions">
+                            <button type="button" class="action-link" data-action="refresh-preview">Refresh</button>
+                            <button type="button" class="action-link" data-action="copy-preview">Copy</button>
+                        </div>
+                        <article class="preview" data-state="empty">
+                            <header class="preview__header">
+                                <h3 class="preview__title">Awaiting selection</h3>
+                                <p class="preview__subtitle">Choose files to stream a live digest.</p>
+                            </header>
+                            <section class="preview__content" aria-live="polite"></section>
+                            <footer class="preview__footer">
+                                <div class="preview__stats" data-element="preview-meta">Token usage and stats will appear here.</div>
+                            </footer>
+                        </article>
+                    </div>
+                </details>
+
+                <details class="block block--span-5" id="panel-insights" open>
+                    <summary class="block__summary">
+                        <span class="block__title">Insights</span>
+                        <span class="block__meta">Repository, configuration, performance</span>
+                    </summary>
+                    <div class="block__content block__content--stack">
+                        <dl class="insight-list">
+                            <div class="insight-list__item">
+                                <dt>Configuration</dt>
+                                <dd data-element="insight-config">Awaiting configuration data.</dd>
+                            </div>
+                            <div class="insight-list__item">
+                                <dt>Remote repository</dt>
+                                <dd data-element="insight-repo">No remote repository connected.</dd>
+                            </div>
+                            <div class="insight-list__item">
+                                <dt>Performance</dt>
+                                <dd data-element="insight-performance">Metrics appear as generation runs.</dd>
+                            </div>
+                        </dl>
+                    </div>
+                </details>
+            </main>
+
+            <footer class="layout__bar layout__bar--bottom" role="contentinfo">
+                <span>Code Ingest · Developer knowledge accelerator</span>
+                <div class="layout__footer-actions">
+                    <button type="button" class="action-link" data-action="flush-errors">Flush errors</button>
+                    <button type="button" class="action-link action-link--accent" data-action="view-metrics">Metrics</button>
+                </div>
+            </footer>
+        </div>
+
+        <div id="toast-root" aria-live="polite" aria-atomic="true"></div>
+
+        <div id="ingestModal" class="modal-wrapper" hidden aria-hidden="true">
+            <div class="modal-overlay" id="ingest-cancel-overlay"></div>
+            <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="ingest-modal-title">
+                <h3 id="ingest-modal-title">Ingest Remote Repository</h3>
+                <button class="modal-close" id="ingest-close" aria-label="Close">
+                    <svg class="icon"><use href="#icon-close"></use></svg>
+                </button>
+                <label for="ingest-repo">Repo URL or slug</label>
+                <input id="ingest-repo" type="text" placeholder="owner/repo or https://github.com/owner/repo" />
+                <label for="ingest-ref">Ref (branch/tag/commit)</label>
+                <input id="ingest-ref" type="text" placeholder="branch or tag or commit (optional)" />
+                <label for="ingest-subpath">Subpath (optional)</label>
+                <input id="ingest-subpath" type="text" placeholder="src/app/" />
+                <label class="checkbox-label" for="ingest-submodules"><input id="ingest-submodules" type="checkbox" /> Include submodules</label>
+                <div id="ingest-preview" aria-live="polite">
+                    <div class="spinner" id="ingest-spinner" aria-hidden="true" hidden></div>
+                    <pre class="ingest-text" id="ingest-preview-text"></pre>
+                </div>
+                <div class="modal-actions">
+                    <button id="ingest-cancel" class="secondary">Cancel</button>
+                    <button id="ingest-load-repo" class="primary">Load Repo</button>
+                    <button id="ingest-submit" class="primary" hidden>Start Ingest</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="settings" class="modal-wrapper" hidden aria-hidden="true">
+            <div class="modal-overlay" id="settings-cancel-overlay"></div>
+            <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+                <h3 id="settings-title">Settings</h3>
+                <button class="modal-close" id="settings-close" aria-label="Close">
+                    <svg class="icon"><use href="#icon-close"></use></svg>
+                </button>
+                <form id="settingsForm">
+                    <label class="checkbox-label" for="settings-gitignore"><input id="settings-gitignore" type="checkbox" name="gitignore" /> Respect .gitignore</label>
+
+                    <div class="form-group">
+                        <label for="settings-output-format">Output format</label>
+                        <select id="settings-output-format" name="outputFormat">
+                            <option value="text">Text</option>
+                            <option value="json">JSON</option>
+                            <option value="markdown">Markdown</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="settings-token-model">Token model</label>
+                        <select id="settings-token-model" name="tokenModel">
+                            <option value="chars-approx">chars-approx</option>
+                            <option value="gpt-4o">gpt-4o</option>
+                            <option value="gpt-4o-mini">gpt-4o-mini</option>
+                            <option value="claude-3.5">claude-3.5</option>
+                            <option value="o200k">o200k</option>
+                            <option value="o1">o1</option>
+                            <option value="o2">o2</option>
+                            <option value="internal-heuristic">internal-heuristic</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="settings-binary-policy">Binary policy</label>
+                        <select id="settings-binary-policy" name="binaryPolicy">
+                            <option value="skip">Skip</option>
+                            <option value="include">Include placeholder</option>
+                        </select>
+                    </div>
+
+                    <fieldset class="limit-group">
+                        <legend>Limits</legend>
+                        <div class="limit-row">
+                            <label for="maxFilesNumber">Max files</label>
+                            <input id="maxFilesNumber" type="number" name="thresholds.maxFiles" aria-label="Max files" />
+                            <input id="maxFilesRange" type="range" min="100" max="50000" step="100" title="Max files slider" />
+                        </div>
+                        <div class="limit-row">
+                            <label for="maxTotalSizeNumber">Max total size (MB)</label>
+                            <input id="maxTotalSizeNumber" type="number" name="thresholds.maxTotalSizeBytes" aria-label="Max total size (MB)" />
+                            <input id="maxTotalSizeRange" type="range" min="1" max="4096" step="1" title="Max total size slider" />
+                        </div>
+                        <div class="limit-row">
+                            <label for="tokenLimitNumber">Token limit</label>
+                            <input id="tokenLimitNumber" type="number" name="thresholds.tokenLimit" aria-label="Token limit" />
+                            <input id="tokenLimitRange" type="range" min="256" max="200000" step="256" title="Token limit slider" />
+                        </div>
+                    </fieldset>
+
+                    <fieldset class="safety-group">
+                        <legend>Safety / Redaction</legend>
+                        <label class="checkbox-label" for="settings-show-redacted"><input id="settings-show-redacted" type="checkbox" name="showRedacted" /> Show redacted (disable masking)</label>
+                        <div class="form-group">
+                            <label for="settings-redaction-patterns">Redaction patterns</label>
+                            <textarea id="settings-redaction-patterns" name="redactionPatterns" rows="3" placeholder="/SECRET_[A-Z]+/g"></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label for="settings-redaction-placeholder">Redaction placeholder</label>
+                            <input id="settings-redaction-placeholder" type="text" name="redactionPlaceholder" placeholder="<REDACTED>" />
+                        </div>
+                    </fieldset>
+
+                    <div class="form-group">
+                        <label for="settings-presets">Presets (comma-separated)</label>
+                        <input id="settings-presets" type="text" name="presets" placeholder="docs, tests" />
+                    </div>
+                    <div class="modal-actions">
+                        <button id="cancelSettings" type="button" class="secondary">Cancel</button>
+                        <button id="saveSettings" type="button" class="primary">Save Settings</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </body>
+</html>

@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Code-Ingest Settings</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 18px;
+      font-family: var(--vscode-font-family, "Segoe UI", sans-serif);
+      color: var(--vscode-editor-foreground);
+      background: linear-gradient(180deg, var(--vscode-editor-background), color-mix(in srgb, var(--vscode-editor-background) 82%, black));
+    }
+
+    .section {
+      margin-bottom: 18px;
+      padding: 14px;
+      border-radius: 14px;
+      border: 1px solid var(--vscode-panel-border);
+      background: color-mix(in srgb, var(--vscode-editorWidget-background) 88%, transparent);
+    }
+
+    h2 {
+      margin: 0 0 10px;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      opacity: 0.8;
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    label {
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    input,
+    select,
+    textarea {
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid var(--vscode-input-border, transparent);
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: var(--vscode-input-background);
+      color: var(--vscode-input-foreground);
+    }
+
+    textarea {
+      min-height: 90px;
+      resize: vertical;
+    }
+
+    .checkbox {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .checkbox input {
+      width: auto;
+    }
+  </style>
+</head>
+<body>
+  <div class="section">
+    <h2>Graph</h2>
+    <div class="field"><label>Hop Depth</label><input type="number" min="1" max="5" data-section="codeIngest.graph" data-key="hopDepth"></div>
+    <div class="field"><label>Default Node Mode</label><select data-section="codeIngest.graph" data-key="defaultNodeMode"><option value="file">file</option><option value="function">function</option></select></div>
+    <div class="field"><label>Max Nodes</label><input type="number" min="100" max="2000" data-section="codeIngest.graph" data-key="maxNodes"></div>
+    <div class="field checkbox"><input type="checkbox" data-section="codeIngest.graph" data-key="enableVectorSearch"><label>Enable Vector Search</label></div>
+    <div class="field"><label>Default Layout</label><select data-section="codeIngest.graph" data-key="layout"><option value="cose">cose</option><option value="radial">radial</option></select></div>
+  </div>
+
+  <div class="section">
+    <h2>Indexing</h2>
+    <div class="field"><label>Max File Size (KB)</label><input type="number" min="1" max="102400" data-section="codeIngest.indexing" data-key="maxFileSizeKB"></div>
+    <div class="field"><label>Max Files</label><input type="number" min="100" max="10000" data-section="codeIngest.indexing" data-key="maxFiles"></div>
+    <div class="field"><label>Watcher Debounce (ms)</label><input type="number" min="200" max="5000" data-section="codeIngest.indexing" data-key="watcherDebounceMs"></div>
+    <div class="field"><label>Exclude Patterns (one per line)</label><textarea data-section="codeIngest.indexing" data-key="excludePatterns"></textarea></div>
+    <div class="field checkbox"><input type="checkbox" data-section="codeIngest.indexing" data-key="rebuildOnActivation"><label>Rebuild on Activation</label></div>
+  </div>
+
+  <div class="section">
+    <h2>Copilot</h2>
+    <div class="field"><label>Token Budget</label><input type="number" min="1024" max="32768" data-section="codeIngest.copilot" data-key="tokenBudget"></div>
+    <div class="field checkbox"><input type="checkbox" data-section="codeIngest.copilot" data-key="includeSourceContent"><label>Include Source Content</label></div>
+    <div class="field checkbox"><input type="checkbox" data-section="codeIngest.copilot" data-key="redactSecrets"><label>Redact Secrets</label></div>
+    <div class="field"><label>Semantic Result Count</label><input type="number" min="1" max="20" data-section="codeIngest.copilot" data-key="semanticResultCount"></div>
+  </div>
+
+  <div class="section">
+    <h2>Display</h2>
+    <div class="field checkbox"><input type="checkbox" data-section="codeIngest.display" data-key="showCircularDepsWarning"><label>Show Circular Dependency Warning</label></div>
+    <div class="field"><label>Focus Mode Opacity</label><input type="number" min="0.05" max="0.5" step="0.01" data-section="codeIngest.display" data-key="focusModeOpacity"></div>
+    <div class="field checkbox"><input type="checkbox" data-section="codeIngest.display" data-key="autoFocusOnEditorChange"><label>Auto Focus on Editor Change</label></div>
+  </div>
+  <script src="./settings.js"></script>
+</body>
+</html>
