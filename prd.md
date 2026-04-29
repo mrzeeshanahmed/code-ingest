@@ -49,7 +49,7 @@ Code-Ingest is a local-first, GraphRAG-powered, Copilot-integrated architectural
 
 ### 5.1 Source Repositories
 
-The extension is built by modifying and extending the `code-ingest-demo-master` codebase. The `code-digest-main` codebase remains reference material for selective utility and UX patterns. The `code-ingest-master` Python backend is fully discarded.
+The active implementation target is the current merged extension repository in this workspace. References to `code-ingest-demo-master` and `code-digest-main` are historical source ancestry notes that explain where surviving patterns came from; they are not required sibling folders in the active workspace. The `code-ingest-master` Python backend is fully discarded.
 
 ### 5.2 Module Disposition Table
 
@@ -60,7 +60,7 @@ The extension is built by modifying and extending the `code-ingest-demo-master` 
 | `code-ingest-demo-master/src/commands/generateDigest.ts` | Keep | `src/commands/generateDigest.ts` | Retain legacy digest generation only as a compatibility wrapper that must route through `ExportController` Raw preview/policy flow |
 | `code-ingest-demo-master/src/providers/codeIngestPanel.ts` | Adapt pattern | `src/providers/graphViewPanel.ts` | Reuse panel lifecycle pattern, not renderer architecture |
 | `code-ingest-demo-master/src/providers/webviewHelpers.ts` | Keep as-is | `src/providers/webviewHelpers.ts` | Proven URI transform and CSP helper logic |
-| `code-ingest-demo-master/src/providers/messageEnvelope.ts` | Extend | `src/providers/messageEnvelope.ts` | Add typed graph, sidebar, binary-transfer, and trust-state envelopes |
+| `code-ingest-demo-master/src/providers/messageEnvelope.ts` | Extend | `src/providers/messageEnvelope.ts` | Add typed, versioned graph, sidebar, binary-transfer, and trust-state envelopes |
 | `code-ingest-demo-master/src/controllers/sidebarController.ts` | Adapt | `src/controllers/sidebarController.ts` | Extend to root-aware sidebar orchestration |
 | `code-ingest-demo-master/src/services/fileScanner.ts` | Keep | `src/services/fileScanner.ts` | Graph indexing MUST reuse this scanner |
 | `code-ingest-demo-master/src/services/filterService.ts` | Keep and extend composition | `src/services/filterService.ts` | Combine `.gitignore`, `.codeingestignore`, `files.exclude`, `search.exclude`, and user patterns |
@@ -359,7 +359,7 @@ The required parse-dispatch contract is:
 
 `GraphIndexer (host)` → `DirtyBufferResolver (host)` → marshal `{ filePath, relativePath, languageId, content, contentSource, grammarUri }` → `TreeSitterExtractor worker`
 
-The marshaled payload may be sent as a string or transferable byte buffer, but the dirty-buffer decision itself must stay on the host side. Dirty-buffer snapshots MUST carry a snapshot hash and timestamp; if disk `mtimeMs` advances before commit, the dirty-buffer write is discarded and the file is re-queued from disk.
+The marshaled payload may be sent as a string or transferable byte buffer, but the dirty-buffer decision itself must stay on the host side. Dirty-buffer snapshots MUST carry a snapshot hash, timestamp, and `diskMtimeMsAtResolve`. Immediately before flush, the write path re-reads the file's current on-disk `mtimeMs`; discard and re-queue from disk only when `currentDiskMtimeMs > diskMtimeMsAtResolve`. Equality keeps the buffered snapshot so coarse filesystem timestamp resolution does not cause false discards.
 
 #### Workspace Lifecycle and Disposal
 
@@ -367,7 +367,7 @@ Per-root runtimes are long-lived resources and MUST implement an explicit dispos
 
 - close the root DB handle
 - flush and stop the single-writer queue
-- terminate semantic and parse workers owned by that root
+- terminate exactly one semantic worker and one parse worker owned by that root in the reference v1 design
 - dispose file watchers and event subscriptions
 - release cached manifests and in-memory graph state
 
@@ -387,7 +387,7 @@ Removed workspace roots must not leave behind locked DB files, orphaned workers,
 - During a full rebuild, watcher deltas are held in a pending set until rebuild completion and diffed before enqueue.
 - Directory Merkle updates for changed files are committed in the same serialized mutation flow as node and chunk updates.
 - Read paths that inspect Merkle state during knowledge refresh must coordinate with the writer queue and must not observe half-applied write batches.
-- `SingleWriterQueue` MUST expose `waitForQuiescent(): Promise<void>` or an equivalent read-side quiescence API so `KnowledgeService` can wait for an idle write generation before reading Merkle state.
+- `SingleWriterQueue` MUST expose `waitForQuiescent(): Promise<void>` or an equivalent read-side quiescence API so `KnowledgeService` can wait for an idle write generation before reading Merkle state. Quiescence means no active write batch and no pending coalesced batch in the current generation; a merely idle flusher with buffered work is not quiescent.
 - SQLite page writes must remain offset-based; the writer queue must not perform whole-file database rewrites for ordinary transactions.
 
 ### 6.5 Semantic Retrieval and Token Budgeting
@@ -413,6 +413,16 @@ The normative flow is:
 4. use that same model instance for token counting and final send
 
 Silently token-counting against an unrelated default model is out of spec.
+
+#### Non-Chat Estimate Model Resolution
+
+Sidebar context-window indicators and export previews may need token estimates before a live chat request exists. In that case the estimate path MUST use this order:
+
+1. the last successfully resolved `LanguageModelChat` instance used by `@code-ingest`
+2. a configured Copilot family selection from extension settings, if one exists
+3. otherwise surface `estimate unavailable` rather than pretending a model is known
+
+Non-chat estimates are advisory only and must never silently claim parity with a later request model they did not resolve.
 
 #### Rate Limiting and Availability
 
@@ -595,6 +605,7 @@ The graph view opens as a `WebviewPanel` and uses a Canvas renderer on the main 
 - worker thread computes layout, force steps, and batch updates
 - semantic zoom / level-of-detail reduces label and edge rendering when zoomed out
 - theme colors are read from VS Code CSS variables at runtime and re-read on theme mutation
+- binary payloads are versioned; unknown protocol versions are rejected and force a clean reload instead of best-effort decode
 
 #### Initial Load Contract
 
@@ -604,7 +615,7 @@ The graph view opens as a `WebviewPanel` and uses a Canvas renderer on the main 
 
 #### State and Accessibility
 
-- `vscode.setState()` / `getState()` persist zoom, pan, selection, filters, and stable node positions
+- `vscode.setState()` / `getState()` persist zoom, pan, selection, filters, and stable node positions under a versioned state schema; unknown saved-state versions are discarded and reset cleanly
 - an off-screen accessible mirror or aria-live region reflects currently focused/selected nodes and their relationships
 
 #### Interaction Contract
@@ -650,12 +661,13 @@ Because knowledge is JIT in v1, the knowledge section surfaces cache freshness a
 
 #### Sidebar and Graph Selection Sync
 
+- the sidebar state machine is scoped to the active root: active editor URI first, then current graph selection or explicit sidebar root selection, then single-root fallback only when unambiguous
 - when the graph view has one or more selected nodes, the sidebar Export panel promotes `Export X selected nodes` as the primary action
 - when the graph view is closed or nothing is selected, the sidebar falls back to the active editor context
 - the sidebar export panel includes a PII policy selector, format selector, size estimate in bytes, token estimate, and a mandatory `Preview` action
 - changes to PII policy or export scope propagate immediately between the host, sidebar, and graph toolbar
 - the Ready state mirrors current context-window usage before the user triggers chat or export
-- the context-window indicator is live and is driven by `TokenBudgetService.estimate(...)` updates delivered through the sidebar message envelope contract
+- the context-window indicator is live and is driven by `TokenBudgetService.estimate(...)` updates delivered through the versioned sidebar message envelope contract and the non-chat estimate model-selection order from §6.5
 
 ### 7.10 GitHub Copilot Chat Participant
 
@@ -690,6 +702,7 @@ When the Language Model Tool API is available, these capabilities SHOULD also be
 
 1. run pre-flight checks for trust, graph readiness, DB readability, and model availability
 2. resolve active root, active file, trust state, and the exact request model
+      Root resolution order is: explicit file argument or command URI, then active editor URI, then current graph/sidebar selection, then the single open workspace root if only one exists; otherwise the participant returns a user-visible ambiguity response rather than guessing.
 3. emit progress hook
 4. gather semantic and lexical seeds
 5. run `RelevanceWalker`, honoring cancellation between ranking iterations
@@ -906,9 +919,10 @@ Webviews never perform privileged actions directly. File open, export, clipboard
 
 Workspace-local path validation is mandatory:
 
-- normalize incoming paths with `path.resolve(root, rawPath)`
-- reject traversal outside the trusted root, including UNC paths, absolute drive escapes, and URI-encoded traversal attempts
-- reject privileged operations when the resolved path does not stay under the active trusted root
+- canonicalize the trusted root and candidate path with `fs.realpath` or equivalent before comparison
+- compare containment with `path.relative`, not naive prefix checks
+- reject traversal outside the trusted root, including UNC paths, absolute drive escapes, URI-encoded traversal attempts, symlink escapes, and Windows drive-letter normalization tricks
+- reject privileged operations when the canonical resolved path does not stay under the active trusted root
 
 ### 8.5 Graph Webview CSP
 
@@ -1064,6 +1078,7 @@ Editor context menus expose focus, send-to-chat, and export actions only when th
 - dirty-buffer indexing over disk content
 - host-to-worker dirty-buffer marshal without worker-side `vscode` access
 - dirty-buffer queued result is discarded and re-queued from disk if `mtimeMs` advances before flush
+- dirty-buffer equality case where `currentDiskMtimeMs === diskMtimeMsAtResolve` keeps the buffered snapshot
 - workspace folder add/remove disposal lifecycle
 - watcher instantiation excludes ignored directories at registration time
 - watcher registration never uses bare `**/*` globs
@@ -1079,6 +1094,7 @@ Editor context menus expose focus, send-to-chat, and export actions only when th
 - raw export compatibility commands route through the same policy gate
 - raw export policy denial
 - chat progress hook emission
+- active editor switches across roots update the sidebar state machine without leaking another root's status
 
 ### 12.3 Webview Tests
 

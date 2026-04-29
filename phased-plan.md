@@ -4,7 +4,7 @@
 **Status:** Ready for Implementation
 **Companion Document:** [prd.md](prd.md)
 
-> **How to use this plan:** Finish each phase, including its checkpoint, before starting the next. This plan is intentionally implementation-oriented and assumes work happens inside the `code-ingest-demo-master` codebase in this workspace. The goal is to keep the extension host responsive, the graph trustworthy, and the user-facing behavior consistent with the PRD.
+> **How to use this plan:** Finish each phase, including its checkpoint, before starting the next. This plan is intentionally implementation-oriented and targets the current merged extension repository in this workspace. References to `code-ingest-demo-master` and `code-digest-main` are historical source ancestry only, not required sibling folders in the active workspace. The goal is to keep the extension host responsive, the graph trustworthy, and the user-facing behavior consistent with the PRD.
 
 ---
 
@@ -34,9 +34,9 @@
 
 ### Step 0.1 — Confirm Repository Roles
 
-- `code-ingest-demo-master/` is the primary extension codebase.
-- `code-digest-main/` is read-only reference material.
-- Work only inside the main extension tree; do not modify the reference repository.
+- The current repository root is the primary extension codebase.
+- `code-ingest-demo-master` and `code-digest-main` are historical source references only when those materials are available.
+- Work only inside the current extension tree; do not assume sibling repositories must exist.
 
 ### Step 0.2 — Verify Required Source Areas Exist
 
@@ -66,7 +66,7 @@ Before implementation starts, make sure the team is aligned on the v1 direction 
 ### ✅ Checkpoint 0
 
 - [ ] Primary extension codebase verified
-- [ ] Reference codebase treated as read-only
+- [ ] Any historical reference codebase treated as read-only when present
 - [ ] PRD and phased plan both point to the same v1 architecture
 
 ---
@@ -301,7 +301,7 @@ Rules:
 - the queue must await Asyncify VFS drain before accepting the next write batch
 - VFS drain awaits must race against `VFS_DRAIN_TIMEOUT_MS`; on timeout, emit an Output Channel warning and mark the root runtime degraded without disposing it
 - `last_full_index` is committed only in the final transaction of a rebuild batch, never independently
-- `waitForQuiescent()` resolves when no write batch is active and is the required coordination point for read-side Merkle checks
+- `waitForQuiescent()` resolves only when the queue has no active flush and no pending coalesced batch in the current write generation; read-side callers must not resume on a merely idle worker while buffered work still exists
 - queue-driven writes must preserve SQLite's offset-based page updates rather than rewriting the full database file
 
 ### Step 2.5 — Implement Directory Merkle State
@@ -404,13 +404,13 @@ Behavior:
 - if a target file is open and dirty, use `document.getText()` on the extension host
 - otherwise read from disk on the extension host
 - compute content hashes on the host side for both paths
-- attach snapshot timestamp metadata to dirty-buffer reads
+- attach snapshot timestamp metadata and `diskMtimeMsAtResolve` to dirty-buffer reads
 - return content, content source marker, and resolved grammar URI
 - package a `ParseJob` and dispatch it to the Tree-sitter worker
 
 The worker must never call `vscode.workspace.textDocuments`, `document.getText()`, or any other `vscode` API directly.
 
-If a dirty-buffer snapshot is older than the on-disk `mtime` by the time a write batch is ready to commit, discard the dirty-buffer result and re-queue the file from disk.
+If a dirty-buffer snapshot is queued for commit, the writer path must re-read the file's on-disk `mtimeMs` immediately before flush. Discard and re-queue from disk only when `currentDiskMtimeMs > diskMtimeMsAtResolve`. Equality keeps the buffered snapshot. This contract exists to avoid false discards on coarse timestamp resolutions.
 
 ### Step 3.3 — Implement AST-Enforced Chunking
 
@@ -451,6 +451,7 @@ Wiring contract:
 
 1. `GraphIndexer.indexFile(relativePath)` calls `DirtyBufferResolver.resolve(relativePath)`
 2. the resolver returns `{ content, contentSource, contentHash, snapshotTimestamp, grammarUri }`
+2a. dirty-buffer resolutions also carry `diskMtimeMsAtResolve` for pre-flush stale-snapshot comparison
 3. the host dispatches the parse job to the worker
 4. the worker returns extracted symbols and raw chunk candidates
 5. `FileChunker` finalizes AST-safe chunk boundaries and lineage
@@ -476,6 +477,7 @@ The indexer must also compile exclusions from:
 - [ ] Supported files produce AST-based symbols and chunks
 - [ ] Dirty buffers override disk content during indexing
 - [ ] Dirty-buffer content is marshaled from host to worker without worker-side `vscode` calls
+- [ ] Dirty-buffer stale-snapshot checks compare `currentDiskMtimeMs` against `diskMtimeMsAtResolve` with equality-case coverage
 - [ ] PII is handled before data reaches storage
 - [ ] Grammar assets resolve from packaged extension output
 - [ ] Exclusion compilation includes VS Code excludes and ignore files
@@ -504,6 +506,8 @@ interface RootRuntime {
   fileWatchers: vscode.FileSystemWatcher[];
   gitMonitor: GitActivityMonitor;
   embeddingService: EmbeddingService;
+  parseWorker: vscode.Disposable;
+  semanticWorker: vscode.Disposable;
   outputChannel: vscode.OutputChannel;
   disposables: vscode.Disposable[];
   dispose(): Promise<void>;
@@ -541,13 +545,14 @@ For each trusted root:
 
 1. create or reuse the root runtime shell
 2. open DB and manifests
-3. ensure `.gitignore` contains `.vscode/code-ingest/`
-4. register root-owned disposables and workspace-folder lifecycle hooks
-5. compile watcher scopes from exclusions before allocating any OS watchers
-6. compare schema version, `index_state`, file hashes, and directory Merkle roots
-7. detect dirty buffers on the host side and prepare parse dispatch
-8. detect git-head shifts
-9. enqueue full rebuild or delta reconcile as required
+3. register root-owned disposables and workspace-folder lifecycle hooks
+4. compile watcher scopes from exclusions before allocating any OS watchers
+5. compare schema version, `index_state`, file hashes, and directory Merkle roots
+6. detect dirty buffers on the host side and prepare parse dispatch
+7. detect git-head shifts
+8. enqueue full rebuild or delta reconcile as required
+
+Runtime activation must not edit the user's `.gitignore`. Ignore hygiene remains a repository-maintenance or documentation concern, not an automatic activation side effect.
 
 While a full rebuild is active, the runtime marks `rebuildInProgress = true`. Watcher batches collected during rebuild are held in a pending set and diffed after rebuild completion so files already covered by the rebuild are not redundantly re-indexed.
 
@@ -594,6 +599,8 @@ The sidebar and graph panel must be able to read:
 - `ready`
 
 The first-run experience is tied to these states: a welcome card and initialization CTA for `not-initialized`, progress plus cancel action for `initializing`, and the full product surface only in `ready`.
+
+UI state is scoped to the active root. The active editor URI is the primary source of truth; if no editor is active, the sidebar may fall back to the current graph selection or explicit sidebar root selection. It must not show `Ready` for one root while the active surface belongs to another root that is still `Not Initialized` or `Initializing`.
 
 ### ✅ Checkpoint 4
 
@@ -728,15 +735,31 @@ Required outcome:
 
 **Goal:** Add background semantic indexing without blocking the extension host, and implement on-demand knowledge caching.
 
+### Step 6.0 — Create `SemanticIndexStore`
+
+Create `src/graph/semantic/SemanticIndexStore.ts` before the semantic worker lands.
+
+It must own:
+
+- sidecar manifest persistence
+- checksum metadata
+- document-to-artifact mappings
+- compaction-threshold state and rebuild bookkeeping
+
+`SemanticIndexWorker.ts` consumes this store; it does not absorb the store's persistence responsibilities inline.
+
 ### Step 6.1 — Build `SemanticIndexWorker`
 
 Create `src/graph/semantic/SemanticIndexWorker.ts` and a worker bootstrap.
+
+One semantic worker is created per `RootRuntime`. It is owned and disposed by that root alongside the parse worker, and its queues, cooldown state, manifests, and sidecar paths are isolated by root.
 
 Responsibilities:
 
 - receive vectors from the host-side `EmbeddingService`
 - build and query HNSW sidecars
 - persist document metadata in `embedding_document_metadata`
+- persist sidecar state through `SemanticIndexStore`
 - maintain versioned sidecar manifests and checksum metadata
 - expose rebuild and compaction hooks when sidecars go stale or corrupt
 - trigger compaction when document count reaches `HNSW_COMPACTION_DOC_THRESHOLD` or stale-ratio reaches `HNSW_COMPACTION_STALENESS_RATIO`
@@ -844,6 +867,14 @@ Do not inject graph context into generic Copilot messages. `@code-ingest` remain
 
 Never assume `workspaceFolders?.[0]`. All file, chat, and export actions must resolve the correct root from the relevant URI.
 
+Required resolution order for chat flows:
+
+1. explicit file argument or command URI
+2. active editor URI
+3. current graph selection or sidebar-selected root
+4. the single open workspace root, if exactly one exists
+5. otherwise stop with a user-visible root-ambiguity response instead of guessing
+
 ### ✅ Checkpoint 7
 
 - [ ] `@code-ingest` appears in Copilot Chat
@@ -882,6 +913,15 @@ Create `graphBinaryProtocol.ts` or `graphBinaryProtocol.js` to encode and decode
 
 Use transferable `ArrayBuffer` / `Uint8Array` payloads. Do not send giant object arrays.
 
+The protocol must be versioned. Define a small fixed header that carries at minimum:
+
+- protocol magic bytes
+- protocol version
+- payload kind
+- payload length
+
+Unknown protocol versions must be rejected on decode and force a clean reload rather than best-effort interpretation.
+
 Track `transferInProgress` in the webview layer. Never call `vscode.setState()` while a transfer is mid-flight. If the panel is hidden during transfer, abort cleanly and restore from the last complete state snapshot.
 
 ### Step 8.3 — Implement the Main-Thread Canvas Controller
@@ -895,6 +935,8 @@ Track `transferInProgress` in the webview layer. Never call `vscode.setState()` 
 - keyboard navigation
 - empty-state rendering
 - `vscode.setState()` / `getState()`
+
+Persisted graph-view state must also carry a schema version. If the saved state version is unknown or incompatible, discard it and restore from a clean default instead of attempting partial migration during normal load.
 
 ### Step 8.4 — Implement the Worker Layout Engine
 
@@ -952,6 +994,8 @@ Render these states explicitly:
 
 The `Not Initialized` state shows a first-run welcome card and a single initialization CTA. The `Initializing` state shows progress plus cancellation and hides Ready-only actions.
 
+The sidebar state is bound to the active root using the same resolution order as other UI surfaces: active editor URI first, then current graph selection or explicit sidebar root selection, then single-root fallback only when unambiguous.
+
 ### Step 9.2 — Build the Ready-State Sections
 
 - system status
@@ -962,15 +1006,29 @@ The `Not Initialized` state shows a first-run welcome card and a single initiali
 - knowledge cache status and embedding availability
 - diagnostics actions and open graph view
 
-### Step 9.2a — Wire the Ready-State Token Indicator
+### Step 9.2a — Extend `messageEnvelope.ts`
+
+Extend `src/providers/messageEnvelope.ts` before live sidebar and graph wiring begins.
+
+It must define typed, versioned envelopes for:
+
+- sidebar state
+- token-budget updates
+- graph binary-transfer coordination
+- trust-state changes
+
+Every envelope must include a version field so host and webview layers can reject unsupported message revisions safely.
+
+### Step 9.2b — Wire the Ready-State Token Indicator
 
 The Ready-state context-window indicator must be live, not static.
 
 It must:
 
 - request token estimates from `TokenBudgetService.estimate(...)`
-- receive updates through the existing message-envelope path
+- receive updates through the typed message-envelope path
 - reflect the active model budget assumptions used by retrieval packing
+- use the non-chat model selection order defined for preflight estimates: last successfully resolved chat model, then configured Copilot family, otherwise `token estimate unavailable`
 
 ### Step 9.3 — Add the New Settings Surface
 
@@ -1067,7 +1125,7 @@ Preview should surface:
 - estimated size in bytes
 - file count
 - redaction count
-- token count when model counting is available
+- token count when model counting is available, using the same non-chat model selection order as the sidebar indicator: last successfully resolved chat model, then configured Copilot family
 - `token count unavailable` when model counting cannot run
 
 ### ✅ Checkpoint 10
@@ -1119,16 +1177,19 @@ All file open/export/reveal operations must validate that incoming paths resolve
 Use a shared validation helper equivalent to:
 
 ```typescript
-function assertWorkspacePath(rawPath: string, root: string): string {
-  const resolved = path.resolve(root, rawPath);
-  if (!resolved.startsWith(root + path.sep) && resolved !== root) {
+async function assertWorkspacePath(rawPath: string, root: string): Promise<string> {
+  const canonicalRoot = await fs.promises.realpath(root);
+  const candidate = path.resolve(root, rawPath);
+  const canonicalCandidate = await fs.promises.realpath(candidate);
+  const relative = path.relative(canonicalRoot, canonicalCandidate);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
     throw new Error('Path escapes trusted workspace root');
   }
-  return resolved;
+  return canonicalCandidate;
 }
 ```
 
-Test with traversal, UNC, absolute-drive, and URI-encoded escape inputs.
+Test with traversal, UNC, absolute-drive, URI-encoded escape inputs, symlink escapes, and Windows path-normalization cases.
 
 ### Step 11.5 — Add Prompt Injection Tests
 
@@ -1180,6 +1241,7 @@ Required flows:
 - multi-root resolution
 - dirty-buffer indexing
 - dirty-buffer parse queued, `mtime` advances before flush, stale in-memory snapshot is discarded, and parsing is re-queued from disk
+- dirty-buffer equality case where `currentDiskMtimeMs === diskMtimeMsAtResolve` keeps the buffered snapshot
 - host-to-worker dirty-buffer marshal
 - workspace-folder add/remove disposal lifecycle
 - watcher scope allocation without global `**/*`
@@ -1195,6 +1257,7 @@ Required flows:
 - legacy raw-export compatibility path obeys the same policy gate
 - participant progress hooks
 - raw export policy denial
+- active editor switches across roots update the sidebar state machine without showing the wrong root status
 
 ### Step 12.3 — Webview Tests
 
@@ -1204,6 +1267,7 @@ Required flows:
 - graph/sidebar selection sync
 - node context-menu actions
 - keyboard navigation
+- theme change repaint
 - accessible mirror updates
 
 ### Step 12.4 — Package the VSIX
