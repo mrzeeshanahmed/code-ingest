@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { GraphSettings } from "../config/constants";
@@ -5,6 +6,7 @@ import { GraphDatabase } from "../graph/database/GraphDatabase";
 import { GraphNode } from "../graph/models/Node";
 import { ContextBuilder } from "../graph/traversal/ContextBuilder";
 import { GraphTraversal, SubGraph } from "../graph/traversal/GraphTraversal";
+import { resolveLanguageModel, formatContextFooter } from "../graph/traversal/languageModelResolver";
 import { EmbeddingService } from "./embeddingService";
 
 interface CopilotParticipantOptions {
@@ -19,7 +21,7 @@ interface CopilotParticipantOptions {
 }
 
 interface ParsedRequest {
-  command: "context" | "focus" | "impact" | "explain" | "depth" | "search";
+  command: "context" | "focus" | "impact" | "explain" | "depth" | "search" | "audit" | "export";
   argument?: string | undefined;
   remainingText?: string | undefined;
 }
@@ -86,40 +88,94 @@ export class CopilotParticipant implements vscode.Disposable {
     token: vscode.CancellationToken
   ): Promise<void> {
     void _context;
-    void token;
 
     const parsed = this.parseRequest(request);
-    const markdown = await this.executeParsedRequest(parsed);
-    this.writeMarkdown(stream, markdown);
+    const typedStream = stream as { markdown?: (value: string) => void; write?: (value: string) => void };
+
+    if (parsed.command === "export") {
+      const payload = await this.createContextPayload(parsed.argument, "both", this.options.settings.hopDepth, parsed.remainingText);
+      this.writeMarkdown(typedStream, payload);
+      this.writeFooter(typedStream, parsed, payload);
+      return;
+    }
+
+    if (parsed.command === "focus") {
+      if (!parsed.argument) {
+        this.writeMarkdown(typedStream, "Provide a file path to focus the graph.");
+      } else {
+        await this.options.onFocusFile?.(parsed.argument);
+        this.writeMarkdown(typedStream, `Focused graph view on \`${parsed.argument}\`.`);
+      }
+      return;
+    }
+
+    if (parsed.command === "search") {
+      const matches = await this.options.embeddingService.search(parsed.argument ?? parsed.remainingText ?? "", this.options.settings.semanticResultCount);
+      if (matches.length === 0) {
+        this.writeMarkdown(typedStream, "No semantic matches found.");
+      } else {
+        this.writeMarkdown(typedStream, matches.map((match) => `- \`${match.node.relativePath}\` (${match.distance.toFixed(4)})`).join("\n"));
+      }
+      return;
+    }
+
+    const payload = await this.createContextPayload(
+      parsed.argument,
+      parsed.command === "impact" ? "incoming" : "both",
+      parsed.command === "depth" && parsed.argument ? Number(parsed.argument) : this.options.settings.hopDepth,
+      parsed.remainingText
+    );
+
+    // For context/impact/explain/depth/audit, resolve model and stream response.
+    const model = await resolveLanguageModel("gpt-4", token);
+    if (!model || token.isCancellationRequested) {
+      // Fallback: return payload directly when language model is unavailable.
+      this.writeMarkdown(typedStream, payload);
+      this.writeFooter(typedStream, parsed, payload);
+      return;
+    }
+
+    try {
+      const response = await model.sendRequest(
+        [vscode.LanguageModelChatMessage.User(payload)],
+        {},
+        token
+      );
+
+      for await (const fragment of response.text) {
+        if (token.isCancellationRequested) {
+          break;
+        }
+        this.writeMarkdown(typedStream, fragment);
+      }
+    } catch (error) {
+      this.options.outputChannel?.appendLine(`[copilot] sendRequest failed: ${(error as Error).message}`);
+      this.writeMarkdown(typedStream, payload);
+    }
+
+    this.writeFooter(typedStream, parsed, payload);
   }
 
-  private async executeParsedRequest(parsed: ParsedRequest): Promise<string> {
-    switch (parsed.command) {
-      case "focus":
-        if (!parsed.argument) {
-          return "Provide a file path to focus the graph.";
-        }
-        await this.options.onFocusFile?.(parsed.argument);
-        return `Focused graph view on \`${parsed.argument}\`.`;
-      case "impact":
-        return this.createContextPayload(undefined, "incoming", this.options.settings.hopDepth, parsed.remainingText);
-      case "explain":
-        return this.createContextPayload(undefined, "both", this.options.settings.hopDepth, parsed.remainingText);
-      case "depth": {
-        const depth = Number(parsed.argument ?? this.options.settings.hopDepth);
-        return this.createContextPayload(undefined, "both", Number.isFinite(depth) ? Math.max(1, Math.min(5, depth)) : this.options.settings.hopDepth, parsed.remainingText);
-      }
-      case "search": {
-        const matches = await this.options.embeddingService.search(parsed.argument ?? parsed.remainingText ?? "", this.options.settings.semanticResultCount);
-        if (matches.length === 0) {
-          return "No semantic matches found.";
-        }
-        return matches.map((match) => `- \`${match.node.relativePath}\` (${match.distance.toFixed(4)})`).join("\n");
-      }
-      case "context":
-      default:
-        return this.createContextPayload(parsed.argument, "both", this.options.settings.hopDepth, parsed.remainingText);
-    }
+  private writeFooter(
+    stream: { markdown?: (value: string) => void; write?: (value: string) => void },
+    parsed: ParsedRequest,
+    payload: string
+  ): void {
+    const files = this.extractFilesFromPayload(payload);
+    const footer = formatContextFooter({
+      files,
+      nodeCount: files.length,
+      depth: parsed.command === "depth" && parsed.argument ? Number(parsed.argument) : this.options.settings.hopDepth,
+      semanticMatches: Boolean(parsed.remainingText),
+      promptTokens: 0,
+      piiPolicy: "strict"
+    });
+    this.writeMarkdown(stream, footer);
+  }
+
+  private extractFilesFromPayload(payload: string): string[] {
+    const matches = payload.match(/`([^`]+\.(?:ts|tsx|js|jsx|py|java|go|rs|md|json))`/gu);
+    return matches ? matches.map((m) => m.slice(1, -1)) : [];
   }
 
   private parseRequest(request: unknown): ParsedRequest {
@@ -133,7 +189,7 @@ export class CopilotParticipant implements vscode.Disposable {
     }
 
     const text = typeof candidate.prompt === "string" ? candidate.prompt : typeof candidate.text === "string" ? candidate.text : "";
-    const slashMatch = text.trim().match(/^\/(context|focus|impact|explain|depth|search)\s*(.*)$/u);
+    const slashMatch = text.trim().match(/^\/(context|focus|impact|explain|depth|search|audit|export)\s*(.*)$/u);
     if (slashMatch) {
       const payload = slashMatch[2]?.trim();
       if (slashMatch[1] === "depth") {
@@ -145,7 +201,7 @@ export class CopilotParticipant implements vscode.Disposable {
         };
       }
 
-      if (slashMatch[1] === "context" || slashMatch[1] === "focus") {
+      if (slashMatch[1] === "context" || slashMatch[1] === "focus" || slashMatch[1] === "export") {
         return {
           command: slashMatch[1] as ParsedRequest["command"],
           argument: payload || undefined
@@ -165,15 +221,13 @@ export class CopilotParticipant implements vscode.Disposable {
     };
   }
 
-  private writeMarkdown(stream: unknown, markdown: string): void {
-    const typedStream = stream as { markdown?: (value: string) => void; write?: (value: string) => void };
-    if (typeof typedStream.markdown === "function") {
-      typedStream.markdown(markdown);
+  private writeMarkdown(stream: { markdown?: (value: string) => void; write?: (value: string) => void }, markdown: string): void {
+    if (typeof stream.markdown === "function") {
+      stream.markdown(markdown);
       return;
     }
-
-    if (typeof typedStream.write === "function") {
-      typedStream.write(markdown);
+    if (typeof stream.write === "function") {
+      stream.write(markdown);
     }
   }
 
@@ -189,7 +243,6 @@ export class CopilotParticipant implements vscode.Disposable {
         nodes.push(node);
       }
     }
-
     return nodes;
   }
 
@@ -198,7 +251,6 @@ export class CopilotParticipant implements vscode.Disposable {
     if (!workspaceRoot) {
       return undefined;
     }
-
     const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(workspaceRoot, filePath);
     const relativePath = path.relative(workspaceRoot, absolutePath).replace(/\\/gu, "/");
     return this.options.graphDatabase.getNodeByRelativePath(relativePath);
@@ -215,6 +267,7 @@ export class CopilotParticipant implements vscode.Disposable {
     const orderedNodeIds: string[] = [];
 
     for (const node of nodes) {
+      if (node === undefined) continue;
       const subGraph = this.options.traversal.bfs(node.id, depth, direction);
       for (const entry of subGraph.nodes) {
         mergedNodes.set(entry.id, entry);

@@ -1,6 +1,6 @@
 import * as crypto from "node:crypto";
 
-export type NodeType = "file" | "function" | "class" | "interface" | "method";
+export type NodeType = "file" | "function" | "class" | "interface" | "method" | "knowledge" | "module_summary";
 
 export interface GraphNode {
   id: string;
@@ -19,16 +19,8 @@ export interface GraphNode {
 export function createGraphNodeId(
   workspaceRoot: string,
   relativePath: string,
-  symbolName?: string,
-  symbolKind?: string
+  symbolName = ""
 ): string {
-  const hash = crypto.createHash("sha256");
-  hash.update(workspaceRoot);
-  hash.update("\n");
-  hash.update(relativePath);
-  hash.update("\n");
-  hash.update(symbolName ?? "");
-  hash.update("\n");
-  hash.update(symbolKind ?? "");
-  return hash.digest("hex");
+  const payload = `${workspaceRoot}::${relativePath}::${symbolName}`;
+  return crypto.createHash("sha256").update(payload).digest("hex");
 }

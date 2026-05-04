@@ -47,9 +47,13 @@ export class ExportController {
 
   /**
    * Raw Export: Uses the legacy pipeline (DigestGenerator) without strict PII enforcement.
-   * Useful for internal backups or raw code extraction.
+   * Blocked unless `codeIngest.allowRawExport: true`.
    */
   private async exportRaw(options: ExportOptions): Promise<string> {
+    const allowRaw = vscode.workspace.getConfiguration("codeIngest").get<boolean>("allowRawExport", false);
+    if (!allowRaw) {
+      throw new Error("Raw export is disabled. Enable `codeIngest.allowRawExport` in settings to proceed.");
+    }
     const defaultOptions = {
       selectedFiles: [],
       outputFormat: options.format ?? "markdown",

@@ -1,21 +1,22 @@
 import * as crypto from "node:crypto";
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { GraphSettings } from "../../config/constants";
 import { FilterService } from "../../services/filterService";
-import { FileNode, FileScanner } from "../../services/fileScanner";
+import { FileScanner } from "../../services/fileScanner";
 import { BinaryDetector } from "../../utils/binaryDetector";
 import { asyncPool } from "../../utils/asyncPool";
 import { GraphDatabase } from "../database/GraphDatabase";
+import { DirtyBufferSnapshot } from "../database/SingleWriterQueue";
 import { createGraphEdgeId, GraphEdge } from "../models/Edge";
+import { generateChunkId, GraphCodeChunk, GraphCommentChunk } from "../models/Chunk";
 import { createGraphNodeId, GraphNode, NodeType } from "../models/Node";
+import { DirtyBufferResolver } from "./DirtyBufferResolver";
 import { EdgeResolver, IndexedFileEntry } from "./EdgeResolver";
 import { FileChunker } from "./FileChunker";
-import { LspExtractor } from "./LspExtractor";
-import { EmbeddingService } from "../../services/embeddingService";
+import { GrammarAssetResolver } from "./GrammarAssetResolver";
 import { PIIService, PIIPolicyMode } from "../../services/security/piiService";
-import { generateChunkId, GraphCodeChunk, GraphCommentChunk } from "../models/Chunk";
+import { TreeSitterExtractor } from "./TreeSitterExtractor";
 
 export interface GraphIndexResult {
   indexedFiles: number;
@@ -26,12 +27,12 @@ export interface GraphIndexResult {
 
 interface GraphIndexerDependencies {
   workspaceRoot: vscode.Uri;
+  extensionUri: vscode.Uri;
   fileScanner: FileScanner;
   filterService: FilterService;
   graphDatabase: GraphDatabase;
   getSettings: () => GraphSettings;
   outputChannel?: { appendLine(message: string): void };
-  embeddingService?: EmbeddingService;
 }
 
 export class GraphIndexer {
@@ -41,8 +42,8 @@ export class GraphIndexer {
   private readonly graphDatabase;
   private readonly getSettings;
   private readonly outputChannel;
-  private readonly embeddingService;
-  private readonly lspExtractor;
+  private readonly treeSitterExtractor;
+  private readonly dirtyBufferResolver;
   private readonly edgeResolver = new EdgeResolver();
   private readonly fileChunker = new FileChunker();
   private readonly binaryDetector = new BinaryDetector();
@@ -55,8 +56,9 @@ export class GraphIndexer {
     this.graphDatabase = dependencies.graphDatabase;
     this.getSettings = dependencies.getSettings;
     this.outputChannel = dependencies.outputChannel;
-    this.embeddingService = dependencies.embeddingService;
-    this.lspExtractor = new LspExtractor(this.outputChannel);
+    const grammarResolver = new GrammarAssetResolver(dependencies.extensionUri);
+    this.treeSitterExtractor = new TreeSitterExtractor(dependencies.extensionUri, this.outputChannel);
+    this.dirtyBufferResolver = new DirtyBufferResolver(dependencies.workspaceRoot, grammarResolver);
   }
 
   public async indexWorkspace(): Promise<GraphIndexResult> {
@@ -94,6 +96,7 @@ export class GraphIndexer {
     const edges: GraphEdge[] = [];
     const allCodeChunks: GraphCodeChunk[] = [];
     const allCommentChunks: GraphCommentChunk[] = [];
+    const dirtyBufferSnapshots: DirtyBufferSnapshot[] = [];
 
     for (const entry of existingEntries) {
       nodes.push(entry.fileNode, ...entry.symbolNodes);
@@ -105,21 +108,42 @@ export class GraphIndexer {
           sourceId: entry.fileNode.id,
           targetId: symbolNode.id,
           type: "contains",
-          weight: 1
+          weight: 0.5
         });
+      }
+      if (entry.dirtyBufferSnapshot) {
+        dirtyBufferSnapshots.push(entry.dirtyBufferSnapshot);
       }
     }
 
     edges.push(...this.edgeResolver.resolve(existingEntries));
 
+    const deletes: Array<{ table: string; filePath?: string; ids?: string[] }> = [];
     if (fullRebuild) {
-      this.graphDatabase.clear();
+      await this.graphDatabase.clear();
+    } else {
+      for (const rp of relativePaths) {
+        deletes.push({ table: "nodes", filePath: rp });
+      }
     }
-    this.graphDatabase.replaceFiles(relativePaths, nodes, edges);
-    this.graphDatabase.upsertCodeChunks(allCodeChunks);
-    this.graphDatabase.upsertCommentChunks(allCommentChunks);
+
+    const batch: import("../database/SingleWriterQueue").PendingWriteBatch = {
+      reason: fullRebuild ? "full-rebuild" : "delta-reindex",
+      priority: fullRebuild ? "LOW" : "MEDIUM",
+      filePaths: relativePaths,
+      nodeUpserts: nodes,
+      edgeUpserts: edges,
+      codeChunkUpserts: allCodeChunks,
+      commentChunkUpserts: allCommentChunks,
+      deletes
+    };
+    if (dirtyBufferSnapshots.length > 0) {
+      batch.dirtyBufferSnapshots = dirtyBufferSnapshots;
+    }
+    await this.graphDatabase.writerQueue.enqueue(batch);
+
     const stats = this.graphDatabase.getStats();
-    this.graphDatabase.setIndexState(stats.nodeCount, stats.edgeCount);
+    await this.graphDatabase.setIndexState(stats.nodeCount, stats.edgeCount);
 
     return {
       indexedFiles: existingEntries.length,
@@ -131,42 +155,49 @@ export class GraphIndexer {
 
   private async indexSingleFile(relativePath: string): Promise<IndexedFileEntry | undefined> {
     const settings = this.getSettings();
-    const absolutePath = path.resolve(this.workspaceRoot.fsPath, relativePath);
-    try {
-      const buffer = await fs.readFile(absolutePath);
-      const stats = await fs.stat(absolutePath);
-      const fileNode = this.createFileNode(absolutePath, relativePath, buffer, stats.mtimeMs);
+    const resolution = await this.dirtyBufferResolver.resolve(relativePath);
+    if (!resolution) {
+      return undefined;
+    }
 
-      const isBinary = this.binaryDetector.isBinary(buffer) || this.binaryDetector.isBinaryPath(absolutePath);
-      if (isBinary || stats.size > settings.maxFileSizeKB * 1024) {
+    try {
+      const absolutePath = path.join(this.workspaceRoot.fsPath, relativePath);
+      const fileNode = this.createFileNode(absolutePath, relativePath, resolution.contentHash, resolution.snapshotTimestamp);
+
+      const isBinary = this.binaryDetector.isBinaryPath(absolutePath);
+      const contentByteLength = Buffer.byteLength(resolution.content, "utf8");
+      if (isBinary || contentByteLength > settings.maxFileSizeKB * 1024) {
         fileNode.metadata = {
           ...(fileNode.metadata ?? {}),
           binary: isBinary,
-          truncatedExtraction: stats.size > settings.maxFileSizeKB * 1024
+          truncatedExtraction: contentByteLength > settings.maxFileSizeKB * 1024
         };
-        return {
+        const entry: IndexedFileEntry = {
           fileNode,
           symbolNodes: [],
           symbols: [],
-          content: isBinary ? "" : buffer.toString("utf8"),
+          content: isBinary ? "" : resolution.content,
           codeChunks: [],
           commentChunks: []
         };
+        if (resolution.contentSource === "dirty-buffer") {
+          entry.dirtyBufferSnapshot = { relativePath, diskMtimeMsAtResolve: resolution.diskMtimeMsAtResolve! };
+        }
+        return entry;
       }
 
-      const content = buffer.toString("utf8");
       const languageId = this.detectLanguageId(relativePath);
-      const symbols = await this.lspExtractor.extract(vscode.Uri.file(absolutePath), languageId, content);
-      const symbolNodes = symbols.map((symbol) => this.createSymbolNode(fileNode, symbol.name, symbol.type, symbol.startLine, symbol.endLine));
+      const extraction = await this.treeSitterExtractor.extract(absolutePath, languageId, resolution.content);
+      const symbolNodes = extraction.symbols.map((symbol) =>
+        this.createSymbolNode(fileNode, symbol.name, symbol.type, symbol.startLine, symbol.endLine)
+      );
 
-      const rawChunks = this.fileChunker.chunk(content);
+      const rawChunks = this.fileChunker.chunk(resolution.content);
       const codeChunks: GraphCodeChunk[] = [];
       const commentChunks: GraphCommentChunk[] = [];
 
       for (const chunk of rawChunks) {
-        // Here we could separate comments from code. For now, everything is considered code.
         const piiResult = this.piiService.scanAndRedact(chunk.content);
-        
         codeChunks.push({
           id: generateChunkId(fileNode.id, chunk.startLine, chunk.endLine),
           fileNodeId: fileNode.id,
@@ -178,24 +209,27 @@ export class GraphIndexer {
         });
       }
 
-      return {
+      const entry: IndexedFileEntry = {
         fileNode,
         symbolNodes,
-        symbols,
-        content,
+        symbols: extraction.symbols,
+        content: resolution.content,
         codeChunks,
         commentChunks
       };
+      if (resolution.contentSource === "dirty-buffer") {
+        entry.dirtyBufferSnapshot = { relativePath, diskMtimeMsAtResolve: resolution.diskMtimeMsAtResolve! };
+      }
+      return entry;
     } catch (error) {
       this.outputChannel?.appendLine(`[indexer] Failed to index ${relativePath}: ${(error as Error).message}`);
       return undefined;
     }
   }
 
-  private createFileNode(absolutePath: string, relativePath: string, buffer: Buffer, lastIndexed: number): GraphNode {
-    const hash = crypto.createHash("sha256").update(buffer).digest("hex");
+  private createFileNode(absolutePath: string, relativePath: string, hash: string, lastIndexed: number): GraphNode {
     return {
-      id: createGraphNodeId(this.workspaceRoot.fsPath, relativePath, relativePath, "file"),
+      id: createGraphNodeId(this.workspaceRoot.fsPath, relativePath, ""),
       type: "file",
       label: path.basename(relativePath),
       filePath: absolutePath,
@@ -214,7 +248,7 @@ export class GraphIndexer {
     endLine: number
   ): GraphNode {
     return {
-      id: createGraphNodeId(this.workspaceRoot.fsPath, fileNode.relativePath, symbolName, type),
+      id: createGraphNodeId(this.workspaceRoot.fsPath, fileNode.relativePath, symbolName),
       type,
       label: symbolName,
       filePath: fileNode.filePath,

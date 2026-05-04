@@ -386,7 +386,8 @@ export function setWebviewHtml(
 
     let html = ensureHtmlStructure(rawHtml);
     const serializedState = safeSerializeInitialState(initialState);
-    const nonce = serializedState ? randomBytes(16).toString("base64") : undefined;
+    const nonce = randomBytes(16).toString("base64");
+    html = html.replace(/\{\{nonce\}\}/gu, nonce);
     html = injectCsp(html, webview, nonce);
     html = transformResourceUris(html, webview, baseDirUri);
     html = injectInitialState(html, serializedState, nonce);

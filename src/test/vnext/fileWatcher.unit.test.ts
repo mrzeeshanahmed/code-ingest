@@ -1,3 +1,4 @@
+import { jest } from "@jest/globals";
 import * as vscode from "vscode";
 import { FileWatcher } from "../../graph/indexer/FileWatcher";
 

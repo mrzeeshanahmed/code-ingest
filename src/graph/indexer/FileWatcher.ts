@@ -3,18 +3,22 @@ import * as vscode from "vscode";
 
 export interface FileWatcherOptions {
   workspaceRoot: vscode.Uri;
-  debounceMs: number;
+  relativePattern: vscode.RelativePattern;
+  debounceMs?: number;
   onFilesChanged: (relativePaths: string[]) => Promise<void> | void;
   outputChannel?: { appendLine(message: string): void };
+  isPaused?: () => boolean;
 }
 
 export class FileWatcher implements vscode.Disposable {
   private readonly watcher: vscode.FileSystemWatcher;
   private readonly pending = new Set<string>();
-  private flushTimer: NodeJS.Timeout | undefined;
+  private flushTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly debounceMs: number;
 
   constructor(private readonly options: FileWatcherOptions) {
-    this.watcher = vscode.workspace.createFileSystemWatcher("**/*", false, false, false);
+    this.debounceMs = options.debounceMs ?? 800;
+    this.watcher = vscode.workspace.createFileSystemWatcher(options.relativePattern, false, false, false);
     this.watcher.onDidChange((uri) => this.enqueue(uri));
     this.watcher.onDidCreate((uri) => this.enqueue(uri));
     this.watcher.onDidDelete((uri) => this.enqueue(uri));
@@ -39,11 +43,15 @@ export class FileWatcher implements vscode.Disposable {
     }
 
     this.flushTimer = setTimeout(() => {
+      this.flushTimer = undefined;
+      if (this.options.isPaused?.()) {
+        this.options.outputChannel?.appendLine(`[watcher] Paused due to git activity; holding ${this.pending.size} file(s).`);
+        return;
+      }
       const items = Array.from(this.pending.values());
       this.pending.clear();
-      this.flushTimer = undefined;
       this.options.outputChannel?.appendLine(`[watcher] Reindexing ${items.length} changed file(s).`);
       void this.options.onFilesChanged(items);
-    }, this.options.debounceMs);
+    }, this.debounceMs);
   }
 }

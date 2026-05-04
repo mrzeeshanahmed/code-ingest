@@ -1,4 +1,6 @@
-const path = require("node:path");
+// @ts-nocheck
+import { jest } from "@jest/globals";
+import * as path from "node:path";
 
 const noop = () => undefined;
 
@@ -28,9 +30,9 @@ const outputChannels = new Map();
 const registeredCommands = new Map();
 const registeredWebviewProviders = new Map();
 const createdTreeViews = new Map();
-const createdWebviewPanels = [];
+const createdWebviewPanels: any[] = [];
 
-function createUri(fsPath) {
+function createUri(fsPath: string) {
   return {
     scheme: "file",
     fsPath,
@@ -38,6 +40,15 @@ function createUri(fsPath) {
     toString: () => fsPath,
     toJSON: () => ({ scheme: "file", path: fsPath })
   };
+}
+
+class RelativePattern {
+  public baseUri: any;
+  public pattern: string;
+  constructor(base: any, pattern: string) {
+    this.baseUri = typeof base === "string" ? createUri(base) : base;
+    this.pattern = pattern;
+  }
 }
 
 const createMockDocument = (uri = createUri("untitled:mock")) => ({
@@ -49,14 +60,14 @@ const createMockDocument = (uri = createUri("untitled:mock")) => ({
   eol: 1,
   lineCount: 0,
   getText: jest.fn(() => ""),
-  positionAt: jest.fn((offset) => ({ line: 0, character: offset })),
+  positionAt: jest.fn((offset: number) => ({ line: 0, character: offset })),
   save: jest.fn(() => Promise.resolve(true)),
   version: 1,
   isClosed: false,
   lineAt: jest.fn(),
   offsetAt: jest.fn(),
-  validateRange: jest.fn((range) => range),
-  validatePosition: jest.fn((position) => position)
+  validateRange: jest.fn((range: any) => range),
+  validatePosition: jest.fn((position: any) => position)
 });
 
 const window = {
@@ -65,16 +76,16 @@ const window = {
   showInformationMessage: jest.fn(() => Promise.resolve(undefined)),
   showInputBox: jest.fn(() => Promise.resolve(undefined)),
   showQuickPick: jest.fn(() => Promise.resolve(undefined)),
-  withProgress: jest.fn((_, task) => task({ report: noop }, { isCancellationRequested: false })),
-  showTextDocument: jest.fn(async (document) => ({
+  withProgress: jest.fn((_: any, task: any) => task({ report: noop }, { isCancellationRequested: false })),
+  showTextDocument: jest.fn(async (document: any) => ({
     document: document ?? createMockDocument(),
-    edit: jest.fn(async (callback) => {
+    edit: jest.fn(async (callback: any) => {
       callback({ insert: jest.fn() });
     })
   }))
-};
+} as any;
 
-function createOutputChannelImplementation(name) {
+function createOutputChannelImplementation(name: string) {
   const channel = {
     appendLine: jest.fn(),
     append: jest.fn(),
@@ -89,7 +100,7 @@ function createOutputChannelImplementation(name) {
 
 window.createOutputChannel = jest.fn(createOutputChannelImplementation);
 
-function createTreeViewImplementation(id, options) {
+function createTreeViewImplementation(id: string, options: any) {
   const emitter = createEventEmitter();
   const treeView = {
     id,
@@ -108,7 +119,7 @@ window.createTreeView = jest.fn(createTreeViewImplementation);
 
 window.__getCreatedTreeViews = () => new Map(createdTreeViews);
 
-function registerWebviewViewProviderImplementation(id, provider, options) {
+function registerWebviewViewProviderImplementation(id: string, provider: any, options: any) {
   registeredWebviewProviders.set(id, { provider, options });
   return {
     dispose: jest.fn(() => {
@@ -119,7 +130,7 @@ function registerWebviewViewProviderImplementation(id, provider, options) {
 
 window.registerWebviewViewProvider = jest.fn(registerWebviewViewProviderImplementation);
 
-function createWebviewPanelImplementation(viewType, title, showOptions, options) {
+function createWebviewPanelImplementation(viewType: string, title: string, showOptions: any, options: any) {
   const disposeEmitter = createEventEmitter();
   const messageEmitter = createEventEmitter();
 
@@ -128,14 +139,14 @@ function createWebviewPanelImplementation(viewType, title, showOptions, options)
     cspSource: "vscode-resource://test",
     options: options ?? {},
     postMessage: jest.fn(() => Promise.resolve(true)),
-    asWebviewUri: jest.fn((uri) => ({
+    asWebviewUri: jest.fn((uri: any) => ({
       scheme: "vscode-resource",
       fsPath: uri.fsPath ?? uri.path ?? String(uri),
       toString() {
         return `vscode-resource:${this.fsPath}`;
       }
     })),
-    onDidReceiveMessage: jest.fn((listener) => messageEmitter.event(listener))
+    onDidReceiveMessage: jest.fn((listener: any) => messageEmitter.event(listener))
   };
 
   const panel = {
@@ -168,9 +179,9 @@ const fileSystemWatchers = new Set();
 
 const workspace = {
   getConfiguration: jest.fn(() => ({ get: jest.fn(), update: jest.fn() })),
-  getWorkspaceFolder: jest.fn(() => workspace.workspaceFolders[0]),
-  workspaceFolders: [],
-  openTextDocument: jest.fn(async (input) => {
+  getWorkspaceFolder: jest.fn(() => (workspace as any).workspaceFolders[0]),
+  workspaceFolders: [] as any[],
+  openTextDocument: jest.fn(async (input: any) => {
     if (input && typeof input === "object" && "fsPath" in input) {
       return createMockDocument(input);
     }
@@ -186,10 +197,10 @@ const workspace = {
     rename: jest.fn(() => Promise.resolve()),
     stat: jest.fn(() => Promise.resolve({ type: 1, ctime: Date.now(), mtime: Date.now(), size: 0 }))
   },
-  onDidChangeConfiguration: jest.fn((listener) => configurationEmitter.event(listener)),
-  onDidChangeWorkspaceFolders: jest.fn((listener) => workspaceFolderEmitter.event(listener)),
-  onDidSaveTextDocument: jest.fn((listener) => saveDocumentEmitter.event(listener)),
-  createFileSystemWatcher: jest.fn((pattern) => {
+  onDidChangeConfiguration: jest.fn((listener: any) => configurationEmitter.event(listener)),
+  onDidChangeWorkspaceFolders: jest.fn((listener: any) => workspaceFolderEmitter.event(listener)),
+  onDidSaveTextDocument: jest.fn((listener: any) => saveDocumentEmitter.event(listener)),
+  createFileSystemWatcher: jest.fn((pattern: any) => {
     const changeEmitter = createEventEmitter();
     const createEmitter = createEventEmitter();
     const deleteEmitter = createEventEmitter();
@@ -205,24 +216,24 @@ const workspace = {
         deleteEmitter.dispose();
         fileSystemWatchers.delete(watcher);
       }),
-      __fireChange: (uri) => changeEmitter.fire(uri),
-      __fireCreate: (uri) => createEmitter.fire(uri),
-      __fireDelete: (uri) => deleteEmitter.fire(uri)
+      __fireChange: (uri: any) => changeEmitter.fire(uri),
+      __fireCreate: (uri: any) => createEmitter.fire(uri),
+      __fireDelete: (uri: any) => deleteEmitter.fire(uri)
     };
 
     fileSystemWatchers.add(watcher);
     return watcher;
   })
-};
+} as any;
 
-workspace.__fireWorkspaceFoldersChanged = (event) => workspaceFolderEmitter.fire(event);
-workspace.__fireConfigurationChange = (event) => configurationEmitter.fire(event);
-workspace.__fireDidSaveTextDocument = (document) => saveDocumentEmitter.fire(document);
+workspace.__fireWorkspaceFoldersChanged = (event: any) => workspaceFolderEmitter.fire(event);
+workspace.__fireConfigurationChange = (event: any) => configurationEmitter.fire(event);
+workspace.__fireDidSaveTextDocument = (document: any) => saveDocumentEmitter.fire(document);
 workspace.__getFileSystemWatchers = () => new Set(fileSystemWatchers);
 
 const commandDisposables = new Map();
 
-function registerCommandImplementation(commandId, handler) {
+function registerCommandImplementation(commandId: string, handler: any) {
   registeredCommands.set(commandId, handler);
   const disposable = {
     dispose: jest.fn(() => {
@@ -234,7 +245,7 @@ function registerCommandImplementation(commandId, handler) {
   return disposable;
 }
 
-function executeCommandImplementation(commandId, ...args) {
+function executeCommandImplementation(commandId: string, ...args: any[]) {
   const handler = registeredCommands.get(commandId);
   if (!handler) {
     return Promise.resolve(undefined);
@@ -255,14 +266,14 @@ const commands = {
   executeCommand: jest.fn(executeCommandImplementation)
 };
 
-commands.__getRegisteredCommands = () => new Map(registeredCommands);
+(commands as any).__getRegisteredCommands = () => new Map(registeredCommands);
 
 const registeredExtensions = new Map();
 
 const extensions = {
-  getExtension: jest.fn((id) => registeredExtensions.get(id) ?? undefined),
-  all: [],
-  __register(extension) {
+  getExtension: jest.fn((id: string) => registeredExtensions.get(id) ?? undefined),
+  all: [] as any[],
+  __register(extension: any) {
     registeredExtensions.set(extension.id, extension);
     this.all = [...registeredExtensions.values()];
   },
@@ -283,7 +294,7 @@ const env = {
   }
 };
 
-const createUriFromValue = (value) => {
+const createUriFromValue = (value: any) => {
   if (value && typeof value.fsPath === "string") {
     return createUri(value.fsPath);
   }
@@ -291,9 +302,9 @@ const createUriFromValue = (value) => {
 };
 
 const Uri = {
-  parse: jest.fn((value) => createUriFromValue(value)),
-  file: jest.fn((value) => createUri(path.resolve(String(value)))),
-  joinPath: jest.fn((base, ...segments) => {
+  parse: jest.fn((value: any) => createUriFromValue(value)),
+  file: jest.fn((value: any) => createUri(path.resolve(String(value)))),
+  joinPath: jest.fn((base: any, ...segments: any[]) => {
     const basePath = base.fsPath ?? base.path ?? String(base);
     return createUri(path.join(basePath, ...segments));
   })
@@ -349,7 +360,10 @@ const ConfigurationTarget = {
 };
 
 class TreeItem {
-  constructor(label, collapsibleState) {
+  label: any;
+  collapsibleState: any;
+  description: any;
+  constructor(label: any, collapsibleState: any) {
     this.label = label;
     this.collapsibleState = collapsibleState;
     this.description = undefined;
@@ -357,6 +371,10 @@ class TreeItem {
 }
 
 class MarkdownString {
+  value: string;
+  supportHtml: boolean;
+  supportThemeIcons: boolean;
+  isTrusted: boolean;
   constructor(value = "") {
     this.value = value;
     this.supportHtml = false;
@@ -364,12 +382,12 @@ class MarkdownString {
     this.isTrusted = false;
   }
 
-  appendMarkdown(text) {
+  appendMarkdown(text: string) {
     this.value += text;
     return this;
   }
 
-  appendText(text) {
+  appendText(text: string) {
     this.value += text;
     return this;
   }
@@ -392,20 +410,23 @@ const TreeItemCheckboxState = {
 };
 
 class ThemeIcon {
-  constructor(id) {
+  id: any;
+  constructor(id: any) {
     this.id = id;
   }
 }
 
 class CancellationError extends Error {
-  constructor(message) {
+  constructor(message?: string) {
     super(message ?? "Canceled");
     this.name = "CancellationError";
   }
 }
 
 class CancellationToken {
-  constructor(source) {
+  _source: any;
+  onCancellationRequested: any;
+  constructor(source: any) {
     this._source = source;
     this.onCancellationRequested = jest.fn(() => ({ dispose: jest.fn() }));
   }
@@ -416,6 +437,8 @@ class CancellationToken {
 }
 
 class CancellationTokenSource {
+  _isCancelled: boolean;
+  token: any;
   constructor() {
     this._isCancelled = false;
     this.token = new CancellationToken(this);
@@ -429,6 +452,8 @@ class CancellationTokenSource {
     this._isCancelled = true;
   }
 }
+
+const EventEmitter = jest.fn(() => createEventEmitter());
 
 const mockVSCode = {
   window,
@@ -453,19 +478,19 @@ const mockVSCode = {
   CancellationToken,
   CancellationTokenSource,
   CancellationError,
-  EventEmitter: jest.fn(() => createEventEmitter())
+  EventEmitter
 };
 
 window.activeTextEditor = undefined;
-window.onDidChangeActiveTextEditor = jest.fn((listener) => activeEditorEmitter.event(listener));
-window.__fireActiveTextEditorChange = (editor) => {
+window.onDidChangeActiveTextEditor = jest.fn((listener: any) => activeEditorEmitter.event(listener));
+window.__fireActiveTextEditorChange = (editor: any) => {
   window.activeTextEditor = editor;
   activeEditorEmitter.fire(editor);
 };
 
 const registeredChatParticipants = new Map();
 const chat = {
-  createChatParticipant: jest.fn((id, handler) => {
+  createChatParticipant: jest.fn((id: string, handler: any) => {
     const participant = {
       id,
       handler,
@@ -481,16 +506,16 @@ const chat = {
 };
 
 const lm = {
-  computeTextEmbedding: jest.fn(async (input) => {
+  computeTextEmbedding: jest.fn(async (input: any) => {
     const normalized = String(input ?? "");
     return [normalized.length, normalized.split(/\s+/u).filter(Boolean).length];
   })
 };
 
-mockVSCode.chat = chat;
-mockVSCode.lm = lm;
+(mockVSCode as any).chat = chat;
+(mockVSCode as any).lm = lm;
 
-mockVSCode.__reset = () => {
+(mockVSCode as any).__reset = () => {
   registeredCommands.clear();
   commandDisposables.clear();
   registeredWebviewProviders.clear();
@@ -510,7 +535,7 @@ mockVSCode.__reset = () => {
   window.createWebviewPanel.mockClear();
   window.showTextDocument.mockClear();
   window.onDidChangeActiveTextEditor.mockClear();
-  window.onDidChangeActiveTextEditor.mockImplementation((listener) => activeEditorEmitter.event(listener));
+  window.onDidChangeActiveTextEditor.mockImplementation((listener: any) => activeEditorEmitter.event(listener));
   window.activeTextEditor = undefined;
 
   workspace.getConfiguration.mockClear();
@@ -528,7 +553,7 @@ mockVSCode.__reset = () => {
   workspace.workspaceFolders = [];
   saveDocumentEmitter.dispose();
   saveDocumentEmitter = createEventEmitter();
-  workspace.onDidSaveTextDocument.mockImplementation((listener) => saveDocumentEmitter.event(listener));
+  workspace.onDidSaveTextDocument.mockImplementation((listener: any) => saveDocumentEmitter.event(listener));
   activeEditorEmitter.dispose();
   activeEditorEmitter = createEventEmitter();
   for (const watcher of fileSystemWatchers) {
@@ -556,6 +581,7 @@ mockVSCode.__reset = () => {
 window.__getOutputChannels = () => new Map(outputChannels);
 window.__getRegisteredWebviewProviders = () => new Map(registeredWebviewProviders);
 window.__getCreatedWebviews = () => [...createdWebviewPanels];
-commands.__getCommandDisposables = () => new Map(commandDisposables);
+(commands as any).__getCommandDisposables = () => new Map(commandDisposables);
 
-module.exports = mockVSCode;
+export { window, workspace, commands, extensions, env, Uri, authentication, ProgressLocation, ExtensionMode, ExtensionRuntime, ExtensionKind, FileType, ViewColumn, ConfigurationTarget, TreeItem, TreeItemCollapsibleState, TreeItemCheckboxState, ThemeIcon, MarkdownString, CancellationToken, CancellationTokenSource, CancellationError, EventEmitter, chat, lm, RelativePattern };
+export default mockVSCode;

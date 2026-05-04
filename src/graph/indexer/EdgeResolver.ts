@@ -1,7 +1,8 @@
 import * as path from "node:path";
 import { createGraphEdgeId, GraphEdge, EdgeType } from "../models/Edge";
 import { GraphNode } from "../models/Node";
-import { ExtractedSymbol } from "./LspExtractor";
+import { ExtractedSymbol } from "./TreeSitterExtractor";
+import { DirtyBufferSnapshot } from "../database/SingleWriterQueue";
 
 export interface IndexedFileEntry {
   fileNode: GraphNode;
@@ -10,6 +11,7 @@ export interface IndexedFileEntry {
   content: string;
   codeChunks: import("../models/Chunk").GraphCodeChunk[];
   commentChunks: import("../models/Chunk").GraphCommentChunk[];
+  dirtyBufferSnapshot?: DirtyBufferSnapshot;
 }
 
 interface SymbolLookupEntry {

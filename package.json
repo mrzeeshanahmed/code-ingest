@@ -36,8 +36,7 @@
     "assets/**/*",
     "README.md",
     "CHANGELOG.md",
-    "package.json",
-    "native/**/*.node"
+    "package.json"
   ],
   "contributes": {
     "chatParticipants": [
@@ -71,6 +70,14 @@
           {
             "name": "search",
             "description": "Semantic search across graph nodes"
+          },
+          {
+            "name": "audit",
+            "description": "Audit codebase for issues"
+          },
+          {
+            "name": "export",
+            "description": "Export current context"
           }
         ]
       }
@@ -95,52 +102,52 @@
     },
     "commands": [
       {
-        "command": "code-ingest.rebuildGraph",
+        "command": "codeIngest.rebuildGraph",
         "title": "Code-Ingest: Rebuild Graph",
         "category": "Code-Ingest"
       },
       {
-        "command": "code-ingest.openGraphView",
+        "command": "codeIngest.openGraphView",
         "title": "Code-Ingest: Open Graph View",
         "category": "Code-Ingest"
       },
       {
-        "command": "code-ingest.focusCurrentFile",
+        "command": "codeIngest.focusCurrentFile",
         "title": "Code-Ingest: Focus Current File",
         "category": "Code-Ingest"
       },
       {
-        "command": "code-ingest.openSettings",
+        "command": "codeIngest.openSettings",
         "title": "Code-Ingest: Open Settings",
         "category": "Code-Ingest"
       },
       {
-        "command": "code-ingest.sendToChat",
+        "command": "codeIngest.sendToChat",
         "title": "Code-Ingest: Send Context to Copilot",
         "category": "Code-Ingest"
       },
       {
-        "command": "code-ingest.generateDigest",
+        "command": "codeIngest.generateDigest",
         "title": "Code-Ingest: Generate Digest",
         "category": "Code-Ingest"
       },
       {
-        "command": "code-ingest.showLogs",
+        "command": "codeIngest.showLogs",
         "title": "Code-Ingest: Show Logs",
         "category": "Code-Ingest"
       },
       {
-        "command": "code-ingest.exportGraphPng",
+        "command": "codeIngest.exportGraphPng",
         "title": "Code-Ingest: Export Graph as PNG",
         "category": "Code-Ingest"
       },
       {
-        "command": "code-ingest.clearDatabase",
+        "command": "codeIngest.clearDatabase",
         "title": "Code-Ingest: Clear Graph Database",
         "category": "Code-Ingest"
       },
       {
-        "command": "code-ingest.showGraphStats",
+        "command": "codeIngest.showGraphStats",
         "title": "Code-Ingest: Show Graph Statistics",
         "category": "Code-Ingest"
       }
@@ -148,12 +155,12 @@
     "menus": {
       "editor/context": [
         {
-          "command": "code-ingest.focusCurrentFile",
+          "command": "codeIngest.focusCurrentFile",
           "group": "code-ingest@1",
           "when": "editorIsOpen"
         },
         {
-          "command": "code-ingest.sendToChat",
+          "command": "codeIngest.sendToChat",
           "group": "code-ingest@2",
           "when": "editorIsOpen"
         }

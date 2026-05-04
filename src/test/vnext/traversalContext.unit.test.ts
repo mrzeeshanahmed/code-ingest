@@ -11,28 +11,33 @@ describe("GraphTraversal", () => {
   beforeEach(async () => {
     workspaceRoot = await createTempWorkspace(".tmp-graph-traversal");
     database = new GraphDatabase(workspaceRoot);
-    database.open();
+    await database.open();
   });
 
   afterEach(async () => {
-    database.dispose();
+    await database.dispose();
     await removeTempWorkspace(workspaceRoot);
   });
 
-  test("keeps the root node first and marks circular relationships", () => {
+  test("keeps the root node first and marks circular relationships", async () => {
     const root = createNode(workspaceRoot, "src/root.ts", "root.ts", "file");
     const dependency = createNode(workspaceRoot, "src/dep.ts", "dep.ts", "file");
     const leaf = createNode(workspaceRoot, "src/leaf.ts", "leaf.ts", "file");
 
-    database.replaceFiles(
-      [root.relativePath, dependency.relativePath, leaf.relativePath],
-      [root, dependency, leaf],
-      [
+    await database.writerQueue.enqueue({
+      reason: "test",
+      priority: "HIGH",
+      filePaths: [root.relativePath, dependency.relativePath, leaf.relativePath],
+      nodeUpserts: [root, dependency, leaf],
+      edgeUpserts: [
         createEdge(root.id, dependency.id, "import"),
         createEdge(dependency.id, root.id, "import"),
         createEdge(dependency.id, leaf.id, "import")
-      ]
-    );
+      ],
+      codeChunkUpserts: [],
+      commentChunkUpserts: [],
+      deletes: []
+    });
 
     const traversal = new GraphTraversal(database);
     const subGraph = traversal.bfs(root.id, 2, "both");

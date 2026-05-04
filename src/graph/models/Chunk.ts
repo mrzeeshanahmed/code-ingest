@@ -6,6 +6,7 @@ export interface GraphCodeChunk {
   startLine: number;
   endLine: number;
   content: string;
+  lineage?: string | undefined;
   piiDetected: boolean;
   piiRedactedContent?: string | undefined;
 }
@@ -16,11 +17,12 @@ export interface GraphCommentChunk {
   startLine: number;
   endLine: number;
   content: string;
+  lineage?: string | undefined;
   piiDetected: boolean;
   piiTags?: string | undefined;
 }
 
 export function generateChunkId(fileNodeId: string, startLine: number, endLine: number): string {
-  const payload = `${fileNodeId}:${startLine}:${endLine}`;
-  return crypto.createHash("sha256").update(payload).digest("hex").slice(0, 16);
+  const payload = `${fileNodeId}::${startLine}::${endLine}`;
+  return crypto.createHash("sha256").update(payload).digest("hex");
 }

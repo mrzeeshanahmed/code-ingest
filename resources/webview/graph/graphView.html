@@ -3,8 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-{{nonce}}'; style-src 'unsafe-inline'; img-src data:; worker-src blob:; connect-src 'none';">
   <title>Code-Ingest Graph</title>
-  <style>
+  <style nonce="{{nonce}}">
     :root {
       color-scheme: light dark;
     }
@@ -158,10 +159,10 @@
   <div id="cy"></div>
   <div id="tooltip"></div>
   <div id="contextMenu"></div>
-  <script src="../vendor/cytoscape.min.js"></script>
-  <script src="../vendor/cytoscape-cose-bilkent.js"></script>
-  <script src="./graphStyles.js"></script>
-  <script src="./graphToolbar.js"></script>
-  <script src="./graphView.js"></script>
+  <script nonce="{{nonce}}" src="../vendor/cytoscape.min.js"></script>
+  <script nonce="{{nonce}}" src="../vendor/cytoscape-cose-bilkent.js"></script>
+  <script nonce="{{nonce}}" src="./graphStyles.js"></script>
+  <script nonce="{{nonce}}" src="./graphToolbar.js"></script>
+  <script nonce="{{nonce}}" src="./graphView.js"></script>
 </body>
 </html>

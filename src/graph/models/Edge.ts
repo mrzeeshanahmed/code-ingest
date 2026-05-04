@@ -1,6 +1,6 @@
 import * as crypto from "node:crypto";
 
-export type EdgeType = "import" | "call" | "inheritance" | "implements" | "contains";
+export type EdgeType = "import" | "call" | "inheritance" | "implements" | "contains" | "knowledge_of";
 
 export interface GraphEdge {
   id: string;
@@ -12,11 +12,6 @@ export interface GraphEdge {
 }
 
 export function createGraphEdgeId(sourceId: string, targetId: string, type: EdgeType): string {
-  const hash = crypto.createHash("sha256");
-  hash.update(sourceId);
-  hash.update("\n");
-  hash.update(targetId);
-  hash.update("\n");
-  hash.update(type);
-  return hash.digest("hex");
+  const payload = `${sourceId}::${targetId}::${type}`;
+  return crypto.createHash("sha256").update(payload).digest("hex");
 }

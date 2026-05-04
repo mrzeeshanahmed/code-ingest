@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import { GraphSettings } from "../../config/constants";
 import { redactSecrets } from "../../utils/redactSecrets";
 import { TokenAdapter } from "../../utils/tokenAdapter";
+import { wrapWithBoundary, generateBoundaryTag, isBoundarySafe, buildContextFooter } from "../../utils/escapeHtml";
 import { GraphNode } from "../models/Node";
 import { SubGraph } from "./GraphTraversal";
 import { GraphDatabase } from "../database/GraphDatabase";
@@ -17,6 +18,7 @@ export interface ContextBuildResult {
   includedNodeIds: string[];
   droppedNodeIds: string[];
   tokenEstimate: number;
+  boundaryTag: string;
 }
 
 export interface TraversalMetadata {
@@ -39,6 +41,8 @@ export class ContextBuilder {
     semanticMatches: SemanticMatch[] = [],
     traversal: TraversalMetadata = { depth: 0, direction: "bidirectional" }
   ): Promise<ContextBuildResult> {
+    // Generate a fresh XML boundary tag for this chat turn.
+    const boundaryTag = generateBoundaryTag();
     const nodeMap = new Map(subGraph.nodes.map((node) => [node.id, node]));
     const edgeSummaries = this.buildEdgeSummary(subGraph);
     const sections: string[] = [
@@ -94,7 +98,14 @@ export class ContextBuilder {
           continue;
         }
 
-        const block = `[${node.relativePath}]\n${content}\n`;
+        // Verify the original content is free of boundary-like collisions.
+        if (!isBoundarySafe(content, boundaryTag)) {
+          continue;
+        }
+        // Wrap repository content in randomized XML boundaries with entity encoding.
+        const wrapped = wrapWithBoundary(content, boundaryTag);
+
+        const block = `[${node.relativePath}]\n${wrapped}\n`;
         const blockTokens = this.tokenAdapter.estimateCount(block);
         if (tokenCount + blockTokens > this.settings.tokenBudget) {
           droppedNodeIds.push(node.id);
@@ -112,7 +123,8 @@ export class ContextBuilder {
       payload,
       includedNodeIds,
       droppedNodeIds,
-      tokenEstimate: tokenCount
+      tokenEstimate: tokenCount,
+      boundaryTag
     };
   }
 
@@ -149,7 +161,7 @@ export class ContextBuilder {
     }
 
     // Graph-based pipeline using chunks
-    const chunks = this.graphDatabase.getCodeChunksForFile(node.id);
+    const chunks = await this.graphDatabase.getCodeChunksForFile(node.id);
     if (chunks.length === 0) {
       return "";
     }

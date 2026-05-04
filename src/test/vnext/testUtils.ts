@@ -19,14 +19,15 @@ export function createNode(
   overrides: Partial<GraphNode> = {}
 ): GraphNode {
   const timestamp = overrides.lastIndexed ?? Date.now();
+  const symbolName = type === "file" ? "" : label;
   return {
-    id: createGraphNodeId(workspaceRoot, relativePath, label, type),
+    id: createGraphNodeId(workspaceRoot, relativePath, symbolName),
     type,
     label,
     filePath: path.join(workspaceRoot, relativePath),
     relativePath,
     lastIndexed: timestamp,
-    hash: overrides.hash ?? `${relativePath}:${label}:${type}`,
+    hash: overrides.hash ?? `${relativePath}::${label}::${type}`,
     ...overrides
   };
 }

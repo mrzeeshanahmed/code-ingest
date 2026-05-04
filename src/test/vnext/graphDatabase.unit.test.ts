@@ -12,23 +12,38 @@ describe("GraphDatabase", () => {
     database = new GraphDatabase(workspaceRoot, {
       databasePath: path.join(workspaceRoot, ".vscode", "code-ingest", "graph.db")
     });
-    database.open();
+    try {
+      await database.open();
+    } catch (error: any) {
+      console.error("GraphDatabase.open() failed:", error.message, "code:", error.code);
+      throw error;
+    }
   });
 
   afterEach(async () => {
-    database.dispose();
+    await database.dispose();
     await removeTempWorkspace(workspaceRoot);
   });
 
-  test("creates schema, tracks index state, and reports stats", () => {
+  test("creates schema, tracks index state, and reports stats", async () => {
     expect(database.needsSchemaUpgrade()).toBe(true);
 
     const fileNode = createNode(workspaceRoot, "src/index.ts", "index.ts", "file", { language: "typescript" });
     const helperNode = createNode(workspaceRoot, "src/helper.ts", "helper.ts", "file", { language: "typescript" });
     const importEdge = createEdge(fileNode.id, helperNode.id, "import");
 
-    database.replaceFiles([fileNode.relativePath, helperNode.relativePath], [fileNode, helperNode], [importEdge]);
-    database.setIndexState(2, 1, 12345);
+    await database.writerQueue.enqueue({
+      reason: "test",
+      priority: "HIGH",
+      filePaths: [fileNode.relativePath, helperNode.relativePath],
+      nodeUpserts: [fileNode, helperNode],
+      edgeUpserts: [importEdge],
+      codeChunkUpserts: [],
+      commentChunkUpserts: [],
+      deletes: []
+    });
+
+    await database.setIndexState(2, 1, 12345);
 
     expect(database.needsSchemaUpgrade()).toBe(false);
     expect(database.getIndexState()).toEqual({
@@ -36,7 +51,8 @@ describe("GraphDatabase", () => {
       lastFullIndex: 12345,
       nodeCount: 2,
       edgeCount: 1,
-      schemaVersion: GRAPH_SCHEMA_VERSION
+      schemaVersion: GRAPH_SCHEMA_VERSION,
+      gitHead: null
     });
 
     const stats = database.getStats();
@@ -46,31 +62,42 @@ describe("GraphDatabase", () => {
     expect(stats.databaseSizeBytes).toBeGreaterThan(0);
   });
 
-  test("returns bidirectional neighbors and embedding matches", () => {
+  test("returns bidirectional neighbors", async () => {
     const fileNode = createNode(workspaceRoot, "src/index.ts", "index.ts", "file");
     const helperNode = createNode(workspaceRoot, "src/helper.ts", "helper.ts", "file");
     const importEdge = createEdge(fileNode.id, helperNode.id, "import");
 
-    database.replaceFiles([fileNode.relativePath, helperNode.relativePath], [fileNode, helperNode], [importEdge]);
-    database.upsertEmbeddings([
-      { nodeId: fileNode.id, embedding: [0, 0] },
-      { nodeId: helperNode.id, embedding: [3, 4] }
-    ]);
+    await database.writerQueue.enqueue({
+      reason: "test",
+      priority: "HIGH",
+      filePaths: [fileNode.relativePath, helperNode.relativePath],
+      nodeUpserts: [fileNode, helperNode],
+      edgeUpserts: [importEdge],
+      codeChunkUpserts: [],
+      commentChunkUpserts: [],
+      deletes: []
+    });
 
     const neighbors = database.getNeighbors([fileNode.id], "both");
     expect(neighbors.nodes.map((node) => node.id).sort()).toEqual([fileNode.id, helperNode.id].sort());
     expect(neighbors.edges).toHaveLength(1);
-
-    const matches = database.queryNearestEmbeddings([0, 1], 2);
-    expect(matches.map((match) => match.nodeId)).toEqual([fileNode.id, helperNode.id]);
   });
 
-  test("clears persisted graph state", () => {
+  test("clears persisted graph state", async () => {
     const fileNode = createNode(workspaceRoot, "src/index.ts", "index.ts", "file");
-    database.replaceFiles([fileNode.relativePath], [fileNode], []);
-    database.setIndexState(1, 0, 999);
+    await database.writerQueue.enqueue({
+      reason: "test",
+      priority: "HIGH",
+      filePaths: [fileNode.relativePath],
+      nodeUpserts: [fileNode],
+      edgeUpserts: [],
+      codeChunkUpserts: [],
+      commentChunkUpserts: [],
+      deletes: []
+    });
+    await database.setIndexState(1, 0, 999);
 
-    database.clear();
+    await database.clear();
 
     expect(database.getAllNodes("function")).toHaveLength(0);
     expect(database.getAllEdges()).toHaveLength(0);
