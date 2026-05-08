@@ -5,6 +5,7 @@ import { ContextBuilder } from "../graph/traversal/ContextBuilder";
 import { PIIService, PIIPolicyMode } from "./security/piiService";
 import { GraphSettings } from "../config/constants";
 import { SubGraph } from "../graph/traversal/GraphTraversal";
+import { validateWorkspacePath } from "../utils/workspacePathValidator";
 
 import { createFormatter } from "../formatters/factory";
 
@@ -33,6 +34,11 @@ export class ExportController {
   ) {}
 
   public async export(options: ExportOptions): Promise<string> {
+    // Validate that the workspace root is valid before any export.
+    const pathCheck = validateWorkspacePath(this.workspaceRoot.fsPath, ".");
+    if (!pathCheck.valid) {
+      throw new Error(`Export blocked: workspace path validation failed (${pathCheck.reason}).`);
+    }
     switch (options.mode) {
       case ExportMode.Raw:
         return this.exportRaw(options);
@@ -54,14 +60,19 @@ export class ExportController {
     if (!allowRaw) {
       throw new Error("Raw export is disabled. Enable `codeIngest.allowRawExport` in settings to proceed.");
     }
-    const defaultOptions = {
+    const digestOpts = options.digestOptions ?? {
       selectedFiles: [],
       outputFormat: options.format ?? "markdown",
       maxTokens: 16_000,
       includeMetadata: true,
       applyRedaction: false,
     };
-    const digestResult = await this.digestGenerator.generateDigest(options.digestOptions ?? defaultOptions);
+    // Defensive fallback: if no files are selected, use all indexed file nodes.
+    if (!digestOpts.selectedFiles || digestOpts.selectedFiles.length === 0) {
+      const allFileNodes = this.graphDatabase.getAllNodes("file");
+      digestOpts.selectedFiles = allFileNodes.map((n) => n.filePath);
+    }
+    const digestResult = await this.digestGenerator.generateDigest(digestOpts);
     const formatter = createFormatter(options.format ?? "markdown");
     return formatter.finalize(digestResult);
   }

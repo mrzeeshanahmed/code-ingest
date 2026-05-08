@@ -14,7 +14,6 @@ export interface TelemetryConfiguration {
   enabledInDevelopment: boolean;
   collectionInterval: number;
   maxEventsPerSession: number;
-  endpoint?: string;
   consentShown: boolean;
   userId: string;
   enabledInTests: boolean;
@@ -239,7 +238,6 @@ export class TelemetryService implements vscode.Disposable {
     const collectionInterval = configuration.get<number>("collectionInterval", DEFAULT_CONFIGURATION.collectionInterval);
     const maxEventsPerSession = configuration.get<number>("maxEventsPerSession", DEFAULT_CONFIGURATION.maxEventsPerSession);
     const maxEventsPerFlush = configuration.get<number>("maxEventsPerFlush", DEFAULT_CONFIGURATION.maxEventsPerFlush);
-    const endpoint = configuration.get<string | undefined>("endpoint", DEFAULT_CONFIGURATION.endpoint);
     const enabledInTests = configuration.get<boolean>("enabledInTests", DEFAULT_CONFIGURATION.enabledInTests);
 
     const snapshot: TelemetryConfiguration = {
@@ -253,11 +251,6 @@ export class TelemetryService implements vscode.Disposable {
       enabledInTests,
       maxEventsPerFlush: Math.max(10, Math.min(maxEventsPerFlush, Math.max(10, maxEventsPerSession)))
     };
-
-    const trimmedEndpoint = endpoint?.trim();
-    if (trimmedEndpoint) {
-      snapshot.endpoint = trimmedEndpoint;
-    }
 
     return snapshot;
   }

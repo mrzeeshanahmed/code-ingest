@@ -5,6 +5,7 @@ import { registerDigestCommand } from "./commands/digestCommand";
 import { registerExportCommands } from "./commands/exportCommands";
 import { registerGraphCommands } from "./commands/graphCommands";
 import { getGraphSettings } from "./config/graphSettings";
+import { GRAPH_DEFAULTS } from "./config/constants";
 import { ConfigurationService } from "./services/configurationService";
 import { ErrorReporter } from "./services/errorReporter";
 import { GitignoreService } from "./services/gitignoreService";
@@ -23,6 +24,7 @@ import { SidebarProvider, SidebarState } from "./providers/sidebarProvider";
 import { EmbeddingService } from "./services/embeddingService";
 import { CopilotParticipant } from "./services/copilotParticipant";
 import { RootRuntime, RootRuntimeRegistry } from "./graph/indexer/rootRuntimeRegistry";
+import { KnowledgeService } from "./graph/semantic/KnowledgeService";
 
 let outputChannel: vscode.OutputChannel | undefined;
 let errorChannel: vscode.OutputChannel | undefined;
@@ -163,7 +165,9 @@ async function initializeRoot(
   const contextBuilder = new ContextBuilder({
     tokenBudget: graphSettings().tokenBudget,
     includeSourceContent: graphSettings().includeSourceContent,
-    redactSecrets: graphSettings().redactSecrets
+    redactSecrets: graphSettings().redactSecrets,
+    copilotReserveTokensPercent: graphSettings().copilotReserveTokensPercent,
+    copilotReserveTokensMin: graphSettings().copilotReserveTokensMin
   });
   const graphIndexer = new GraphIndexer({
     workspaceRoot: workspaceFolder.uri,
@@ -176,6 +180,7 @@ async function initializeRoot(
   });
 
   const gitActivityMonitor = new GitActivityMonitor({
+    workspaceRoot: workspaceFolder.uri.fsPath,
     ...(outputChannel ? { outputChannel } : {}),
     onActivityStart: () => {
       outputChannel?.appendLine("[git-monitor] Git activity detected; pausing watchers.");
@@ -184,6 +189,8 @@ async function initializeRoot(
       outputChannel?.appendLine("[git-monitor] Git activity ended; resuming watchers.");
     }
   });
+
+  const knowledgeService = new KnowledgeService(graphDatabase, graphDatabase.writerQueue, outputChannel);
 
   const relativePattern = new vscode.RelativePattern(workspaceFolder, "**/*");
   const fileWatcher = new FileWatcher({
@@ -207,10 +214,11 @@ async function initializeRoot(
     fileWatcher,
     gitActivityMonitor,
     graphIndexer,
+    knowledgeService,
     disposables: [fileWatcher]
   };
 
-  rootRegistry?.register(runtime);
+  await rootRegistry?.register(runtime);
 
   const indexState = graphDatabase.getIndexState();
   const shouldRebuild = graphSettings().rebuildOnActivation || graphDatabase.needsSchemaUpgrade();
@@ -248,30 +256,105 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Trust gate: all graph features require trusted workspace.
   if (!vscode.workspace.isTrusted) {
     outputChannel.appendLine("[activation] Workspace is not trusted; graph features disabled.");
+    const trustLockedSidebar = new SidebarProvider({
+      extensionUri: context.extensionUri,
+      onRebuildGraph: async () => { /* no-op */ },
+      onOpenGraphView: async () => { /* no-op */ },
+      onSendToChat: async () => { /* no-op */ },
+      onOpenSettings: async () => { /* no-op */ },
+      onExport: async () => { /* no-op */ }
+    });
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, trustLockedSidebar));
+    trustLockedSidebar.setState({
+      status: "trust-locked",
+      nodeCount: 0,
+      edgeCount: 0,
+      fileCount: 0,
+      databaseSizeBytes: 0,
+      dependencyCount: 0,
+      dependentCount: 0,
+      settings: {
+        hopDepth: GRAPH_DEFAULTS.hopDepth,
+        defaultNodeMode: GRAPH_DEFAULTS.defaultNodeMode,
+        excludePatterns: GRAPH_DEFAULTS.excludePatterns
+      }
+    });
     return;
   }
 
   const workspaceFolders = vscode.workspace.workspaceFolders;
   if (!workspaceFolders || workspaceFolders.length === 0) {
     outputChannel.appendLine("[activation] No workspace folder detected.");
+    const notInitSidebar = new SidebarProvider({
+      extensionUri: context.extensionUri,
+      onRebuildGraph: async () => { /* no-op */ },
+      onOpenGraphView: async () => { /* no-op */ },
+      onSendToChat: async () => { /* no-op */ },
+      onOpenSettings: async () => { /* no-op */ },
+      onExport: async () => { /* no-op */ }
+    });
+    context.subscriptions.push(vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, notInitSidebar));
+    notInitSidebar.setState({
+      status: "not-initialized",
+      nodeCount: 0,
+      edgeCount: 0,
+      fileCount: 0,
+      databaseSizeBytes: 0,
+      dependencyCount: 0,
+      dependentCount: 0,
+      settings: {
+        hopDepth: GRAPH_DEFAULTS.hopDepth,
+        defaultNodeMode: GRAPH_DEFAULTS.defaultNodeMode,
+        excludePatterns: GRAPH_DEFAULTS.excludePatterns
+      }
+    });
     return;
   }
 
-  // Initialize all roots.
-  for (const folder of workspaceFolders) {
-    try {
-      await initializeRoot(context, folder);
-    } catch (error) {
-      outputChannel?.appendLine(`[activation] Failed to initialize root ${folder.uri.fsPath}: ${(error as Error).message}`);
+  // First-run experience
+  const hasInitialized = context.globalState.get<boolean>("code-ingest.hasInitialized");
+  if (!hasInitialized) {
+    const result = await vscode.window.showInformationMessage(
+      "Welcome to Code-Ingest! Build a graph-aware understanding of your codebase for smarter Copilot Chat context.",
+      { modal: true, detail: "Features:\n• Graph-based code navigation\n• Semantic search across your codebase\n• Structured context for Copilot Chat" },
+      "Initialize Codebase"
+    );
+    if (result === "Initialize Codebase") {
+      // will proceed with normal initialization and mark as initialized after first successful index
     }
+  }
+
+  // Initialize all roots with progress reporting so the UI is not blocked.
+  let anyRootInitialized = false;
+  await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: "Code-Ingest: Initializing workspace graph...",
+      cancellable: false
+    },
+    async (progress) => {
+      for (const folder of workspaceFolders) {
+        progress.report({ message: `Indexing ${folder.name}...` });
+        try {
+          await initializeRoot(context, folder);
+          anyRootInitialized = true;
+        } catch (error) {
+          outputChannel?.appendLine(`[activation] Failed to initialize root ${folder.uri.fsPath}: ${(error as Error).message}`);
+        }
+      }
+    }
+  );
+
+  if (anyRootInitialized && !hasInitialized) {
+    await context.globalState.update("code-ingest.hasInitialized", true);
   }
 
   // Multi-root disposal.
   context.subscriptions.push(
-    vscode.workspace.onDidChangeWorkspaceFolders((event) => {
+    vscode.workspace.onDidChangeWorkspaceFolders(async (event) => {
       for (const removed of event.removed) {
         outputChannel?.appendLine(`[activation] Removing root: ${removed.uri.fsPath}`);
-        rootRegistry?.unregister(removed.uri);
+        await rootRegistry?.unregister(removed.uri);
       }
       for (const added of event.added) {
         outputChannel?.appendLine(`[activation] Adding root: ${added.uri.fsPath}`);
@@ -328,22 +411,39 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   graphViewPanel = new GraphViewPanel({
     extensionUri: context.extensionUri,
-    graphDatabase: runtime.graphDatabase,
-    traversal: new GraphTraversal(runtime.graphDatabase),
-    getSettings: () => getGraphSettings(runtime.workspaceFolder),
+    getGraphDatabase: () => {
+      const rt = activeRuntime();
+      return rt ? rt.graphDatabase : runtime!.graphDatabase;
+    },
+    getTraversal: () => {
+      const rt = activeRuntime();
+      return new GraphTraversal(rt ? rt.graphDatabase : runtime!.graphDatabase);
+    },
+    getSettings: () => {
+      const rt = activeRuntime();
+      return getGraphSettings(rt ? rt.workspaceFolder : runtime!.workspaceFolder);
+    },
     outputChannel,
     onSendToChat: sendToChat
   });
 
   settingsProvider = new SettingsProvider({
     extensionUri: context.extensionUri,
-    getSettings: () => getGraphSettings(runtime.workspaceFolder)
+    getSettings: () => {
+      const rt = activeRuntime();
+      return getGraphSettings(rt ? rt.workspaceFolder : runtime!.workspaceFolder);
+    }
   });
 
   const sidebarProvider = new SidebarProvider({
     extensionUri: context.extensionUri,
     onRebuildGraph: async () => {
-      const result = await runtime.graphIndexer.indexWorkspace();
+      const rt = activeRuntime();
+      if (!rt) {
+        outputChannel?.appendLine("[sidebar] No active runtime available for rebuild.");
+        return;
+      }
+      const result = await rt.graphIndexer.indexWorkspace();
       outputChannel?.appendLine(`[sidebar] Rebuilt graph: ${result.indexedFiles} file(s).`);
     },
     onOpenGraphView: async (filePath) => {
@@ -376,15 +476,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   copilotParticipant = new CopilotParticipant({
     extensionUri: context.extensionUri,
-    graphDatabase: runtime.graphDatabase,
-    traversal: new GraphTraversal(runtime.graphDatabase),
-    contextBuilder: new ContextBuilder({
-      tokenBudget: getGraphSettings(runtime.workspaceFolder).tokenBudget,
-      includeSourceContent: getGraphSettings(runtime.workspaceFolder).includeSourceContent,
-      redactSecrets: getGraphSettings(runtime.workspaceFolder).redactSecrets
-    }),
-    embeddingService: new EmbeddingService(runtime.workspaceFolder.uri.fsPath, runtime.graphDatabase, outputChannel),
-    settings: getGraphSettings(runtime.workspaceFolder),
+    getGraphDatabase: () => {
+      const rt = activeRuntime();
+      return rt ? rt.graphDatabase : runtime!.graphDatabase;
+    },
+    getTraversal: () => {
+      const rt = activeRuntime();
+      return new GraphTraversal(rt ? rt.graphDatabase : runtime!.graphDatabase);
+    },
+    getContextBuilder: () => {
+      const rt = activeRuntime();
+      const db = rt ? rt.graphDatabase : runtime!.graphDatabase;
+      const settings = getGraphSettings(rt ? rt.workspaceFolder : runtime!.workspaceFolder);
+      return new ContextBuilder({
+        tokenBudget: settings.tokenBudget,
+        includeSourceContent: settings.includeSourceContent,
+        redactSecrets: settings.redactSecrets,
+        copilotReserveTokensPercent: settings.copilotReserveTokensPercent,
+        copilotReserveTokensMin: settings.copilotReserveTokensMin
+      }, db);
+    },
+    getEmbeddingService: () => {
+      const rt = activeRuntime();
+      const wsRoot = rt ? rt.workspaceFolder.uri.fsPath : runtime!.workspaceFolder.uri.fsPath;
+      const db = rt ? rt.graphDatabase : runtime!.graphDatabase;
+      return new EmbeddingService(wsRoot, db, outputChannel);
+    },
+    getSettings: () => {
+      const rt = activeRuntime();
+      return getGraphSettings(rt ? rt.workspaceFolder : runtime!.workspaceFolder);
+    },
     outputChannel,
     onFocusFile: async (filePath) => {
       await graphViewPanel?.focusFile(filePath);
@@ -393,8 +514,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   copilotParticipant.register();
 
   registerGraphCommands(context, {
-    graphIndexer: runtime.graphIndexer,
-    graphDatabase: runtime.graphDatabase,
+    getGraphIndexer: () => {
+      const rt = activeRuntime();
+      return rt ? rt.graphIndexer : runtime!.graphIndexer;
+    },
+    getGraphDatabase: () => {
+      const rt = activeRuntime();
+      return rt ? rt.graphDatabase : runtime!.graphDatabase;
+    },
+    getKnowledgeService: () => {
+      const rt = activeRuntime();
+      return rt ? rt.knowledgeService : undefined;
+    },
     graphViewPanel,
     settingsProvider,
     outputChannel,

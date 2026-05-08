@@ -1,7 +1,7 @@
 import { VFS_DRAIN_TIMEOUT_MS } from "../../config/constants";
 import { GraphNode } from "../models/Node";
 import { GraphEdge } from "../models/Edge";
-import { GraphCodeChunk, GraphCommentChunk } from "../models/Chunk";
+import { GraphCodeChunk, GraphCommentChunk, GraphKnowledgeChunk } from "../models/Chunk";
 
 export interface DirtyBufferSnapshot {
   relativePath: string;
@@ -17,6 +17,7 @@ export interface PendingWriteBatch {
   edgeUpserts: GraphEdge[];
   codeChunkUpserts: GraphCodeChunk[];
   commentChunkUpserts: GraphCommentChunk[];
+  knowledgeChunkUpserts: GraphKnowledgeChunk[];
   deletes: Array<{ table: string; filePath?: string; ids?: string[] }>;
   dirtyBufferSnapshots?: DirtyBufferSnapshot[];
 }
@@ -125,6 +126,7 @@ export class SingleWriterQueue {
     const edgeUpserts = new Map<string, GraphEdge>();
     const codeChunks = new Map<string, GraphCodeChunk>();
     const commentChunks = new Map<string, GraphCommentChunk>();
+    const knowledgeChunks = new Map<string, GraphKnowledgeChunk>();
     const deletes: Array<{ table: string; filePath?: string; ids?: string[] }> = [];
     let highestPriority: "HIGH" | "MEDIUM" | "LOW" = "LOW";
     const reasons: string[] = [];
@@ -146,6 +148,9 @@ export class SingleWriterQueue {
       for (const chunk of batch.commentChunkUpserts) {
         commentChunks.set(chunk.id, chunk);
       }
+      for (const chunk of batch.knowledgeChunkUpserts) {
+        knowledgeChunks.set(chunk.id, chunk);
+      }
       deletes.push(...batch.deletes);
       reasons.push(batch.reason);
       for (const snap of batch.dirtyBufferSnapshots ?? []) {
@@ -165,6 +170,7 @@ export class SingleWriterQueue {
       edgeUpserts: Array.from(edgeUpserts.values()),
       codeChunkUpserts: Array.from(codeChunks.values()),
       commentChunkUpserts: Array.from(commentChunks.values()),
+      knowledgeChunkUpserts: Array.from(knowledgeChunks.values()),
       deletes
     };
     if (dirtyBufferSnapshots.size > 0) {

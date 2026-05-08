@@ -40,6 +40,7 @@ describe("GraphDatabase", () => {
       edgeUpserts: [importEdge],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: []
     });
 
@@ -75,6 +76,7 @@ describe("GraphDatabase", () => {
       edgeUpserts: [importEdge],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: []
     });
 
@@ -85,14 +87,17 @@ describe("GraphDatabase", () => {
 
   test("clears persisted graph state", async () => {
     const fileNode = createNode(workspaceRoot, "src/index.ts", "index.ts", "file");
+    const helperNode = createNode(workspaceRoot, "src/helper.ts", "helper.ts", "file");
+    const importEdge = createEdge(fileNode.id, helperNode.id, "import");
     await database.writerQueue.enqueue({
       reason: "test",
       priority: "HIGH",
-      filePaths: [fileNode.relativePath],
-      nodeUpserts: [fileNode],
-      edgeUpserts: [],
+      filePaths: [fileNode.relativePath, helperNode.relativePath],
+      nodeUpserts: [fileNode, helperNode],
+      edgeUpserts: [importEdge],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: []
     });
     await database.setIndexState(1, 0, 999);

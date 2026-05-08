@@ -1,12 +1,13 @@
 import * as fs from "node:fs/promises";
 import { GraphSettings } from "../../config/constants";
 import { redactSecrets } from "../../utils/redactSecrets";
-import { TokenAdapter } from "../../utils/tokenAdapter";
-import { wrapWithBoundary, generateBoundaryTag, isBoundarySafe, buildContextFooter } from "../../utils/escapeHtml";
+import { wrapWithBoundary, generateBoundaryTag, isBoundarySafe } from "../../utils/escapeHtml";
 import { GraphNode } from "../models/Node";
 import { SubGraph } from "./GraphTraversal";
 import { GraphDatabase } from "../database/GraphDatabase";
+import { TokenBudgetService } from "./TokenBudgetService";
 import { PIIPolicyMode } from "../../services/security/piiService";
+import type * as vscode from "vscode";
 
 export interface SemanticMatch {
   node: GraphNode;
@@ -26,14 +27,28 @@ export interface TraversalMetadata {
   direction: "bidirectional" | "incoming" | "outgoing";
 }
 
+function fastLocalEstimate(text: string): number {
+  // Fast local estimator: ~4 characters per token.
+  // Used for greedy assembly only; final verification uses model-scoped countTokens().
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
 export class ContextBuilder {
-  private readonly tokenAdapter = new TokenAdapter();
+  private readonly tokenBudgetService: TokenBudgetService;
 
   constructor(
-    private readonly settings: Pick<GraphSettings, "tokenBudget" | "includeSourceContent" | "redactSecrets">,
+    private readonly settings: Pick<GraphSettings, "tokenBudget" | "includeSourceContent" | "redactSecrets" | "copilotReserveTokensPercent" | "copilotReserveTokensMin">,
     private readonly graphDatabase?: GraphDatabase,
-    private readonly piiPolicy: PIIPolicyMode = PIIPolicyMode.Strict
-  ) {}
+    private readonly piiPolicy: PIIPolicyMode = PIIPolicyMode.Strict,
+    tokenBudgetService?: TokenBudgetService,
+    private readonly languageModel?: vscode.LanguageModelChat
+  ) {
+    this.tokenBudgetService = tokenBudgetService ?? new TokenBudgetService({
+      totalBudget: this.settings.tokenBudget,
+      reserveTokensPercent: ((this.settings.copilotReserveTokensPercent ?? 30) / 100),
+      reserveTokensMin: this.settings.copilotReserveTokensMin ?? 1024
+    });
+  }
 
   public async build(
     queryOrigin: string,
@@ -78,15 +93,18 @@ export class ContextBuilder {
     }
 
     const structuralPayload = sections.join("\n");
-    let tokenCount = this.tokenAdapter.estimateCount(structuralPayload);
+    let fastEstimate = fastLocalEstimate(structuralPayload);
     const includedNodeIds: string[] = [];
     const droppedNodeIds: string[] = [];
     const fileContentSections: string[] = [];
+    const effectiveBudget = this.tokenBudgetService.getEffectiveBudget();
 
     if (this.settings.includeSourceContent) {
       fileContentSections.push("");
       fileContentSections.push("--- FILE CONTENTS (within token budget) ---");
 
+      // Assemble candidate blocks per relevance tier (orderedNodeIds order).
+      const candidateBlocks: string[] = [];
       for (const nodeId of subGraph.orderedNodeIds) {
         const node = nodeMap.get(nodeId);
         if (!node || node.type !== "file") {
@@ -106,24 +124,57 @@ export class ContextBuilder {
         const wrapped = wrapWithBoundary(content, boundaryTag);
 
         const block = `[${node.relativePath}]\n${wrapped}\n`;
-        const blockTokens = this.tokenAdapter.estimateCount(block);
-        if (tokenCount + blockTokens > this.settings.tokenBudget) {
+        const blockTokens = fastLocalEstimate(block);
+        if (fastEstimate + blockTokens > effectiveBudget) {
           droppedNodeIds.push(node.id);
           continue;
         }
 
-        tokenCount += blockTokens;
+        fastEstimate += blockTokens;
         includedNodeIds.push(node.id);
-        fileContentSections.push(block);
+        candidateBlocks.push(block);
+      }
+
+      fileContentSections.push(...candidateBlocks);
+    }
+
+    let payload = [structuralPayload, ...fileContentSections, "=== END GRAPH CONTEXT ==="].join("\n");
+
+    // Batched token verification: one model-scoped countTokens() call for the whole payload.
+    let finalTokenEstimate = fastEstimate;
+    if (this.languageModel) {
+      try {
+        finalTokenEstimate = await this.tokenBudgetService.countTokens(payload, this.languageModel);
+      } catch {
+        // Keep fast local estimate if model counting fails.
       }
     }
 
-    const payload = [structuralPayload, ...fileContentSections, "=== END GRAPH CONTEXT ==="].join("\n");
+    // Trim over-budget content by dropping last-added blocks and re-verify in batches.
+    while (finalTokenEstimate > effectiveBudget && includedNodeIds.length > 0) {
+      const droppedId = includedNodeIds.pop()!;
+      droppedNodeIds.push(droppedId);
+      // Rebuild payload without the dropped block.
+      const droppedNode = nodeMap.get(droppedId);
+      if (droppedNode) {
+        const idx = fileContentSections.findIndex((s) => s.startsWith(`[${droppedNode.relativePath}]`));
+        if (idx >= 0) {
+          fileContentSections.splice(idx, 1);
+        }
+      }
+      payload = [structuralPayload, ...fileContentSections, "=== END GRAPH CONTEXT ==="].join("\n");
+      try {
+        finalTokenEstimate = await this.tokenBudgetService.countTokens(payload, this.languageModel!);
+      } catch {
+        break;
+      }
+    }
+
     return {
       payload,
       includedNodeIds,
       droppedNodeIds,
-      tokenEstimate: tokenCount,
+      tokenEstimate: finalTokenEstimate,
       boundaryTag
     };
   }
@@ -177,7 +228,8 @@ export class ContextBuilder {
     // except the last one, or rely on the actual raw file if Allow mode.
     if (this.piiPolicy === PIIPolicyMode.Allow) {
       try {
-        return await fs.readFile(node.filePath, "utf8");
+        const raw = await fs.readFile(node.filePath, "utf8");
+        return this.settings.redactSecrets ? redactSecrets(raw) : raw;
       } catch {
         return "";
       }

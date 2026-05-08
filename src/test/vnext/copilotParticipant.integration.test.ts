@@ -15,7 +15,8 @@ describe("CopilotParticipant", () => {
     });
 
     const graphDatabase = {
-      getNodeByRelativePath: jest.fn(() => fileNode)
+      getNodeByRelativePath: jest.fn(() => fileNode),
+      getIndexState: jest.fn(() => ({ nodeCount: 2, edgeCount: 1, schemaVersion: 1, lastFullIndex: Date.now(), workspaceHash: "abc", gitHead: null }))
     };
     const traversal = {
       bfs: jest.fn(() => ({
@@ -45,11 +46,11 @@ describe("CopilotParticipant", () => {
 
     const participant = new CopilotParticipant({
       extensionUri: vscode.Uri.file("E:/extension"),
-      graphDatabase: graphDatabase as never,
-      traversal: traversal as never,
-      contextBuilder: contextBuilder as never,
-      embeddingService: embeddingService as never,
-      settings: {
+      getGraphDatabase: () => graphDatabase as never,
+      getTraversal: () => traversal as never,
+      getContextBuilder: () => contextBuilder as never,
+      getEmbeddingService: () => embeddingService as never,
+      getSettings: () => ({
         hopDepth: 3,
         defaultNodeMode: "file",
         maxNodes: 500,
@@ -67,10 +68,14 @@ describe("CopilotParticipant", () => {
         showCircularDepsWarning: true,
         focusModeOpacity: 0.15,
         autoFocusOnEditorChange: true
-      },
-      onFocusFile
+      }),
+      onFocusFile,
+      resolveLanguageModel: jest.fn(async () => ({
+        sendRequest: jest.fn(async () => ({ text: (async function* () { yield "graph payload"; })() }))
+      })) as never
     });
 
+    (vscode.workspace as unknown as { isTrusted: boolean }).isTrusted = true;
     (vscode.workspace.workspaceFolders as unknown) = [
       {
         uri: vscode.Uri.file(workspaceRoot)

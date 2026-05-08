@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { GraphDatabase } from "../graph/database/GraphDatabase";
 import { GraphNode } from "../graph/models/Node";
-import { SemanticIndexStore, SemanticDocument } from "../graph/semantic/SemanticIndexStore";
+import { SemanticIndexWorker } from "../graph/semantic/SemanticIndexWorker";
 
 export interface EmbeddedNodeMatch {
   node: GraphNode;
@@ -9,22 +9,23 @@ export interface EmbeddedNodeMatch {
 }
 
 export class EmbeddingService {
-  private readonly indexStore: SemanticIndexStore;
+  private readonly semanticWorker: SemanticIndexWorker;
   private state: "idle" | "active" | "cooldown" = "idle";
   private cooldownUntil = 0;
   private readonly maxRetries = 3;
   private readonly cooldownMs = 300000; // 5 minutes
+  private computeLock: Promise<number[] | undefined> | undefined;
 
   constructor(
     workspaceRoot: string,
-    graphDatabase: GraphDatabase,
+    private readonly graphDatabase: GraphDatabase,
     private readonly outputChannel?: { appendLine(message: string): void }
   ) {
-    this.indexStore = new SemanticIndexStore(workspaceRoot, graphDatabase, outputChannel);
+    this.semanticWorker = new SemanticIndexWorker(workspaceRoot, graphDatabase, outputChannel);
   }
 
   public async initialize(): Promise<void> {
-    await this.indexStore.initialize();
+    await this.semanticWorker.initialize();
   }
 
   public isAvailable(): boolean {
@@ -33,12 +34,12 @@ export class EmbeddingService {
   }
 
   public async indexNodes(nodes: GraphNode[]): Promise<void> {
-    if (!this.isAvailable()) {
+    if (!this.isAvailable() || this.semanticWorker.isDisposed()) {
       this.outputChannel?.appendLine("[embedding] computeTextEmbedding unavailable; skipping semantic index.");
       return;
     }
 
-    const docs: SemanticDocument[] = [];
+    const docs = [];
     for (const node of nodes) {
       const vector = await this.computeEmbeddingWithRetry(`${node.label} ${node.relativePath}`);
       if (vector) {
@@ -47,7 +48,11 @@ export class EmbeddingService {
     }
 
     if (docs.length > 0) {
-      await this.indexStore.addDocuments(docs);
+      await this.semanticWorker.handleMessage({
+        type: "index-documents",
+        payload: docs,
+        requestId: `index-${Date.now()}`
+      });
     }
   }
 
@@ -65,11 +70,29 @@ export class EmbeddingService {
       return this.searchByLabel(query, limit);
     }
 
-    const results = this.indexStore.search(queryVector, limit);
-    return results.map((r: { id: string; distance: number }) => {
-      const node = { id: r.id, label: "", type: "file", filePath: "", relativePath: "", lastIndexed: 0, hash: "" } as GraphNode;
-      return { node, distance: r.distance };
+    const response = await this.semanticWorker.handleMessage({
+      type: "search",
+      payload: { queryVector, limit },
+      requestId: `search-${Date.now()}`
     });
+
+    if (response.type === "error") {
+      return this.searchByLabel(query, limit);
+    }
+
+    const results = (response.payload ?? []) as Array<{ id: string; distance: number }>;
+    const matches: EmbeddedNodeMatch[] = [];
+    for (const r of results) {
+      const actualNode = this.graphDatabase.getNodeById(r.id);
+      if (actualNode) {
+        matches.push({ node: actualNode, distance: r.distance });
+      }
+    }
+    return matches;
+  }
+
+  public async dispose(): Promise<void> {
+    await this.semanticWorker.dispose();
   }
 
   private async computeEmbeddingWithRetry(text: string): Promise<number[] | undefined> {
@@ -77,10 +100,34 @@ export class EmbeddingService {
       return undefined;
     }
 
+    // Atomic serialization: only one embedding call active at a time.
+    while (this.computeLock) {
+      try {
+        await this.computeLock;
+      } catch {
+        // previous call failed, proceed
+      }
+    }
+
+    if (this.state === "cooldown" && Date.now() < this.cooldownUntil) {
+      return undefined;
+    }
+
+    this.computeLock = this.doComputeEmbeddingWithRetry(text);
+    try {
+      return await this.computeLock;
+    } finally {
+      this.computeLock = undefined;
+    }
+  }
+
+  private async doComputeEmbeddingWithRetry(text: string): Promise<number[] | undefined> {
+    this.state = "active";
     for (let attempt = 0; attempt < this.maxRetries; attempt += 1) {
       try {
         const lmApi = (vscode as unknown as { lm?: { computeTextEmbedding: (text: string) => Promise<number[]> } }).lm;
         if (!lmApi?.computeTextEmbedding) {
+          this.state = "idle";
           return undefined;
         }
         const vector = await lmApi.computeTextEmbedding(text);
@@ -101,10 +148,15 @@ export class EmbeddingService {
   }
 
   private searchByLabel(query: string, limit: number): EmbeddedNodeMatch[] {
-    const normalizedQuery = query.toLowerCase();
-    // Fallback: this requires access to the graph database which we don't store directly.
-    // In practice, the caller should provide nodes. For now return empty.
-    return [];
+    const terms = query.toLowerCase().split(/\s+/u).filter(Boolean);
+    if (terms.length === 0) {
+      return [];
+    }
+    const all = this.graphDatabase.getAllNodes("function");
+    return all
+      .filter((n) => terms.some((t) => n.label.toLowerCase().includes(t) || n.relativePath.toLowerCase().includes(t)))
+      .slice(0, limit)
+      .map((node) => ({ node, distance: 0 }));
   }
 
   private delay(ms: number): Promise<void> {

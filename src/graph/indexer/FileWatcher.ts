@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { validateWorkspacePath } from "../../utils/workspacePathValidator";
 
 export interface FileWatcherOptions {
   workspaceRoot: vscode.Uri;
@@ -37,15 +38,26 @@ export class FileWatcher implements vscode.Disposable {
       return;
     }
 
+    // Validate the path is within the workspace before processing.
+    const pathCheck = validateWorkspacePath(this.options.workspaceRoot.fsPath, relativePath);
+    if (!pathCheck.valid) {
+      return;
+    }
+
     this.pending.add(relativePath);
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
     }
 
+    this.scheduleFlush();
+  }
+
+  private scheduleFlush(): void {
     this.flushTimer = setTimeout(() => {
       this.flushTimer = undefined;
       if (this.options.isPaused?.()) {
-        this.options.outputChannel?.appendLine(`[watcher] Paused due to git activity; holding ${this.pending.size} file(s).`);
+        this.options.outputChannel?.appendLine(`[watcher] Paused due to git activity; holding ${this.pending.size} file(s). Retrying in ${this.debounceMs}ms.`);
+        this.scheduleFlush();
         return;
       }
       const items = Array.from(this.pending.values());

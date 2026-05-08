@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { GrammarAssetResolver } from "./GrammarAssetResolver";
+import { validateWorkspacePath } from "../../utils/workspacePathValidator";
 
 export interface BufferResolution {
   content: string;
@@ -20,6 +21,11 @@ export class DirtyBufferResolver {
   ) {}
 
   public async resolve(relativePath: string): Promise<BufferResolution | undefined> {
+    // Validate the path is within the workspace before any file I/O.
+    const pathCheck = validateWorkspacePath(this.workspaceRoot.fsPath, relativePath);
+    if (!pathCheck.valid) {
+      return undefined;
+    }
     const absolutePath = path.join(this.workspaceRoot.fsPath, relativePath);
     const document = this.findOpenDocument(absolutePath);
 

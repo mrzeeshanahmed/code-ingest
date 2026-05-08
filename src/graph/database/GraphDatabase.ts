@@ -124,12 +124,27 @@ export class GraphDatabase {
     this.writerQueue = new SingleWriterQueue(executor, this.outputChannel);
   }
 
+  private lockFilePath: string | undefined;
+
   public async open(): Promise<void> {
     this.sqlite3 = await getSqlite3();
     this.vfs = await createVscodeAsyncVfs();
     this.sqlite3.vfs_register(this.vfs, true);
 
     fs.mkdirSync(path.dirname(this.databasePath), { recursive: true });
+
+    // Lockfile guard to prevent concurrent access from multiple VS Code windows.
+    this.lockFilePath = `${this.databasePath}.lock`;
+    try {
+      const lockFd = fs.openSync(this.lockFilePath, "wx");
+      fs.writeSync(lockFd, String(process.pid));
+      fs.closeSync(lockFd);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        throw new Error(`Database is locked by another process. Lockfile: ${this.lockFilePath}`);
+      }
+      throw error;
+    }
 
     const VFS = await loadSqliteConstants();
     this.db = await this.sqlite3.open_v2(
@@ -150,6 +165,14 @@ export class GraphDatabase {
       await this.sqlite3.close(this.db);
       this.db = undefined as unknown as number;
     }
+    if (this.lockFilePath && fs.existsSync(this.lockFilePath)) {
+      try {
+        fs.unlinkSync(this.lockFilePath);
+      } catch {
+        // Best-effort lockfile cleanup.
+      }
+      this.lockFilePath = undefined;
+    }
   }
 
   public async dispose(): Promise<void> {
@@ -166,6 +189,7 @@ export class GraphDatabase {
   }
 
   public async setIndexState(nodeCount: number, edgeCount: number, timestamp = Date.now()): Promise<void> {
+    await this.writerQueue.waitForQuiescent();
     await this.sqlite3.run(this.db, `
       INSERT INTO index_state (workspace_hash, last_full_index, node_count, edge_count, schema_version)
       VALUES (?, ?, ?, ?, ?)
@@ -191,19 +215,27 @@ export class GraphDatabase {
   }
 
   public async clear(): Promise<void> {
-    await this.sqlite3.run(this.db, "DELETE FROM edges;");
-    await this.sqlite3.run(this.db, "DELETE FROM code_chunks;");
-    await this.sqlite3.run(this.db, "DELETE FROM comment_chunks;");
-    await this.sqlite3.run(this.db, "DELETE FROM knowledge_chunks;");
-    await this.sqlite3.run(this.db, "DELETE FROM knowledge_links;");
-    await this.sqlite3.run(this.db, "DELETE FROM terms;");
-    await this.sqlite3.run(this.db, "DELETE FROM term_links;");
-    await this.sqlite3.run(this.db, "DELETE FROM module_summaries;");
-    await this.sqlite3.run(this.db, "DELETE FROM directory_state;");
-    await this.sqlite3.run(this.db, "DELETE FROM embedding_document_metadata;");
-    await this.sqlite3.run(this.db, "DELETE FROM artifact_state;");
-    await this.sqlite3.run(this.db, "DELETE FROM nodes;");
-    await this.sqlite3.run(this.db, "DELETE FROM index_state WHERE workspace_hash = ?", [this.workspaceHash]);
+    await this.writerQueue.waitForQuiescent();
+    await this.sqlite3.run(this.db, "BEGIN");
+    try {
+      await this.sqlite3.run(this.db, "DELETE FROM edges;");
+      await this.sqlite3.run(this.db, "DELETE FROM code_chunks;");
+      await this.sqlite3.run(this.db, "DELETE FROM comment_chunks;");
+      await this.sqlite3.run(this.db, "DELETE FROM knowledge_chunks;");
+      await this.sqlite3.run(this.db, "DELETE FROM knowledge_links;");
+      await this.sqlite3.run(this.db, "DELETE FROM terms;");
+      await this.sqlite3.run(this.db, "DELETE FROM term_links;");
+      await this.sqlite3.run(this.db, "DELETE FROM module_summaries;");
+      await this.sqlite3.run(this.db, "DELETE FROM directory_state;");
+      await this.sqlite3.run(this.db, "DELETE FROM embedding_document_metadata;");
+      await this.sqlite3.run(this.db, "DELETE FROM artifact_state;");
+      await this.sqlite3.run(this.db, "DELETE FROM nodes;");
+      await this.sqlite3.run(this.db, "DELETE FROM index_state WHERE workspace_hash = ?", [this.workspaceHash]);
+      await this.sqlite3.run(this.db, "COMMIT");
+    } catch (error) {
+      await this.sqlite3.run(this.db, "ROLLBACK");
+      throw error;
+    }
 
     this.nodes.clear();
     this.edges.clear();
@@ -466,7 +498,35 @@ export class GraphDatabase {
         ]);
       }
 
+      for (const chunk of batch.knowledgeChunkUpserts) {
+        await this.sqlite3.run(this.db, `
+          INSERT INTO knowledge_chunks (id, node_id, summary, invariants, pii_detected, pii_redacted_summary, created_at, stale)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            node_id = excluded.node_id,
+            summary = excluded.summary,
+            invariants = excluded.invariants,
+            pii_detected = excluded.pii_detected,
+            pii_redacted_summary = excluded.pii_redacted_summary,
+            created_at = excluded.created_at,
+            stale = excluded.stale
+        `, [
+          chunk.id, chunk.nodeId, chunk.summary, chunk.invariants,
+          chunk.piiDetected ? 1 : 0, chunk.piiRedactedSummary ?? null,
+          chunk.createdAt, chunk.stale ? 1 : 0
+        ]);
+      }
+
+      const VALID_DELETE_TABLES = new Set([
+        "nodes", "edges", "code_chunks", "comment_chunks", "knowledge_chunks",
+        "knowledge_links", "terms", "term_links", "module_summaries",
+        "directory_state", "embedding_document_metadata", "artifact_state"
+      ]);
       for (const del of batch.deletes) {
+        if (!VALID_DELETE_TABLES.has(del.table)) {
+          this.outputChannel?.appendLine(`[GraphDatabase] Rejected delete from unknown table: ${del.table}`);
+          continue;
+        }
         if (del.ids && del.ids.length > 0) {
           const placeholders = del.ids.map(() => "?").join(", ");
           await this.sqlite3.run(this.db, `DELETE FROM ${del.table} WHERE id IN (${placeholders})`, del.ids);
@@ -495,6 +555,22 @@ export class GraphDatabase {
         for (const id of del.ids) {
           if (del.table === "nodes") this.nodes.delete(id);
           if (del.table === "edges") this.edges.delete(id);
+        }
+      }
+      if (del.filePath && del.table === "nodes") {
+        const idsToDelete: string[] = [];
+        for (const [id, node] of this.nodes) {
+          if (node.relativePath === del.filePath) {
+            idsToDelete.push(id);
+          }
+        }
+        for (const id of idsToDelete) {
+          this.nodes.delete(id);
+          for (const [edgeId, edge] of this.edges) {
+            if (edge.sourceId === id || edge.targetId === id) {
+              this.edges.delete(edgeId);
+            }
+          }
         }
       }
     }

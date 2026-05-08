@@ -4,7 +4,7 @@ import { GraphSettings } from "../config/constants";
 import { setWebviewHtml } from "./webviewHelpers";
 
 export interface SidebarState {
-  status: "ready" | "indexing" | "partial" | "error";
+  status: "trust-locked" | "not-initialized" | "ready" | "indexing" | "partial" | "error";
   nodeCount: number;
   edgeCount: number;
   fileCount: number;

@@ -2,6 +2,10 @@ import { SemanticIndexStore, SemanticDocument, SemanticSearchResult } from "./Se
 import { GraphDatabase } from "../database/GraphDatabase";
 import { HNSW_COMPACTION_DOC_THRESHOLD, HNSW_COMPACTION_STALENESS_RATIO } from "../../config/constants";
 
+// NOTE: v1.1 deferred — SemanticIndexWorker currently runs on the extension host
+// thread rather than a true worker_threads.Worker. The message-passing interface
+// is designed to migrate seamlessly to a Worker once thread isolation is required.
+
 export interface WorkerMessage {
   type: "index-documents" | "search" | "remove-documents" | "compact" | "dispose";
   payload?: unknown;

@@ -36,6 +36,7 @@ describe("GraphTraversal", () => {
       ],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: []
     });
 

@@ -56,12 +56,19 @@ export class RelevanceWalker {
         const weight = edge.weight ?? 1.0;
         const sourceScore = frontier.get(edge.sourceId) ?? scores.get(edge.sourceId) ?? 0;
         const targetScore = frontier.get(edge.targetId) ?? scores.get(edge.targetId) ?? 0;
-        const incomingScore = direction !== "outgoing" ? sourceScore * weight : 0;
-        const outgoingScore = direction !== "incoming" ? targetScore * weight : 0;
-        const score = Math.max(incomingScore, outgoingScore);
 
-        if (score > 0) {
-          const neighborId = direction === "incoming" ? edge.sourceId : edge.targetId;
+        // Compute scores for both directions based on the walk direction.
+        const pairs: Array<{ neighborId: string; score: number }> = [];
+        // Outgoing: walk from source to target, carrying sourceScore.
+        if (direction !== "incoming" && sourceScore > 0) {
+          pairs.push({ neighborId: edge.targetId, score: sourceScore * weight });
+        }
+        // Incoming: walk from target to source, carrying targetScore.
+        if (direction !== "outgoing" && targetScore > 0) {
+          pairs.push({ neighborId: edge.sourceId, score: targetScore * weight });
+        }
+
+        for (const { neighborId, score } of pairs) {
           const current = scores.get(neighborId) ?? 0;
           const updated = Math.max(current, score);
           scores.set(neighborId, updated);

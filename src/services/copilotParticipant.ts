@@ -6,18 +6,19 @@ import { GraphDatabase } from "../graph/database/GraphDatabase";
 import { GraphNode } from "../graph/models/Node";
 import { ContextBuilder } from "../graph/traversal/ContextBuilder";
 import { GraphTraversal, SubGraph } from "../graph/traversal/GraphTraversal";
-import { resolveLanguageModel, formatContextFooter } from "../graph/traversal/languageModelResolver";
+import { resolveLanguageModel as defaultResolveLanguageModel, formatContextFooter } from "../graph/traversal/languageModelResolver";
 import { EmbeddingService } from "./embeddingService";
 
 interface CopilotParticipantOptions {
   extensionUri: vscode.Uri;
-  graphDatabase: GraphDatabase;
-  traversal: GraphTraversal;
-  contextBuilder: ContextBuilder;
-  embeddingService: EmbeddingService;
-  settings: GraphSettings;
+  getGraphDatabase: () => GraphDatabase;
+  getTraversal: () => GraphTraversal;
+  getContextBuilder: () => ContextBuilder;
+  getEmbeddingService: () => EmbeddingService;
+  getSettings: () => GraphSettings;
   outputChannel?: { appendLine(message: string): void };
   onFocusFile?: (filePath: string) => Promise<void> | void;
+  resolveLanguageModel?: (modelFamily: string, token: vscode.CancellationToken) => Promise<vscode.LanguageModelChat | undefined>;
 }
 
 interface ParsedRequest {
@@ -60,25 +61,40 @@ export class CopilotParticipant implements vscode.Disposable {
   public async createContextPayload(
     target?: string | string[],
     direction: "both" | "incoming" | "outgoing" = "both",
-    depth = this.options.settings.hopDepth,
+    depth = this.options.getSettings().hopDepth,
     semanticQuery?: string
   ): Promise<string> {
+    const result = await this.createContextResult(target, direction, depth, semanticQuery);
+    return result.payload;
+  }
+
+  private async createContextResult(
+    target?: string | string[],
+    direction: "both" | "incoming" | "outgoing" = "both",
+    depth = this.options.getSettings().hopDepth,
+    semanticQuery?: string
+  ): Promise<{ payload: string; tokenEstimate: number; includedNodeIds: string[]; droppedNodeIds: string[] }> {
     const nodes = this.resolveTargetNodes(target);
     if (nodes.length === 0) {
-      return "No active file available for graph context.";
+      return { payload: "No active file available for graph context.", tokenEstimate: 0, includedNodeIds: [], droppedNodeIds: [] };
     }
 
     const subGraph = this.mergeSubGraphs(nodes, depth, direction);
     const semanticMatches = semanticQuery
-      ? await this.options.embeddingService.search(semanticQuery, this.options.settings.semanticResultCount)
+      ? await this.options.getEmbeddingService().search(semanticQuery, this.options.getSettings().semanticResultCount)
       : [];
 
     const queryOrigin = nodes.map((node) => node.relativePath).join(", ");
-    const context = await this.options.contextBuilder.build(queryOrigin, subGraph, semanticMatches, {
+    const context = await this.options.getContextBuilder().build(queryOrigin, subGraph, semanticMatches, {
       depth,
       direction: direction === "both" ? "bidirectional" : direction
     });
-    return context.payload;
+    return {
+      payload: context.payload,
+      tokenEstimate: context.tokenEstimate,
+      includedNodeIds: context.includedNodeIds,
+      droppedNodeIds: context.droppedNodeIds
+    };
   }
 
   private async handleRequest(
@@ -89,13 +105,46 @@ export class CopilotParticipant implements vscode.Disposable {
   ): Promise<void> {
     void _context;
 
+    const typedStream = stream as {
+      markdown?: (value: string) => void;
+      write?: (value: string) => void;
+      progress?: (value: string) => void;
+    };
+
+    // Pre-flight checks
+    if (!vscode.workspace.isTrusted) {
+      this.writeMarkdown(typedStream, "This workspace is not trusted. Code-Ingest requires a trusted workspace to access graph features.");
+      return;
+    }
+
+    const db = this.options.getGraphDatabase();
+    const indexState = db.getIndexState();
+    if (!indexState || indexState.nodeCount === 0) {
+      this.writeMarkdown(typedStream, "The graph is not initialized yet. Run **Code-Ingest: Initialize Codebase** from the command palette to build the graph.");
+      return;
+    }
+
     const parsed = this.parseRequest(request);
-    const typedStream = stream as { markdown?: (value: string) => void; write?: (value: string) => void };
+    const typedRequest = request as { model?: { family?: string } };
+    const modelFamily = typedRequest.model?.family ?? "gpt-4";
+
+    typedStream.progress?.("Resolving language model...");
+    const resolveLm = this.options.resolveLanguageModel ?? defaultResolveLanguageModel;
+    const model = await resolveLm(modelFamily, token);
+    if (!model) {
+      this.writeMarkdown(typedStream, `Unable to resolve a Copilot chat model for family "${modelFamily}". Please check your Copilot subscription and VS Code version.`);
+      return;
+    }
+
+    if (token.isCancellationRequested) {
+      this.writeMarkdown(typedStream, "Retrieval cancelled.");
+      return;
+    }
 
     if (parsed.command === "export") {
-      const payload = await this.createContextPayload(parsed.argument, "both", this.options.settings.hopDepth, parsed.remainingText);
-      this.writeMarkdown(typedStream, payload);
-      this.writeFooter(typedStream, parsed, payload);
+      const contextResult = await this.createContextResult(parsed.argument, "both", this.options.getSettings().hopDepth, parsed.remainingText);
+      this.writeMarkdown(typedStream, contextResult.payload);
+      this.writeFooter(typedStream, parsed, contextResult.payload, contextResult.tokenEstimate);
       return;
     }
 
@@ -110,7 +159,8 @@ export class CopilotParticipant implements vscode.Disposable {
     }
 
     if (parsed.command === "search") {
-      const matches = await this.options.embeddingService.search(parsed.argument ?? parsed.remainingText ?? "", this.options.settings.semanticResultCount);
+      typedStream.progress?.("Searching semantic index...");
+      const matches = await this.options.getEmbeddingService().search(parsed.argument ?? parsed.remainingText ?? "", this.options.getSettings().semanticResultCount);
       if (matches.length === 0) {
         this.writeMarkdown(typedStream, "No semantic matches found.");
       } else {
@@ -119,25 +169,24 @@ export class CopilotParticipant implements vscode.Disposable {
       return;
     }
 
-    const payload = await this.createContextPayload(
+    typedStream.progress?.("Ranking graph neighborhood...");
+    const contextResult = await this.createContextResult(
       parsed.argument,
       parsed.command === "impact" ? "incoming" : "both",
-      parsed.command === "depth" && parsed.argument ? Number(parsed.argument) : this.options.settings.hopDepth,
+      parsed.command === "depth" && parsed.argument ? Number(parsed.argument) : this.options.getSettings().hopDepth,
       parsed.remainingText
     );
 
-    // For context/impact/explain/depth/audit, resolve model and stream response.
-    const model = await resolveLanguageModel("gpt-4", token);
-    if (!model || token.isCancellationRequested) {
-      // Fallback: return payload directly when language model is unavailable.
-      this.writeMarkdown(typedStream, payload);
-      this.writeFooter(typedStream, parsed, payload);
+    if (token.isCancellationRequested) {
+      this.writeMarkdown(typedStream, "Retrieval cancelled.");
       return;
     }
 
+    typedStream.progress?.("Compressing context...");
+
     try {
       const response = await model.sendRequest(
-        [vscode.LanguageModelChatMessage.User(payload)],
+        [vscode.LanguageModelChatMessage.User(contextResult.payload)],
         {},
         token
       );
@@ -150,24 +199,25 @@ export class CopilotParticipant implements vscode.Disposable {
       }
     } catch (error) {
       this.options.outputChannel?.appendLine(`[copilot] sendRequest failed: ${(error as Error).message}`);
-      this.writeMarkdown(typedStream, payload);
+      this.writeMarkdown(typedStream, contextResult.payload);
     }
 
-    this.writeFooter(typedStream, parsed, payload);
+    this.writeFooter(typedStream, parsed, contextResult.payload, contextResult.tokenEstimate);
   }
 
   private writeFooter(
     stream: { markdown?: (value: string) => void; write?: (value: string) => void },
     parsed: ParsedRequest,
-    payload: string
+    payload: string,
+    promptTokens = 0
   ): void {
     const files = this.extractFilesFromPayload(payload);
     const footer = formatContextFooter({
       files,
       nodeCount: files.length,
-      depth: parsed.command === "depth" && parsed.argument ? Number(parsed.argument) : this.options.settings.hopDepth,
+      depth: parsed.command === "depth" && parsed.argument ? Number(parsed.argument) : this.options.getSettings().hopDepth,
       semanticMatches: Boolean(parsed.remainingText),
-      promptTokens: 0,
+      promptTokens,
       piiPolicy: "strict"
     });
     this.writeMarkdown(stream, footer);
@@ -247,13 +297,39 @@ export class CopilotParticipant implements vscode.Disposable {
   }
 
   private resolveNodeForFile(filePath: string): GraphNode | undefined {
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    // Try to find which workspace root this file path belongs to.
+    let workspaceRoot = "";
+    const folders = vscode.workspace.workspaceFolders;
+    if (folders && folders.length > 0) {
+      if (folders.length === 1) {
+        workspaceRoot = folders[0].uri.fsPath;
+      } else if (path.isAbsolute(filePath)) {
+        // Find the matching root by checking which folder contains this path.
+        const resolved = folders.find((folder) => {
+          const relative = path.relative(folder.uri.fsPath, filePath);
+          return !relative.startsWith("..") && !path.isAbsolute(relative);
+        });
+        workspaceRoot = resolved?.uri.fsPath ?? folders[0].uri.fsPath;
+      } else {
+        // Relative path: use the active editor's root or first root.
+        const activeEditor = vscode.window.activeTextEditor;
+        if (activeEditor) {
+          const matched = folders.find((folder) => {
+            const rel = path.relative(folder.uri.fsPath, activeEditor.document.uri.fsPath);
+            return !rel.startsWith("..") && !path.isAbsolute(rel);
+          });
+          workspaceRoot = matched?.uri.fsPath ?? folders[0].uri.fsPath;
+        } else {
+          workspaceRoot = folders[0].uri.fsPath;
+        }
+      }
+    }
     if (!workspaceRoot) {
       return undefined;
     }
     const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(workspaceRoot, filePath);
     const relativePath = path.relative(workspaceRoot, absolutePath).replace(/\\/gu, "/");
-    return this.options.graphDatabase.getNodeByRelativePath(relativePath);
+    return this.options.getGraphDatabase().getNodeByRelativePath(relativePath);
   }
 
   private mergeSubGraphs(
@@ -268,7 +344,7 @@ export class CopilotParticipant implements vscode.Disposable {
 
     for (const node of nodes) {
       if (node === undefined) continue;
-      const subGraph = this.options.traversal.bfs(node.id, depth, direction);
+      const subGraph = this.options.getTraversal().bfs(node.id, depth, direction);
       for (const entry of subGraph.nodes) {
         mergedNodes.set(entry.id, entry);
       }

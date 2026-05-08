@@ -102,6 +102,11 @@
     },
     "commands": [
       {
+        "command": "codeIngest.initializeCodebase",
+        "title": "Code-Ingest: Initialize Codebase",
+        "category": "Code-Ingest"
+      },
+      {
         "command": "codeIngest.rebuildGraph",
         "title": "Code-Ingest: Rebuild Graph",
         "category": "Code-Ingest"
@@ -142,6 +147,21 @@
         "category": "Code-Ingest"
       },
       {
+        "command": "codeIngest.exportRaw",
+        "title": "Code-Ingest: Export Raw Digest",
+        "category": "Code-Ingest"
+      },
+      {
+        "command": "codeIngest.exportClean",
+        "title": "Code-Ingest: Export Clean Context",
+        "category": "Code-Ingest"
+      },
+      {
+        "command": "codeIngest.exportGraph",
+        "title": "Code-Ingest: Export Graph Context",
+        "category": "Code-Ingest"
+      },
+      {
         "command": "codeIngest.clearDatabase",
         "title": "Code-Ingest: Clear Graph Database",
         "category": "Code-Ingest"
@@ -150,6 +170,16 @@
         "command": "codeIngest.showGraphStats",
         "title": "Code-Ingest: Show Graph Statistics",
         "category": "Code-Ingest"
+      },
+      {
+        "command": "codeIngest.synthesizeKnowledge",
+        "title": "Code-Ingest: Synthesize Knowledge",
+        "category": "Code-Ingest"
+      },
+      {
+        "command": "codeIngest.exportDiagnostics",
+        "title": "Code-Ingest: Export Diagnostics Bundle",
+        "category": "Code-Ingest"
       }
     ],
     "menus": {
@@ -157,12 +187,12 @@
         {
           "command": "codeIngest.focusCurrentFile",
           "group": "code-ingest@1",
-          "when": "editorIsOpen"
+          "when": "editorIsOpen && isWorkspaceTrusted"
         },
         {
           "command": "codeIngest.sendToChat",
           "group": "code-ingest@2",
-          "when": "editorIsOpen"
+          "when": "editorIsOpen && isWorkspaceTrusted"
         }
       ]
     },
@@ -280,6 +310,102 @@
           "type": "boolean",
           "default": true,
           "description": "Refocus the graph when the active editor changes."
+        },
+        "codeIngest.allowRawExport": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow raw export mode (internal backup only)."
+        },
+        "codeIngest.pii.mode": {
+          "type": "string",
+          "default": "mask",
+          "enum": ["strict", "mask", "allow"],
+          "description": "PII handling mode for storage and export."
+        },
+        "codeIngest.pii.strictForExport": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enforce strict PII policy for all exports."
+        },
+        "codeIngest.embedding.maxRetries": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Maximum retry attempts for embedding computation."
+        },
+        "codeIngest.embedding.cooldownMs": {
+          "type": "number",
+          "default": 300000,
+          "minimum": 0,
+          "description": "Cooldown duration in milliseconds after repeated embedding failures."
+        },
+        "codeIngest.knowledge.mode": {
+          "type": "string",
+          "default": "jit",
+          "enum": ["jit"],
+          "description": "Knowledge synthesis mode (jit only in v1)."
+        },
+        "codeIngest.knowledge.cooldownMs": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 0,
+          "description": "Cooldown between knowledge synthesis requests."
+        },
+        "codeIngest.knowledge.softPrefetchMode": {
+          "type": "string",
+          "default": "active-file",
+          "enum": ["off", "active-file", "active-module"],
+          "description": "Scope for soft prefetch of knowledge during idle windows."
+        },
+        "codeIngest.knowledge.maxConcurrentSyntheses": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 10,
+          "description": "Maximum concurrent knowledge synthesis operations per root."
+        },
+        "codeIngest.knowledge.modelChoice": {
+          "type": "string",
+          "default": "auto",
+          "description": "Language model choice for knowledge synthesis."
+        },
+        "codeIngest.copilot.reserveTokensPercent": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Percentage of token budget reserved for model output."
+        },
+        "codeIngest.copilot.reserveTokensMin": {
+          "type": "number",
+          "default": 1024,
+          "minimum": 0,
+          "description": "Minimum token reserve regardless of percentage."
+        },
+        "codeIngest.indexing.pauseDuringGitOperations": {
+          "type": "boolean",
+          "default": true,
+          "description": "Pause file watchers during detected git operations."
+        },
+        "codeIngest.graph.initialBatchNodes": {
+          "type": "number",
+          "default": 250,
+          "minimum": 50,
+          "maximum": 1000,
+          "description": "Initial node batch size for graph view load."
+        },
+        "codeIngest.graph.transportChunkSizeKB": {
+          "type": "number",
+          "default": 256,
+          "minimum": 64,
+          "maximum": 1024,
+          "description": "Chunk size in KB for binary graph payload transport."
+        },
+        "codeIngest.graph.enableSemanticZoom": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable semantic zoom / level-of-detail in the graph view."
         }
       }
     }
@@ -302,16 +428,16 @@
   "dependencies": {
     "@vscode/prompt-tsx": "^0.4.0-alpha.8",
     "@vscode/tree-sitter-wasm": "^0.3.1",
-    "better-sqlite3": "^12.9.0",
     "hnswlib-wasm": "^0.8.2",
     "ignore": "^7.0.5",
     "minimatch": "^9.0.4",
-    "sqlite-vec": "^0.1.9",
     "wa-sqlite": "^1.0.0",
     "web-tree-sitter": "^0.26.8"
   },
   "devDependencies": {
     "@babel/core": "^7.28.4",
+    "better-sqlite3": "^12.9.0",
+    "sqlite-vec": "^0.1.9",
     "@babel/preset-env": "^7.28.3",
     "@types/jest": "^29.5.14",
     "@types/jsdom": "^21.1.7",

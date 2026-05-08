@@ -7,8 +7,8 @@ import { GraphTraversal } from "../graph/traversal/GraphTraversal";
 
 interface GraphViewPanelOptions {
   extensionUri: vscode.Uri;
-  graphDatabase: GraphDatabase;
-  traversal: GraphTraversal;
+  getGraphDatabase: () => GraphDatabase;
+  getTraversal: () => GraphTraversal;
   getSettings: () => GraphSettings;
   outputChannel?: { appendLine(message: string): void };
   onSendToChat?: (filePath?: string | string[]) => Promise<void> | void;
@@ -22,6 +22,9 @@ export class GraphViewPanel implements vscode.Disposable {
   private showFullGraph = false;
 
   constructor(private readonly options: GraphViewPanelOptions) {}
+
+  private get graphDatabase(): GraphDatabase { return this.options.getGraphDatabase(); }
+  private get traversal(): GraphTraversal { return this.options.getTraversal(); }
 
   public dispose(): void {
     this.panel?.dispose();
@@ -105,17 +108,21 @@ export class GraphViewPanel implements vscode.Disposable {
     const settings = this.options.getSettings();
     const nodeMode = this.currentNodeMode ?? settings.defaultNodeMode;
     const layout = this.currentLayout ?? settings.layout;
-    const allSnapshot = this.options.graphDatabase.getGraphSnapshot(nodeMode);
-    let snapshot = this.showFullGraph ? allSnapshot : this.options.graphDatabase.getGraphSnapshot(nodeMode, settings.maxNodes);
+    const allSnapshot = this.graphDatabase.getGraphSnapshot(nodeMode);
+    let snapshot = this.showFullGraph ? allSnapshot : this.graphDatabase.getGraphSnapshot(nodeMode, settings.maxNodes);
     let truncated = !this.showFullGraph && allSnapshot.nodes.length > settings.maxNodes;
 
     if (truncated) {
-      const focusRelativePath = this.currentFocusFile
-        ? path.relative(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "", this.currentFocusFile).replace(/\\/gu, "/")
-        : undefined;
-      const focusNode = focusRelativePath ? this.options.graphDatabase.getNodeByRelativePath(focusRelativePath) : undefined;
+      let focusRelativePath: string | undefined;
+      if (this.currentFocusFile) {
+        const matchedFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(this.currentFocusFile));
+        focusRelativePath = matchedFolder
+          ? path.relative(matchedFolder.uri.fsPath, this.currentFocusFile).replace(/\\/gu, "/")
+          : undefined;
+      }
+      const focusNode = focusRelativePath ? this.graphDatabase.getNodeByRelativePath(focusRelativePath) : undefined;
       if (focusNode) {
-        const ego = this.options.traversal.bfs(focusNode.id, 2, "both");
+        const ego = this.traversal.bfs(focusNode.id, 2, "both");
         snapshot = {
           nodes: ego.nodes,
           edges: ego.edges
@@ -123,7 +130,7 @@ export class GraphViewPanel implements vscode.Disposable {
       }
     }
 
-    const stats = this.options.graphDatabase.getStats();
+    const stats = this.graphDatabase.getStats();
     const ramEstimateMb = this.estimateGraphMemoryMb(allSnapshot.nodes.length, allSnapshot.edges.length);
     await this.panel.webview.postMessage({
       type: "load-graph",
@@ -149,22 +156,53 @@ export class GraphViewPanel implements vscode.Disposable {
       return;
     }
 
+    if (!vscode.workspace.isTrusted) {
+      return;
+    }
+
     const candidate = message as { type?: string; payload?: Record<string, unknown> };
     const payload = candidate.payload ?? {};
+
+    // Helper to validate file paths are inside the workspace.
+    const isValidFilePath = (filePath: string): boolean => {
+      if (!filePath || typeof filePath !== "string") {
+        return false;
+      }
+      const folders = vscode.workspace.workspaceFolders;
+      if (!folders) {
+        return false;
+      }
+      return folders.some((folder) => {
+        const rel = path.relative(folder.uri.fsPath, filePath);
+        return !rel.startsWith("..") && !path.isAbsolute(rel);
+      });
+    };
 
     switch (candidate.type) {
       case "ready":
         await this.loadGraph();
         break;
-      case "open-file":
-        await this.openFile(String(payload.filePath ?? ""), typeof payload.line === "number" ? payload.line : undefined);
+      case "open-file": {
+        const openFp = String(payload.filePath ?? "");
+        if (isValidFilePath(openFp)) {
+          await this.openFile(openFp, typeof payload.line === "number" ? payload.line : undefined);
+        }
         break;
-      case "focus-file":
-        await this.focusFile(String(payload.filePath ?? ""));
+      }
+      case "focus-file": {
+        const focusFp = String(payload.filePath ?? "");
+        if (isValidFilePath(focusFp)) {
+          await this.focusFile(focusFp);
+        }
         break;
-      case "expand-node":
-        await this.focusFile(String(payload.filePath ?? ""));
+      }
+      case "expand-node": {
+        const expandFp = String(payload.filePath ?? "");
+        if (isValidFilePath(expandFp)) {
+          await this.focusFile(expandFp);
+        }
         break;
+      }
       case "send-to-chat":
         await this.options.onSendToChat?.(
           Array.isArray(payload.filePaths)

@@ -1,4 +1,5 @@
 import { GraphDatabase } from "../database/GraphDatabase";
+import { SingleWriterQueue } from "../database/SingleWriterQueue";
 import { GraphNode } from "../models/Node";
 
 const KNOWLEDGE_MAX_CONCURRENT_SYNTHESIZES = 2;
@@ -17,12 +18,16 @@ export class KnowledgeService {
 
   constructor(
     private readonly graphDatabase: GraphDatabase,
+    private readonly writerQueue: SingleWriterQueue,
     private readonly outputChannel?: { appendLine(message: string): void }
   ) {}
 
   public async synthesizeForNode(node: GraphNode): Promise<KnowledgeEntry | undefined> {
     await this.acquireSlot();
     try {
+      // Wait for write quiescence before reading graph state for staleness checks.
+      await this.writerQueue.waitForQuiescent();
+
       const chunks = await this.graphDatabase.getCodeChunksForFile(node.id);
       if (chunks.length === 0) {
         return undefined;
@@ -40,7 +45,28 @@ export class KnowledgeService {
         stale: false
       };
 
-      this.outputChannel?.appendLine(`[knowledge] Synthesized knowledge for ${node.relativePath}.`);
+      // Persist to database via the single-writer queue.
+      await this.writerQueue.enqueue({
+        reason: "knowledge-synthesis",
+        priority: "LOW",
+        filePaths: [node.relativePath],
+        nodeUpserts: [],
+        edgeUpserts: [],
+        codeChunkUpserts: [],
+        commentChunkUpserts: [],
+        knowledgeChunkUpserts: [{
+          id: node.id,
+          nodeId: node.id,
+          summary: entry.summary,
+          invariants: JSON.stringify(entry.invariants),
+          piiDetected: false,
+          createdAt: entry.createdAt,
+          stale: false
+        }],
+        deletes: []
+      });
+
+      this.outputChannel?.appendLine(`[knowledge] Synthesized and persisted knowledge for ${node.relativePath}.`);
       return entry;
     } finally {
       this.releaseSlot();

@@ -41,8 +41,28 @@ export function validateWorkspacePath(
   try {
     resolvedCandidate = fs.realpathSync(path.resolve(workspaceRoot, candidatePath));
     resolvedWorkspace = fs.realpathSync(workspaceRoot);
-  } catch {
-    return { valid: false, reason: "Path resolution failed" };
+  } catch (error) {
+    const errno = (error as NodeJS.ErrnoException).code;
+    if (errno === "ENOENT") {
+      // Path doesn't exist on disk. Fall back to path.resolve + path.relative
+      // for containment validation. This handles new file creation events
+      // and test environments where mock paths don't correspond to real files.
+      resolvedCandidate = path.resolve(workspaceRoot, candidatePath);
+      try {
+        resolvedWorkspace = fs.realpathSync(workspaceRoot);
+      } catch (workspaceError) {
+        if ((workspaceError as NodeJS.ErrnoException).code === "ENOENT") {
+          // Workspace root also doesn't exist (common in test mocks).
+          // Use the resolved workspace root as-is and validate containment
+          // via path.relative only.
+          resolvedWorkspace = path.resolve(workspaceRoot);
+        } else {
+          return { valid: false, reason: "Workspace root resolution failed" };
+        }
+      }
+    } else {
+      return { valid: false, reason: "Path resolution failed" };
+    }
   }
 
   // Check containment.
@@ -57,8 +77,11 @@ export function validateWorkspacePath(
     if (lstat.isSymbolicLink()) {
       return { valid: false, reason: "Symlinks not allowed" };
     }
-  } catch {
-    // File may not exist; that's okay for validation.
+  } catch (error) {
+    // ENOENT is expected for files that don't exist yet (new file creation events).
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      return { valid: false, reason: "Path stat failed" };
+    }
   }
 
   return { valid: true };

@@ -92,6 +92,7 @@ describe("Integration: Trust Gate Bootstrap", () => {
       edgeUpserts: [],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: []
     });
 
@@ -125,6 +126,7 @@ describe("Integration: Trust Gate Bootstrap", () => {
       edgeUpserts: [],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: []
     });
 
@@ -183,6 +185,7 @@ describe("Integration: Multi-Root Lifecycle", () => {
       edgeUpserts: [],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: []
     });
     await dbB.writerQueue.enqueue({
@@ -193,6 +196,7 @@ describe("Integration: Multi-Root Lifecycle", () => {
       edgeUpserts: [],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: []
     });
 
@@ -232,7 +236,7 @@ describe("Integration: Multi-Root Lifecycle", () => {
     expect(registry.getAllRuntimes()).toHaveLength(2);
 
     // Remove root B.
-    registry.unregister(folderB.uri);
+    await registry.unregister(folderB.uri);
 
     expect(registry.getAllRuntimes()).toHaveLength(1);
     expect(registry.getRuntime(folderA.uri)).toBeDefined();
@@ -311,6 +315,7 @@ describe("Integration: Dirty Buffer Handling", () => {
       edgeUpserts: [],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: [],
       dirtyBufferSnapshots: [{ relativePath, diskMtimeMsAtResolve: diskMtimeBefore }]
     });
@@ -350,6 +355,7 @@ describe("Integration: Dirty Buffer Handling", () => {
       edgeUpserts: [],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: [],
       dirtyBufferSnapshots: [{ relativePath, diskMtimeMsAtResolve: diskMtimeBefore }]
     });
@@ -385,6 +391,7 @@ describe("Integration: Dirty Buffer Handling", () => {
       edgeUpserts: [],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: [],
       dirtyBufferSnapshots: [{ relativePath, diskMtimeMsAtResolve: diskMtimeMs }]
     });
@@ -663,6 +670,7 @@ describe("Integration: Copilot Participant", () => {
       edgeUpserts: [],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: []
     });
   });
@@ -690,11 +698,11 @@ describe("Integration: Copilot Participant", () => {
 
     const participant = new CopilotParticipant({
       extensionUri: vscode.Uri.file(workspaceRoot),
-      graphDatabase: database,
-      traversal,
-      contextBuilder,
-      embeddingService,
-      settings: {
+      getGraphDatabase: () => database,
+      getTraversal: () => traversal,
+      getContextBuilder: () => contextBuilder,
+      getEmbeddingService: () => embeddingService,
+      getSettings: () => ({
         hopDepth: 3,
         defaultNodeMode: "file",
         maxNodes: 500,
@@ -712,7 +720,7 @@ describe("Integration: Copilot Participant", () => {
         showCircularDepsWarning: true,
         focusModeOpacity: 0.15,
         autoFocusOnEditorChange: true
-      }
+      })
     });
 
     // Create context payload should succeed even without a language model.
@@ -738,11 +746,11 @@ describe("Integration: Copilot Participant", () => {
 
     const participant = new CopilotParticipant({
       extensionUri: vscode.Uri.file(workspaceRoot),
-      graphDatabase: database,
-      traversal,
-      contextBuilder,
-      embeddingService,
-      settings: {
+      getGraphDatabase: () => database,
+      getTraversal: () => traversal,
+      getContextBuilder: () => contextBuilder,
+      getEmbeddingService: () => embeddingService,
+      getSettings: () => ({
         hopDepth: 3,
         defaultNodeMode: "file",
         maxNodes: 500,
@@ -760,7 +768,7 @@ describe("Integration: Copilot Participant", () => {
         showCircularDepsWarning: true,
         focusModeOpacity: 0.15,
         autoFocusOnEditorChange: true
-      },
+      }),
       onFocusFile: async () => {}
     });
 
@@ -806,11 +814,11 @@ describe("Integration: Copilot Participant", () => {
 
     const participant = new CopilotParticipant({
       extensionUri: vscode.Uri.file(workspaceRoot),
-      graphDatabase: database,
-      traversal,
-      contextBuilder,
-      embeddingService,
-      settings: {
+      getGraphDatabase: () => database,
+      getTraversal: () => traversal,
+      getContextBuilder: () => contextBuilder,
+      getEmbeddingService: () => embeddingService,
+      getSettings: () => ({
         hopDepth: 3,
         defaultNodeMode: "file",
         maxNodes: 500,
@@ -828,7 +836,7 @@ describe("Integration: Copilot Participant", () => {
         showCircularDepsWarning: true,
         focusModeOpacity: 0.15,
         autoFocusOnEditorChange: true
-      }
+      })
     });
 
     // Create context payload for source content inclusion.
@@ -889,6 +897,7 @@ describe("Integration: Cross-Root State", () => {
       edgeUpserts: [],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: []
     });
 
@@ -900,6 +909,7 @@ describe("Integration: Cross-Root State", () => {
       edgeUpserts: [],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: []
     });
 
@@ -931,6 +941,7 @@ describe("Integration: Cross-Root State", () => {
       edgeUpserts: [],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: []
     });
 
@@ -1103,6 +1114,7 @@ describe("Integration: Relevance Walker", () => {
       ],
       codeChunkUpserts: [],
       commentChunkUpserts: [],
+      knowledgeChunkUpserts: [],
       deletes: []
     });
 

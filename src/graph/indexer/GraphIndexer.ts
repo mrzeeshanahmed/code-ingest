@@ -135,6 +135,7 @@ export class GraphIndexer {
       edgeUpserts: edges,
       codeChunkUpserts: allCodeChunks,
       commentChunkUpserts: allCommentChunks,
+      knowledgeChunkUpserts: [],
       deletes
     };
     if (dirtyBufferSnapshots.length > 0) {

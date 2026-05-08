@@ -1285,6 +1285,7 @@ Verify:
 
 - build succeeds
 - tests pass
+- lint passes (using ESLint 9+ Flat Config `eslint.config.mjs`)
 - VSIX size stays within budget
 - minimum VS Code version activates cleanly
 - semantic sidecars rebuild cleanly after checksum/version failure
@@ -1292,6 +1293,7 @@ Verify:
 ### ✅ Checkpoint 12
 
 - [ ] Unit, integration, and webview tests all pass
+- [ ] Codebase linting passes with ESLint 9+ Flat Config
 - [ ] No native binaries are bundled
 - [ ] VSIX size is within budget
 - [ ] The release matches the PRD definition of done

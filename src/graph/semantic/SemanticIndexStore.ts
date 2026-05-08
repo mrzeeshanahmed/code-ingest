@@ -15,12 +15,23 @@ export interface SemanticSearchResult {
 
 const HNSW_COMPACTION_DOC_THRESHOLD = 5000;
 const HNSW_COMPACTION_STALENESS_RATIO = 0.3;
+const VECTORS_FILENAME = "vectors.json";
+
+// NOTE: v1.1 deferred — SemanticIndexStore currently uses JSON file persistence
+// and brute-force O(n) cosine search. Migration to hnswlib-wasm HNSW sidecars
+// with versioned checksum manifests is planned for v1.1.
+
+interface PersistedVectorEntry {
+  id: string;
+  vector: number[];
+}
 
 export class SemanticIndexStore {
   private vectors = new Map<string, number[]>();
   private docCount = 0;
   private staleCount = 0;
   private readonly indexPath: string;
+  private readonly vectorsPath: string;
 
   constructor(
     private readonly workspaceRoot: string,
@@ -28,21 +39,26 @@ export class SemanticIndexStore {
     private readonly outputChannel?: { appendLine(message: string): void }
   ) {
     this.indexPath = path.join(workspaceRoot, ".vscode", "code-ingest", "semantic-index");
+    this.vectorsPath = path.join(this.indexPath, VECTORS_FILENAME);
   }
 
   public async initialize(): Promise<void> {
     if (!fs.existsSync(this.indexPath)) {
       fs.mkdirSync(this.indexPath, { recursive: true });
     }
-    this.outputChannel?.appendLine(`[semantic-index] Initialized at ${this.indexPath}`);
+    await this.loadFromDisk();
+    this.outputChannel?.appendLine(`[semantic-index] Initialized at ${this.indexPath} with ${this.docCount} document(s).`);
   }
 
   public async addDocuments(docs: SemanticDocument[]): Promise<void> {
     for (const doc of docs) {
+      if (!this.vectors.has(doc.id)) {
+        this.docCount += 1;
+      }
       this.vectors.set(doc.id, doc.vector);
-      this.docCount += 1;
     }
     this.outputChannel?.appendLine(`[semantic-index] Added ${docs.length} document(s). Total: ${this.docCount}`);
+    await this.persistToDisk();
     await this.checkCompaction();
   }
 
@@ -53,6 +69,7 @@ export class SemanticIndexStore {
         this.staleCount += 1;
       }
     }
+    await this.persistToDisk();
   }
 
   public search(queryVector: number[], limit: number): SemanticSearchResult[] {
@@ -65,6 +82,23 @@ export class SemanticIndexStore {
     return results.slice(0, limit);
   }
 
+  public async compact(): Promise<void> {
+    // Rebuild the index by re-persisting all non-stale vectors.
+    this.staleCount = 0;
+    await this.persistToDisk();
+    this.outputChannel?.appendLine("[semantic-index] Compaction complete.");
+  }
+
+  public dispose(): void {
+    // Save before clearing.
+    try {
+      this.persistToDiskSync();
+    } catch {
+      // Best-effort: if we can't persist, at least clear memory.
+    }
+    this.vectors.clear();
+  }
+
   private cosineDistance(a: number[], b: number[]): number {
     let dot = 0;
     let normA = 0;
@@ -74,7 +108,11 @@ export class SemanticIndexStore {
       normA += a[i] * a[i];
       normB += b[i] * b[i];
     }
-    const similarity = dot / (Math.sqrt(normA) * Math.sqrt(normB));
+    const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+    if (denominator === 0) {
+      return 1; // maximum distance for zero-magnitude vectors
+    }
+    const similarity = dot / denominator;
     return 1 - similarity;
   }
 
@@ -86,13 +124,40 @@ export class SemanticIndexStore {
     }
   }
 
-  public async compact(): Promise<void> {
-    // Placeholder: rebuild index, persist to disk.
-    this.staleCount = 0;
-    this.outputChannel?.appendLine("[semantic-index] Compaction complete.");
+  private async persistToDisk(): Promise<void> {
+    const entries: PersistedVectorEntry[] = [];
+    for (const [id, vector] of this.vectors.entries()) {
+      entries.push({ id, vector });
+    }
+    const json = JSON.stringify({ version: 1, docCount: this.docCount, entries });
+    await fs.promises.writeFile(this.vectorsPath, json, "utf8");
   }
 
-  public dispose(): void {
-    this.vectors.clear();
+  private persistToDiskSync(): void {
+    const entries: PersistedVectorEntry[] = [];
+    for (const [id, vector] of this.vectors.entries()) {
+      entries.push({ id, vector });
+    }
+    const json = JSON.stringify({ version: 1, docCount: this.docCount, entries });
+    fs.writeFileSync(this.vectorsPath, json, "utf8");
+  }
+
+  private async loadFromDisk(): Promise<void> {
+    try {
+      const raw = await fs.promises.readFile(this.vectorsPath, "utf8");
+      const parsed = JSON.parse(raw) as { version: number; docCount: number; entries: PersistedVectorEntry[] };
+      if (parsed.version !== 1 || !Array.isArray(parsed.entries)) {
+        this.outputChannel?.appendLine("[semantic-index] Unknown or corrupt vectors file; starting fresh.");
+        return;
+      }
+      for (const entry of parsed.entries) {
+        this.vectors.set(entry.id, entry.vector);
+      }
+      this.docCount = parsed.docCount ?? this.vectors.size;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        this.outputChannel?.appendLine(`[semantic-index] Failed to load vectors: ${(error as Error).message}`);
+      }
+    }
   }
 }

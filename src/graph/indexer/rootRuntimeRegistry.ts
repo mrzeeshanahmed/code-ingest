@@ -3,6 +3,7 @@ import { GraphDatabase } from "../database/GraphDatabase";
 import { FileWatcher } from "./FileWatcher";
 import { GitActivityMonitor } from "./GitActivityMonitor";
 import { GraphIndexer } from "./GraphIndexer";
+import { KnowledgeService } from "../semantic/KnowledgeService";
 
 export interface RootRuntime {
   workspaceFolder: vscode.WorkspaceFolder;
@@ -10,6 +11,7 @@ export interface RootRuntime {
   fileWatcher: FileWatcher;
   gitActivityMonitor: GitActivityMonitor;
   graphIndexer: GraphIndexer;
+  knowledgeService: KnowledgeService;
   disposables: vscode.Disposable[];
 }
 
@@ -24,19 +26,19 @@ export class RootRuntimeRegistry implements vscode.Disposable {
     return this.runtimes.has(rootUri.toString());
   }
 
-  public register(runtime: RootRuntime): void {
+  public async register(runtime: RootRuntime): Promise<void> {
     const key = runtime.workspaceFolder.uri.toString();
     const existing = this.runtimes.get(key);
     if (existing) {
-      this.disposeRuntime(existing);
+      await this.disposeRuntime(existing);
     }
     this.runtimes.set(key, runtime);
   }
 
-  public unregister(rootUri: vscode.Uri): void {
+  public async unregister(rootUri: vscode.Uri): Promise<void> {
     const runtime = this.runtimes.get(rootUri.toString());
     if (runtime) {
-      this.disposeRuntime(runtime);
+      await this.disposeRuntime(runtime);
       this.runtimes.delete(rootUri.toString());
     }
   }
@@ -46,18 +48,22 @@ export class RootRuntimeRegistry implements vscode.Disposable {
   }
 
   public dispose(): void {
+    // Fire-and-forget: disposal is best-effort. The async disposeRuntime
+    // calls are started but may not complete before process exit.
+    // This is acceptable since the VFS and WASM runtime will clean up
+    // on process termination regardless.
     for (const runtime of this.runtimes.values()) {
       this.disposeRuntime(runtime);
     }
     this.runtimes.clear();
   }
 
-  private disposeRuntime(runtime: RootRuntime): void {
+  private async disposeRuntime(runtime: RootRuntime): Promise<void> {
     runtime.fileWatcher.dispose();
     runtime.gitActivityMonitor.dispose();
     for (const disposable of runtime.disposables) {
       disposable.dispose();
     }
-    runtime.graphDatabase.dispose();
+    await runtime.graphDatabase.dispose();
   }
 }

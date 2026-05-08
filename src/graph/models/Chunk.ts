@@ -22,6 +22,17 @@ export interface GraphCommentChunk {
   piiTags?: string | undefined;
 }
 
+export interface GraphKnowledgeChunk {
+  id: string;
+  nodeId: string;
+  summary: string;
+  invariants: string;
+  piiDetected: boolean;
+  piiRedactedSummary?: string | undefined;
+  createdAt: number;
+  stale: boolean;
+}
+
 export function generateChunkId(fileNodeId: string, startLine: number, endLine: number): string {
   const payload = `${fileNodeId}::${startLine}::${endLine}`;
   return crypto.createHash("sha256").update(payload).digest("hex");

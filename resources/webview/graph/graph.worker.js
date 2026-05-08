@@ -1,10 +1,10 @@
 /**
  * graph.worker.js — Layout and physics worker for Code-Ingest Canvas Graph View
- * 
- * This worker runs layout computations off the main webview thread so
- * large graph rendering stays responsive. It communicates with the main
- * thread via postMessage with structured transfer protocols.
- * 
+ *
+ * NOTE: v1.1 deferred — This worker is implemented and ready for integration,
+ * but graphView.js currently uses Cytoscape's built-in layout engines on the
+ * main thread. Full worker-based layout adoption is planned for v1.1.
+ *
  * Protocol:
  *   Inbound:  { type: "layout", payload: { nodes: [...], edges: [...] }, requestId: string }
  *   Outbound: { type: "layout-result", payload: { positions: {...} }, requestId: string }

@@ -41,37 +41,41 @@ export class PIIService {
     let redactedContent = content;
     const tags: Set<string> = new Set();
 
-    // Scan Emails
-    if (PII_PATTERNS.email.test(redactedContent)) {
+    // Scan Emails — replace directly and detect changes; .test() is avoided because
+    // global regexes advance lastIndex, causing .replace() to skip the first match.
+    const beforeEmail = redactedContent;
+    if (this.mode === PIIPolicyMode.Mask) {
+      redactedContent = redactedContent.replace(PII_PATTERNS.email, "[REDACTED_EMAIL]");
+    } else if (this.mode === PIIPolicyMode.Strict) {
+      redactedContent = redactedContent.replace(PII_PATTERNS.email, "***");
+    }
+    if (redactedContent !== beforeEmail) {
       detected = true;
       tags.add("email");
-      if (this.mode === PIIPolicyMode.Mask) {
-        redactedContent = redactedContent.replace(PII_PATTERNS.email, "[REDACTED_EMAIL]");
-      } else if (this.mode === PIIPolicyMode.Strict) {
-        redactedContent = redactedContent.replace(PII_PATTERNS.email, "***");
-      }
     }
 
     // Scan IPv4
-    if (PII_PATTERNS.ipv4.test(redactedContent)) {
+    const beforeIpv4 = redactedContent;
+    if (this.mode === PIIPolicyMode.Mask) {
+      redactedContent = redactedContent.replace(PII_PATTERNS.ipv4, "[REDACTED_IP]");
+    } else if (this.mode === PIIPolicyMode.Strict) {
+      redactedContent = redactedContent.replace(PII_PATTERNS.ipv4, "***");
+    }
+    if (redactedContent !== beforeIpv4) {
       detected = true;
       tags.add("ipv4");
-      if (this.mode === PIIPolicyMode.Mask) {
-        redactedContent = redactedContent.replace(PII_PATTERNS.ipv4, "[REDACTED_IP]");
-      } else if (this.mode === PIIPolicyMode.Strict) {
-        redactedContent = redactedContent.replace(PII_PATTERNS.ipv4, "***");
-      }
     }
 
     // Scan Generic Secrets
-    if (PII_PATTERNS.genericSecret.test(redactedContent)) {
+    const beforeSecret = redactedContent;
+    if (this.mode === PIIPolicyMode.Mask) {
+      redactedContent = redactedContent.replace(PII_PATTERNS.genericSecret, "$1[REDACTED_SECRET]$3");
+    } else if (this.mode === PIIPolicyMode.Strict) {
+      redactedContent = redactedContent.replace(PII_PATTERNS.genericSecret, "$1***$3");
+    }
+    if (redactedContent !== beforeSecret) {
       detected = true;
       tags.add("secret");
-      if (this.mode === PIIPolicyMode.Mask) {
-        redactedContent = redactedContent.replace(PII_PATTERNS.genericSecret, "$1[REDACTED_SECRET]$3");
-      } else if (this.mode === PIIPolicyMode.Strict) {
-        redactedContent = redactedContent.replace(PII_PATTERNS.genericSecret, "$1***$3");
-      }
     }
 
     if (!detected) {

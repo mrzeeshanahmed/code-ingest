@@ -136,6 +136,5 @@ export function registerDigestCommand(context: vscode.ExtensionContext, deps: Di
     void vscode.window.showInformationMessage("Digest generated successfully.");
   };
 
-  context.subscriptions.push(vscode.commands.registerCommand("code-ingest.generateDigest", handler));
   context.subscriptions.push(vscode.commands.registerCommand("codeIngest.generateDigest", handler));
 }

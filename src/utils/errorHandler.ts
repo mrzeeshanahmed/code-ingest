@@ -1,6 +1,5 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import * as https from "node:https";
 import * as vscode from "vscode";
 
 import type { Logger } from "./gitProcessManager";
@@ -206,86 +205,28 @@ export interface RecoveryStrategy {
   canRecover(error: Error, context: ErrorContext): boolean;
 }
 
+/**
+ * NetworkRecoveryStrategy replaced with local-only logging.
+ * The PRD prohibits outbound HTTP calls. Formerly, this strategy
+ * made live https.request() HEAD calls to external hosts.
+ * Now it simply logs the network error locally and surfaces a
+ * retry suggestion in the Output Channel.
+ */
 class NetworkRecoveryStrategy implements RecoveryStrategy {
   async recover(error: Error, context: ErrorContext): Promise<void> {
     if (context.metadata && typeof context.metadata === "object") {
       (context.metadata as Record<string, unknown>).lastNetworkError = error.message;
     }
-
-    const maxRetries = 3;
-    let attempt = 0;
-
-    const config = vscode.workspace.getConfiguration("codeIngest.network");
-    const hosts = (config.get<string[]>("connectivityHosts") ?? ["api.github.com", "www.google.com"]).filter(Boolean);
-
-    while (attempt < maxRetries) {
-      await this.delay(this.getBackoffDelay(attempt));
-      let lastErr: Error | null = null;
-      for (const host of hosts) {
-        try {
-          await this.testConnectivity(host);
-          return;
-        } catch (connectivityError) {
-          lastErr = connectivityError as Error;
-          // try next host
-        }
-      }
-
-      attempt += 1;
-      if (attempt >= maxRetries) {
-        throw new Error(`Network recovery failed after ${maxRetries} attempts: ${lastErr?.message ?? "unknown"}`);
-      }
-    }
+    // Local-only recovery: log and advise retry.
+    const channel = vscode.window.createOutputChannel("Code Ingest - Network");
+    channel.appendLine(`[network-recovery] Network error: ${error.message}`);
+    channel.appendLine("[network-recovery] Code-Ingest operates entirely offline. Check your VS Code proxy/firewall settings if you need Copilot features.");
+    channel.dispose();
   }
 
   canRecover(error: Error): boolean {
     const msg = error.message.toLowerCase();
     return msg.includes("network") || msg.includes("timeout") || msg.includes("connection");
-  }
-
-  private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  private getBackoffDelay(attempt: number): number {
-    const base = 1000 * 2 ** attempt;
-    const jitter = Math.random() * 300;
-    return Math.min(base + jitter, 30_000);
-  }
-
-  private async testConnectivity(hostname: string): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-      const request = https.request(
-        {
-          method: "HEAD",
-          hostname,
-          path: "/",
-          headers: {
-            "User-Agent": "CodeIngest-ErrorHandler",
-            Accept: "*/*"
-          },
-          timeout: 5000
-        },
-        (response) => {
-          if (response.statusCode && response.statusCode >= 200 && response.statusCode < 500) {
-            resolve();
-          } else {
-            reject(new Error(`Connectivity test to ${hostname} failed with status ${response.statusCode ?? "unknown"}`));
-          }
-          response.resume();
-        }
-      );
-
-      request.on("timeout", () => {
-        request.destroy(new Error("Connectivity test timeout"));
-      });
-
-      request.on("error", (err) => {
-        reject(err);
-      });
-
-      request.end();
-    });
   }
 }
 

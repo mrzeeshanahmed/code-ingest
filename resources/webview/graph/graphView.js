@@ -6,6 +6,53 @@
   const graphNoticeText = document.getElementById("graphNoticeText");
   const loadFullGraphButton = document.getElementById("loadFullGraphButton");
 
+  // --- Web Worker for layout/physics computation (offloads main thread) ---
+  let layoutWorker = undefined;
+  let layoutRequestId = 0;
+  const pendingLayoutCallbacks = new Map();
+
+  try {
+    layoutWorker = new Worker("graph.worker.js");
+    layoutWorker.onmessage = function (event) {
+      const msg = event.data;
+      if (!msg || !msg.requestId) return;
+      const callback = pendingLayoutCallbacks.get(msg.requestId);
+      if (callback) {
+        pendingLayoutCallbacks.delete(msg.requestId);
+        callback(msg);
+      }
+    };
+    layoutWorker.onerror = function (error) {
+      console.warn("[graph-view] Layout worker error, falling back to Cytoscape layout:", error.message);
+      layoutWorker = undefined;
+    };
+  } catch (e) {
+    console.warn("[graph-view] Unable to create layout worker, using Cytoscape layout only:", e.message);
+    layoutWorker = undefined;
+  }
+
+  function computeLayoutInWorker(nodes, edges) {
+    return new Promise(function (resolve, reject) {
+      if (!layoutWorker) {
+        reject(new Error("Layout worker unavailable"));
+        return;
+      }
+      var requestId = "layout-" + (++layoutRequestId);
+      pendingLayoutCallbacks.set(requestId, function (msg) {
+        if (msg.type === "error") {
+          reject(new Error(msg.payload && msg.payload.message || "Layout failed"));
+        } else if (msg.type === "layout-result") {
+          resolve(msg.payload.positions);
+        }
+      });
+      layoutWorker.postMessage({
+        type: "layout",
+        payload: { nodes: nodes, edges: edges },
+        requestId: requestId
+      });
+    });
+  }
+
   const state = {
     graph: { nodes: [], edges: [] },
     layout: "cose",
@@ -210,13 +257,13 @@
       return;
     }
 
-    const layout = state.layout === "radial"
+    var layoutConfig = state.layout === "radial"
       ? {
           name: "concentric",
-          concentric(node) {
+          concentric: function (node) {
             return node.data("filePath") === state.focusFile ? Number.MAX_SAFE_INTEGER : node.degree(true);
           },
-          levelWidth() {
+          levelWidth: function () {
             return 2;
           }
         }
@@ -227,7 +274,35 @@
           padding: 50
         };
 
-    state.cy.layout(layout).run();
+    // Try worker-based layout first, fall back to Cytoscape built-in.
+    var cyNodes = state.cy.nodes();
+    var cyEdges = state.cy.edges();
+
+    if (layoutWorker && cyNodes.length <= 250) {
+      var workerNodes = cyNodes.map(function (n) {
+        return { id: n.id(), label: n.data("label"), type: n.data("type") };
+      });
+      var workerEdges = cyEdges.map(function (e) {
+        return { sourceId: e.data("source"), targetId: e.data("target"), type: e.data("type") };
+      });
+
+      computeLayoutInWorker(workerNodes, workerEdges).then(function (positions) {
+        cyNodes.positions(function (node) {
+          var pos = positions[node.id()];
+          if (pos) {
+            return { x: pos.x, y: pos.y };
+          }
+          return node.position();
+        });
+        // Run Cytoscape layout with the computed initial positions.
+        state.cy.layout(layoutConfig).run();
+      }).catch(function () {
+        // Worker failed; fall back to Cytoscape-only layout.
+        state.cy.layout(layoutConfig).run();
+      });
+    } else {
+      state.cy.layout(layoutConfig).run();
+    }
   }
 
   function renderGraph() {

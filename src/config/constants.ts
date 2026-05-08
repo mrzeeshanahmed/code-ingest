@@ -41,11 +41,29 @@ export const GRAPH_DEFAULTS = {
   semanticResultCount: 5,
   showCircularDepsWarning: true,
   focusModeOpacity: 0.15,
-  autoFocusOnEditorChange: true
+  autoFocusOnEditorChange: true,
+  allowRawExport: false,
+  piiMode: "mask" as "strict" | "mask" | "allow",
+  piiStrictForExport: true,
+  embeddingMaxRetries: 3,
+  embeddingCooldownMs: 300_000,
+  knowledgeMode: "jit" as "jit",
+  knowledgeCooldownMs: 2_000,
+  knowledgeSoftPrefetchMode: "active-file" as "off" | "active-file" | "active-module",
+  knowledgeMaxConcurrentSyntheses: 2,
+  knowledgeModelChoice: "auto",
+  copilotReserveTokensPercent: 30,
+  copilotReserveTokensMin: 1_024,
+  pauseDuringGitOperations: true,
+  initialBatchNodes: 250,
+  transportChunkSizeKB: 256,
+  enableSemanticZoom: true
 } as const;
 
 export type GraphNodeMode = "file" | "function";
 export type GraphLayout = "cose" | "radial";
+export type KnowledgePrefetchMode = "off" | "active-file" | "active-module";
+export type PIIMode = "strict" | "mask" | "allow";
 
 export interface GraphSettings {
   hopDepth: number;
@@ -65,4 +83,20 @@ export interface GraphSettings {
   showCircularDepsWarning: boolean;
   focusModeOpacity: number;
   autoFocusOnEditorChange: boolean;
+  allowRawExport: boolean;
+  piiMode: PIIMode;
+  piiStrictForExport: boolean;
+  embeddingMaxRetries: number;
+  embeddingCooldownMs: number;
+  knowledgeMode: "jit";
+  knowledgeCooldownMs: number;
+  knowledgeSoftPrefetchMode: KnowledgePrefetchMode;
+  knowledgeMaxConcurrentSyntheses: number;
+  knowledgeModelChoice: string;
+  copilotReserveTokensPercent: number;
+  copilotReserveTokensMin: number;
+  pauseDuringGitOperations: boolean;
+  initialBatchNodes: number;
+  transportChunkSizeKB: number;
+  enableSemanticZoom: boolean;
 }

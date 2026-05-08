@@ -197,9 +197,10 @@ The system is composed of four persistent logical layers plus one sidecar retrie
 Each trusted workspace root stores its data in:
 
 - `.vscode/code-ingest/graph.db`
+- `.vscode/code-ingest/graph.db.lock`
 - `.vscode/code-ingest/semantic-index/`
 
-The SQLite file is managed by a WASM runtime and a Node-backed random-access VFS. It is the source of truth for graph topology, chunks, metadata, and cache state. The HNSW sidecar is the source of truth for fast vector retrieval.
+The SQLite file is managed by a WASM runtime and a Node-backed random-access VFS. It is the source of truth for graph topology, chunks, metadata, and cache state. The HNSW sidecar is the source of truth for fast vector retrieval. To prevent database corruption across multiple VS Code window instances, access is strictly serialized using an exclusive file lock (`graph.db.lock`).
 
 The reference v1 storage runtime is an Asyncify-enabled `wa-sqlite` build. However, the SQLite pager for `.vscode/code-ingest/graph.db` MUST NOT use `vscode.workspace.fs` for page reads or writes because `workspace.fs` lacks offset-based partial-write semantics. A design that buffers the entire database and rewrites it on every transaction is out of spec.
 
@@ -349,7 +350,7 @@ The system stores only the current repository state. There is no versioned histo
 7. Compare current files against `index_state`, `mtimeMs`, stored file hashes, and cached directory Merkle hashes.
 8. If a file is open and dirty, resolve the editor buffer on the extension host, compute its hash there, and marshal the parse payload to the worker.
 9. If the Git monitor detects a branch switch, pull, or mass rewrite, pause incremental watchers and run bulk reconciliation after the change set settles.
-10. All writes flow through one per-root single-writer queue. Read/parse work may be concurrent; SQLite writes may not be.
+10. All writes flow through one per-root single-writer queue, including cache clearing and schema initializations. Read/parse work may be concurrent; SQLite writes may not be.
 
 #### Dirty Buffer and Worker Boundary
 
@@ -1114,7 +1115,7 @@ Editor context menus expose focus, send-to-chat, and export actions only when th
 - `npm run build`
 - `npm run build:webview`
 - `npm run build:wasm`
-- `npm run lint`
+- `npm run lint` (Requires `eslint.config.mjs` flat config for ESLint 9+ compatibility)
 - `npm run type-check`
 - `npm run test:unit`
 - `npm run test:integration`
