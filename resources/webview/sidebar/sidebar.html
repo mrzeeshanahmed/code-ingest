@@ -139,89 +139,202 @@
       opacity: 0.75;
       word-break: break-word;
     }
+
+    /* ─── State overlays ─── */
+    .state-overlay {
+      display: none;
+      padding: 24px 8px;
+      text-align: center;
+    }
+
+    .state-overlay.visible {
+      display: block;
+    }
+
+    .state-overlay h2 {
+      text-transform: none;
+      letter-spacing: normal;
+      font-size: 16px;
+      opacity: 1;
+      margin-bottom: 12px;
+    }
+
+    .state-overlay p {
+      font-size: 13px;
+      line-height: 1.5;
+      opacity: 0.85;
+      margin: 0 0 8px;
+    }
+
+    .state-overlay .feature-list {
+      text-align: left;
+      font-size: 12px;
+      line-height: 1.8;
+      margin: 12px 0 16px;
+      padding-left: 18px;
+      opacity: 0.8;
+    }
+
+    .state-overlay .icon-large {
+      font-size: 48px;
+      margin-bottom: 8px;
+      opacity: 0.6;
+    }
+
+    .state-overlay .error-detail {
+      text-align: left;
+      font-size: 11px;
+      background: color-mix(in srgb, var(--vscode-inputValidation-errorBackground, #5a1d1d) 60%, transparent);
+      border: 1px solid var(--vscode-inputValidation-errorBorder, #be1100);
+      border-radius: 8px;
+      padding: 10px;
+      margin: 12px 0;
+      word-break: break-word;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 0.4; }
+      50% { opacity: 1; }
+    }
+
+    .state-overlay .spinner-dot {
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--vscode-progressBar-background, #0078d4);
+      animation: pulse 1.4s ease-in-out infinite;
+      margin-bottom: 16px;
+    }
+
+    #readyContent.hidden {
+      display: none;
+    }
   </style>
 </head>
 <body>
-  <section class="panel">
-    <h2>Index Status</h2>
-    <div class="status"><span class="dot" id="statusDot"></span><span id="statusText">Starting…</span></div>
-    <div class="stats">
-      <div>Nodes<br><strong id="nodeCount">0</strong></div>
-      <div>Edges<br><strong id="edgeCount">0</strong></div>
-      <div>Files<br><strong id="fileCount">0</strong></div>
-      <div>Last Indexed<br><strong id="lastIndexed">Never</strong></div>
-      <div>DB Size<br><strong id="dbSize">0 KB</strong></div>
-    </div>
-    <button id="rebuildButton" class="secondary">Rebuild Graph</button>
-  </section>
+  <!-- ═══ State: Not Initialized ═══ -->
+  <div id="overlayNotInitialized" class="state-overlay">
+    <div class="icon-large">🔬</div>
+    <h2>Welcome to Code-Ingest</h2>
+    <p>Build a graph-aware understanding of your codebase for smarter Copilot Chat context.</p>
+    <ul class="feature-list">
+      <li>Graph-based code navigation</li>
+      <li>Semantic search across your codebase</li>
+      <li>Structured context for Copilot Chat</li>
+      <li>PII-safe export modes</li>
+    </ul>
+    <button id="initializeButton" class="primary">Initialize Codebase</button>
+  </div>
 
-  <section class="panel">
-    <h3>Active File</h3>
-    <div id="activeFile" class="muted">No editor open</div>
-    <div class="stats" style="margin-top: 8px;">
-      <div>Dependencies<br><strong id="dependencyCount">0</strong></div>
-      <div>Dependents<br><strong id="dependentCount">0</strong></div>
-    </div>
-    <button id="openGraphButton">Open in Graph View</button>
-    <button id="sendToChatButton" class="secondary">Send to Copilot</button>
-  </section>
+  <!-- ═══ State: Trust Locked ═══ -->
+  <div id="overlayTrustLocked" class="state-overlay">
+    <div class="icon-large">🔒</div>
+    <h2>Workspace Not Trusted</h2>
+    <p>Code-Ingest requires a trusted workspace to operate. Graph features are disabled for security.</p>
+    <p class="muted">Open the workspace in trusted mode to enable Code-Ingest.</p>
+  </div>
 
-  <section class="panel">
-    <h3>Exclusion Patterns</h3>
-    <div id="excludePatterns" class="pill-list"></div>
-    <div class="pattern-editor">
-      <input id="excludePatternInput" type="text" placeholder="Add glob like **/*.snap">
-      <button id="addPatternButton" class="secondary">Add</button>
-    </div>
-    <button id="editIgnoreButton" class="secondary">Edit .codeingestignore</button>
-  </section>
+  <!-- ═══ State: Initializing ═══ -->
+  <div id="overlayInitializing" class="state-overlay">
+    <div class="spinner-dot"></div>
+    <h2>Initializing…</h2>
+    <p>Scanning files and building the code graph. This may take a moment for large workspaces.</p>
+  </div>
 
-  <section class="panel">
-    <h3>Unified Export</h3>
-    <div class="controls">
-      <div class="field-row">
-        <label for="exportPiiPolicySelect">PII Policy</label>
-        <select id="exportPiiPolicySelect">
-          <option value="strict">Strict</option>
-          <option value="mask">Mask</option>
-          <option value="allow">Allow</option>
-        </select>
+  <!-- ═══ State: Error ═══ -->
+  <div id="overlayError" class="state-overlay">
+    <div class="icon-large">⚠️</div>
+    <h2>Initialization Failed</h2>
+    <p>Something went wrong while building the graph.</p>
+    <div id="errorDetail" class="error-detail"></div>
+    <button id="retryButton" class="primary">Retry Initialization</button>
+  </div>
+
+  <!-- ═══ State: Ready ═══ -->
+  <div id="readyContent">
+    <section class="panel">
+      <h2>Index Status</h2>
+      <div class="status"><span class="dot" id="statusDot"></span><span id="statusText">Starting…</span></div>
+      <div class="stats">
+        <div>Nodes<br><strong id="nodeCount">0</strong></div>
+        <div>Edges<br><strong id="edgeCount">0</strong></div>
+        <div>Files<br><strong id="fileCount">0</strong></div>
+        <div>Last Indexed<br><strong id="lastIndexed">Never</strong></div>
+        <div>DB Size<br><strong id="dbSize">0 KB</strong></div>
       </div>
-      <button id="exportCleanButton">Clean Export (PII Compliant)</button>
-      <button id="exportGraphButton" class="secondary">Graph Export</button>
-      <button id="exportRawButton" class="secondary">Raw Export (Legacy)</button>
-    </div>
-  </section>
+      <button id="rebuildButton" class="secondary">Rebuild Graph</button>
+    </section>
 
-  <section class="panel">
-    <h3>Quick Traversal</h3>
-    <div class="controls">
-      <div class="field-row">
-        <label for="hopDepthSelect">Hop Depth</label>
-        <select id="hopDepthSelect">
-          <option value="1">1 hop</option>
-          <option value="2">2 hops</option>
-          <option value="3">3 hops</option>
-          <option value="4">4 hops</option>
-          <option value="5">5 hops</option>
-        </select>
+    <section class="panel">
+      <h3>Active File</h3>
+      <div id="activeFile" class="muted">No editor open</div>
+      <div class="stats" style="margin-top: 8px;">
+        <div>Dependencies<br><strong id="dependencyCount">0</strong></div>
+        <div>Dependents<br><strong id="dependentCount">0</strong></div>
       </div>
-      <div class="field-row">
-        <span>Node Mode</span>
-        <div class="segmented" id="nodeModeToggle">
-          <button data-mode="file" class="active">Files</button>
-          <button data-mode="function">Functions</button>
+      <button id="openGraphButton">Open in Graph View</button>
+      <button id="sendToChatButton" class="secondary">Send to Copilot</button>
+    </section>
+
+    <section class="panel">
+      <h3>Exclusion Patterns</h3>
+      <div id="excludePatterns" class="pill-list"></div>
+      <div class="pattern-editor">
+        <input id="excludePatternInput" type="text" placeholder="Add glob like **/*.snap">
+        <button id="addPatternButton" class="secondary">Add</button>
+      </div>
+      <button id="editIgnoreButton" class="secondary">Edit .codeingestignore</button>
+    </section>
+
+    <section class="panel">
+      <h3>Unified Export</h3>
+      <div class="controls">
+        <div class="field-row">
+          <label for="exportPiiPolicySelect">PII Policy</label>
+          <select id="exportPiiPolicySelect">
+            <option value="strict">Strict</option>
+            <option value="mask">Mask</option>
+            <option value="allow">Allow</option>
+          </select>
+        </div>
+        <button id="exportCleanButton">Clean Export (PII Compliant)</button>
+        <button id="exportGraphButton" class="secondary">Graph Export</button>
+        <button id="exportRawButton" class="secondary">Raw Export (Legacy)</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h3>Quick Traversal</h3>
+      <div class="controls">
+        <div class="field-row">
+          <label for="hopDepthSelect">Hop Depth</label>
+          <select id="hopDepthSelect">
+            <option value="1">1 hop</option>
+            <option value="2">2 hops</option>
+            <option value="3">3 hops</option>
+            <option value="4">4 hops</option>
+            <option value="5">5 hops</option>
+          </select>
+        </div>
+        <div class="field-row">
+          <span>Node Mode</span>
+          <div class="segmented" id="nodeModeToggle">
+            <button data-mode="file" class="active">Files</button>
+            <button data-mode="function">Functions</button>
+          </div>
+        </div>
+        <div class="pill-list">
+          <span id="hopDepthPill" class="pill">Depth: 2</span>
+          <span id="nodeModePill" class="pill">Mode: file</span>
         </div>
       </div>
-      <div class="pill-list">
-        <span id="hopDepthPill" class="pill">Depth: 2</span>
-        <span id="nodeModePill" class="pill">Mode: file</span>
-      </div>
-    </div>
-    <button id="openSettingsButton" class="secondary">Open Settings</button>
-  </section>
+      <button id="openSettingsButton" class="secondary">Open Settings</button>
+    </section>
 
-  <button id="primaryOpenGraph" class="primary">Open Graph View</button>
+    <button id="primaryOpenGraph" class="primary">Open Graph View</button>
+  </div>
+
   <script src="./sidebar.js"></script>
 </body>
 </html>

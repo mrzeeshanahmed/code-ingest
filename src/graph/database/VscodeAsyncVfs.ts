@@ -26,197 +26,201 @@ export interface VscodeAsyncVfs {
   xAccess(name: string, flags: number, pResOut: DataView): number;
 }
 
-export async function createVscodeAsyncVfs(): Promise<VscodeAsyncVfs> {
-  const VFS = await loadSqliteConstants();
-  const handles = new Map<number, fs.FileHandle>();
+export class VscodeAsyncVfsImpl implements VscodeAsyncVfs {
+  public readonly name = "vscode-async-vfs";
+  public readonly mxPathName = 512;
+  private handles = new Map<number, fs.FileHandle>();
+  private VFS: any;
 
-  function translateFlags(sqliteFlags: number): number {
+  constructor(VFS: any) {
+    this.VFS = VFS;
+  }
+
+  private translateFlags(sqliteFlags: number): number {
     let flags = 0;
-    if (sqliteFlags & VFS.SQLITE_OPEN_READONLY) {
+    if (sqliteFlags & this.VFS.SQLITE_OPEN_READONLY) {
       flags = O_RDONLY;
     } else {
       flags = O_RDWR;
     }
-    if (sqliteFlags & VFS.SQLITE_OPEN_CREATE) {
+    if (sqliteFlags & this.VFS.SQLITE_OPEN_CREATE) {
       flags |= O_CREAT;
     }
     return flags;
   }
 
-  function generateTempName(): string {
+  private generateTempName(): string {
     return path.join(os.tmpdir(), `wa-sqlite-temp-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   }
 
-  function handleAsync(f: () => Promise<number>): number {
+  public handleAsync(f: () => Promise<number>): number {
     return f() as unknown as number;
   }
 
-  return {
-    name: "vscode-async-vfs",
-    mxPathName: 512,
+  public xOpen(name: string | null, fileId: number, flags: number, pOutFlags: DataView): number {
+    return this.handleAsync(async () => {
+      const filePath = name ?? this.generateTempName();
+      try {
+        const nodeFlags = this.translateFlags(flags);
+        const handle = await fs.open(filePath, nodeFlags, 0o644);
+        this.handles.set(fileId, handle);
+        pOutFlags.setInt32(0, flags, true);
+        return this.VFS.SQLITE_OK;
+      } catch (error) {
+        const errno = (error as NodeJS.ErrnoException).code;
+        if (errno === "ENOENT") return this.VFS.SQLITE_CANTOPEN;
+        if (errno === "EACCES" || errno === "EPERM") return this.VFS.SQLITE_PERM;
+        return this.VFS.SQLITE_IOERR;
+      }
+    });
+  }
 
-    handleAsync,
+  public xClose(fileId: number): number {
+    return this.handleAsync(async () => {
+      const handle = this.handles.get(fileId);
+      if (!handle) return this.VFS.SQLITE_OK;
+      this.handles.delete(fileId);
+      try {
+        await handle.close();
+        return this.VFS.SQLITE_OK;
+      } catch {
+        return this.VFS.SQLITE_IOERR_CLOSE;
+      }
+    });
+  }
 
-    xOpen(name: string | null, fileId: number, flags: number, pOutFlags: DataView): number {
-      return handleAsync(async () => {
-        const filePath = name ?? generateTempName();
-        try {
-          const nodeFlags = translateFlags(flags);
-          const handle = await fs.open(filePath, nodeFlags, 0o644);
-          handles.set(fileId, handle);
-          pOutFlags.setInt32(0, flags, true);
-          return VFS.SQLITE_OK;
-        } catch (error) {
-          const errno = (error as NodeJS.ErrnoException).code;
-          if (errno === "ENOENT") return VFS.SQLITE_CANTOPEN;
-          if (errno === "EACCES" || errno === "EPERM") return VFS.SQLITE_PERM;
-          return VFS.SQLITE_IOERR;
+  public xRead(fileId: number, pData: Uint8Array | { size: number; value: Uint8Array }, iOffset: number): number {
+    return this.handleAsync(async () => {
+      const handle = this.handles.get(fileId);
+      if (!handle) return this.VFS.SQLITE_IOERR_READ;
+      const buffer = pData instanceof Uint8Array ? pData : pData.value;
+      try {
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, iOffset);
+        if (bytesRead < buffer.length) {
+          buffer.fill(0, bytesRead);
+          return this.VFS.SQLITE_IOERR_SHORT_READ;
         }
-      });
-    },
+        return this.VFS.SQLITE_OK;
+      } catch {
+        return this.VFS.SQLITE_IOERR_READ;
+      }
+    });
+  }
 
-    xClose(fileId: number): number {
-      return handleAsync(async () => {
-        const handle = handles.get(fileId);
-        if (!handle) return VFS.SQLITE_OK;
-        handles.delete(fileId);
-        try {
-          await handle.close();
-          return VFS.SQLITE_OK;
-        } catch {
-          return VFS.SQLITE_IOERR_CLOSE;
-        }
-      });
-    },
+  public xWrite(fileId: number, pData: Uint8Array | { size: number; value: Uint8Array }, iOffset: number): number {
+    return this.handleAsync(async () => {
+      const handle = this.handles.get(fileId);
+      if (!handle) return this.VFS.SQLITE_IOERR_WRITE;
+      const buffer = pData instanceof Uint8Array ? pData : pData.value;
+      try {
+        const { bytesWritten } = await handle.write(buffer, 0, buffer.length, iOffset);
+        if (bytesWritten !== buffer.length) return this.VFS.SQLITE_IOERR_WRITE;
+        return this.VFS.SQLITE_OK;
+      } catch {
+        return this.VFS.SQLITE_IOERR_WRITE;
+      }
+    });
+  }
 
-    xRead(fileId: number, pData: Uint8Array | { size: number; value: Uint8Array }, iOffset: number): number {
-      return handleAsync(async () => {
-        const handle = handles.get(fileId);
-        if (!handle) return VFS.SQLITE_IOERR_READ;
-        const buffer = pData instanceof Uint8Array ? pData : pData.value;
-        try {
-          const { bytesRead } = await handle.read(buffer, 0, buffer.length, iOffset);
-          if (bytesRead < buffer.length) {
-            buffer.fill(0, bytesRead);
-            return VFS.SQLITE_IOERR_SHORT_READ;
-          }
-          return VFS.SQLITE_OK;
-        } catch {
-          return VFS.SQLITE_IOERR_READ;
-        }
-      });
-    },
+  public xTruncate(fileId: number, iSize: number): number {
+    return this.handleAsync(async () => {
+      const handle = this.handles.get(fileId);
+      if (!handle) return this.VFS.SQLITE_IOERR_TRUNCATE;
+      try {
+        await handle.truncate(iSize);
+        return this.VFS.SQLITE_OK;
+      } catch {
+        return this.VFS.SQLITE_IOERR_TRUNCATE;
+      }
+    });
+  }
 
-    xWrite(fileId: number, pData: Uint8Array | { size: number; value: Uint8Array }, iOffset: number): number {
-      return handleAsync(async () => {
-        const handle = handles.get(fileId);
-        if (!handle) return VFS.SQLITE_IOERR_WRITE;
-        const buffer = pData instanceof Uint8Array ? pData : pData.value;
-        try {
-          const { bytesWritten } = await handle.write(buffer, 0, buffer.length, iOffset);
-          if (bytesWritten !== buffer.length) return VFS.SQLITE_IOERR_WRITE;
-          return VFS.SQLITE_OK;
-        } catch {
-          return VFS.SQLITE_IOERR_WRITE;
-        }
-      });
-    },
+  public xSync(fileId: number, _flags: number): number {
+    return this.handleAsync(async () => {
+      const handle = this.handles.get(fileId);
+      if (!handle) return this.VFS.SQLITE_OK;
+      try {
+        await handle.sync();
+        return this.VFS.SQLITE_OK;
+      } catch {
+        return this.VFS.SQLITE_IOERR_FSYNC;
+      }
+    });
+  }
 
-    xTruncate(fileId: number, iSize: number): number {
-      return handleAsync(async () => {
-        const handle = handles.get(fileId);
-        if (!handle) return VFS.SQLITE_IOERR_TRUNCATE;
-        try {
-          await handle.truncate(iSize);
-          return VFS.SQLITE_OK;
-        } catch {
-          return VFS.SQLITE_IOERR_TRUNCATE;
-        }
-      });
-    },
+  public xFileSize(fileId: number, pSize64: DataView): number {
+    return this.handleAsync(async () => {
+      const handle = this.handles.get(fileId);
+      if (!handle) return this.VFS.SQLITE_IOERR_FSTAT;
+      try {
+        const stats = await handle.stat();
+        pSize64.setBigInt64(0, BigInt(stats.size), true);
+        return this.VFS.SQLITE_OK;
+      } catch {
+        return this.VFS.SQLITE_IOERR_FSTAT;
+      }
+    });
+  }
 
-    xSync(fileId: number, _flags: number): number {
-      return handleAsync(async () => {
-        const handle = handles.get(fileId);
-        if (!handle) return VFS.SQLITE_OK;
-        try {
-          await handle.sync();
-          return VFS.SQLITE_OK;
-        } catch {
-          return VFS.SQLITE_IOERR_FSYNC;
-        }
-      });
-    },
+  public xDelete(name: string, _syncDir: number): number {
+    return this.handleAsync(async () => {
+      try {
+        await fs.unlink(name);
+        return this.VFS.SQLITE_OK;
+      } catch (error) {
+        const errno = (error as NodeJS.ErrnoException).code;
+        if (errno === "ENOENT") return this.VFS.SQLITE_IOERR_DELETE_NOENT;
+        return this.VFS.SQLITE_IOERR_DELETE;
+      }
+    });
+  }
 
-    xFileSize(fileId: number, pSize64: DataView): number {
-      return handleAsync(async () => {
-        const handle = handles.get(fileId);
-        if (!handle) return VFS.SQLITE_IOERR_FSTAT;
-        try {
-          const stats = await handle.stat();
-          pSize64.setBigInt64(0, BigInt(stats.size), true);
-          return VFS.SQLITE_OK;
-        } catch {
-          return VFS.SQLITE_IOERR_FSTAT;
-        }
-      });
-    },
-
-    xDelete(name: string, _syncDir: number): number {
-      return handleAsync(async () => {
-        try {
-          await fs.unlink(name);
-          return VFS.SQLITE_OK;
-        } catch (error) {
-          const errno = (error as NodeJS.ErrnoException).code;
-          if (errno === "ENOENT") return VFS.SQLITE_IOERR_DELETE_NOENT;
-          return VFS.SQLITE_IOERR_DELETE;
-        }
-      });
-    },
-
-    xAccess(name: string, flags: number, pResOut: DataView): number {
-      return handleAsync(async () => {
-        try {
-          await fs.access(name);
-          if (flags === VFS.SQLITE_ACCESS_READWRITE) {
-            try {
-              const h = await fs.open(name, "r+");
-              await h.close();
-              pResOut.setInt32(0, 1, true);
-            } catch {
-              pResOut.setInt32(0, 0, true);
-            }
-          } else {
+  public xAccess(name: string, flags: number, pResOut: DataView): number {
+    return this.handleAsync(async () => {
+      try {
+        await fs.access(name);
+        if (flags === this.VFS.SQLITE_ACCESS_READWRITE) {
+          try {
+            const h = await fs.open(name, "r+");
+            await h.close();
             pResOut.setInt32(0, 1, true);
+          } catch {
+            pResOut.setInt32(0, 0, true);
           }
-          return VFS.SQLITE_OK;
-        } catch {
-          pResOut.setInt32(0, 0, true);
-          return VFS.SQLITE_OK;
+        } else {
+          pResOut.setInt32(0, 1, true);
         }
-      });
-    },
+        return this.VFS.SQLITE_OK;
+      } catch {
+        pResOut.setInt32(0, 0, true);
+        return this.VFS.SQLITE_OK;
+      }
+    });
+  }
 
-    xLock(_fileId: number, _flags: number): number {
-      return VFS.SQLITE_OK;
-    },
+  public xLock(_fileId: number, _flags: number): number {
+    return this.VFS.SQLITE_OK;
+  }
 
-    xUnlock(_fileId: number, _flags: number): number {
-      return VFS.SQLITE_OK;
-    },
+  public xUnlock(_fileId: number, _flags: number): number {
+    return this.VFS.SQLITE_OK;
+  }
 
-    xCheckReservedLock(_fileId: number, pResOut: DataView): number {
-      pResOut.setInt32(0, 0, true);
-      return VFS.SQLITE_OK;
-    },
+  public xCheckReservedLock(_fileId: number, pResOut: DataView): number {
+    pResOut.setInt32(0, 0, true);
+    return this.VFS.SQLITE_OK;
+  }
 
-    xFileControl(_fileId: number, _op: number, _pArg: DataView): number {
-      return VFS.SQLITE_NOTFOUND;
-    },
+  public xFileControl(_fileId: number, _op: number, _pArg: DataView): number {
+    return this.VFS.SQLITE_NOTFOUND;
+  }
 
-    xDeviceCharacteristics(_fileId: number): number {
-      return 0;
-    }
-  };
+  public xDeviceCharacteristics(_fileId: number): number {
+    return 0;
+  }
+}
+
+export async function createVscodeAsyncVfs(): Promise<VscodeAsyncVfs> {
+  const VFS = await loadSqliteConstants();
+  return new VscodeAsyncVfsImpl(VFS);
 }

@@ -311,44 +311,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return;
   }
 
-  // First-run experience
-  const hasInitialized = context.globalState.get<boolean>("code-ingest.hasInitialized");
-  if (!hasInitialized) {
-    const result = await vscode.window.showInformationMessage(
-      "Welcome to Code-Ingest! Build a graph-aware understanding of your codebase for smarter Copilot Chat context.",
-      { modal: true, detail: "Features:\n• Graph-based code navigation\n• Semantic search across your codebase\n• Structured context for Copilot Chat" },
-      "Initialize Codebase"
-    );
-    if (result === "Initialize Codebase") {
-      // will proceed with normal initialization and mark as initialized after first successful index
-    }
-  }
-
-  // Initialize all roots with progress reporting so the UI is not blocked.
-  let anyRootInitialized = false;
-  await vscode.window.withProgress(
-    {
-      location: vscode.ProgressLocation.Notification,
-      title: "Code-Ingest: Initializing workspace graph...",
-      cancellable: false
-    },
-    async (progress) => {
-      for (const folder of workspaceFolders) {
-        progress.report({ message: `Indexing ${folder.name}...` });
-        try {
-          await initializeRoot(context, folder);
-          anyRootInitialized = true;
-        } catch (error) {
-          outputChannel?.appendLine(`[activation] Failed to initialize root ${folder.uri.fsPath}: ${(error as Error).message}`);
-        }
-      }
-    }
-  );
-
-  if (anyRootInitialized && !hasInitialized) {
-    await context.globalState.update("code-ingest.hasInitialized", true);
-  }
-
   // Multi-root disposal.
   context.subscriptions.push(
     vscode.workspace.onDidChangeWorkspaceFolders(async (event) => {
@@ -404,24 +366,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     void vscode.window.showInformationMessage(statusMessage);
   };
 
-  const runtime = activeRuntime();
-  if (!runtime) {
-    return;
-  }
-
   graphViewPanel = new GraphViewPanel({
     extensionUri: context.extensionUri,
     getGraphDatabase: () => {
       const rt = activeRuntime();
-      return rt ? rt.graphDatabase : runtime!.graphDatabase;
+      if (!rt) throw new Error("Code-Ingest is still initializing or no workspace is open.");
+      return rt.graphDatabase;
     },
     getTraversal: () => {
       const rt = activeRuntime();
-      return new GraphTraversal(rt ? rt.graphDatabase : runtime!.graphDatabase);
+      if (!rt) throw new Error("Code-Ingest is still initializing or no workspace is open.");
+      return new GraphTraversal(rt.graphDatabase);
     },
     getSettings: () => {
       const rt = activeRuntime();
-      return getGraphSettings(rt ? rt.workspaceFolder : runtime!.workspaceFolder);
+      if (!rt) throw new Error("Code-Ingest is still initializing or no workspace is open.");
+      return getGraphSettings(rt.workspaceFolder);
     },
     outputChannel,
     onSendToChat: sendToChat
@@ -431,12 +391,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     extensionUri: context.extensionUri,
     getSettings: () => {
       const rt = activeRuntime();
-      return getGraphSettings(rt ? rt.workspaceFolder : runtime!.workspaceFolder);
+      if (!rt) throw new Error("Code-Ingest is still initializing or no workspace is open.");
+      return getGraphSettings(rt.workspaceFolder);
     }
   });
 
   const sidebarProvider = new SidebarProvider({
     extensionUri: context.extensionUri,
+    onInitialize: async () => {
+      await vscode.commands.executeCommand("codeIngest.initializeCodebase");
+    },
     onRebuildGraph: async () => {
       const rt = activeRuntime();
       if (!rt) {
@@ -474,20 +438,117 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     sidebarProvider.setState(await buildSidebarState(rt.graphDatabase, () => getGraphSettings(rt.workspaceFolder)));
   };
 
+  const hasInitialized = context.globalState.get<boolean>("code-ingest.hasInitialized");
+
+  const startInitialization = async () => {
+    // Set sidebar to "initializing" before work begins.
+    sidebarProvider.setState({
+      status: "initializing",
+      nodeCount: 0,
+      edgeCount: 0,
+      fileCount: 0,
+      databaseSizeBytes: 0,
+      dependencyCount: 0,
+      dependentCount: 0,
+      settings: {
+        hopDepth: GRAPH_DEFAULTS.hopDepth,
+        defaultNodeMode: GRAPH_DEFAULTS.defaultNodeMode,
+        excludePatterns: GRAPH_DEFAULTS.excludePatterns
+      }
+    });
+
+    let anyRootInitialized = false;
+    try {
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: "Code-Ingest: Initializing workspace graph...",
+          cancellable: false
+        },
+        async (progress) => {
+          for (const folder of workspaceFolders) {
+            progress.report({ message: `Indexing ${folder.name}...` });
+            try {
+              await initializeRoot(context, folder);
+              anyRootInitialized = true;
+            } catch (error) {
+              outputChannel?.appendLine(`[activation] Failed to initialize root ${folder.uri.fsPath}: ${(error as Error).message}`);
+            }
+          }
+        }
+      );
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      outputChannel?.appendLine(`[activation] Initialization failed: ${errorMessage}`);
+      sidebarProvider.setState({
+        status: "error",
+        errorMessage,
+        nodeCount: 0,
+        edgeCount: 0,
+        fileCount: 0,
+        databaseSizeBytes: 0,
+        dependencyCount: 0,
+        dependentCount: 0,
+        settings: {
+          hopDepth: GRAPH_DEFAULTS.hopDepth,
+          defaultNodeMode: GRAPH_DEFAULTS.defaultNodeMode,
+          excludePatterns: GRAPH_DEFAULTS.excludePatterns
+        }
+      });
+      return;
+    }
+
+    if (anyRootInitialized && !hasInitialized) {
+      await context.globalState.update("code-ingest.hasInitialized", true);
+    }
+    
+    await updateSidebar();
+  };
+
+  // Register the initialize command for both sidebar CTA and command palette.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("codeIngest.initializeCodebase", () => {
+      void startInitialization();
+    })
+  );
+
+  // If already initialized, start immediately; otherwise show CTA in sidebar.
+  if (hasInitialized) {
+    void startInitialization();
+  } else {
+    sidebarProvider.setState({
+      status: "not-initialized",
+      nodeCount: 0,
+      edgeCount: 0,
+      fileCount: 0,
+      databaseSizeBytes: 0,
+      dependencyCount: 0,
+      dependentCount: 0,
+      settings: {
+        hopDepth: GRAPH_DEFAULTS.hopDepth,
+        defaultNodeMode: GRAPH_DEFAULTS.defaultNodeMode,
+        excludePatterns: GRAPH_DEFAULTS.excludePatterns
+      }
+    });
+  }
+
   copilotParticipant = new CopilotParticipant({
     extensionUri: context.extensionUri,
     getGraphDatabase: () => {
       const rt = activeRuntime();
-      return rt ? rt.graphDatabase : runtime!.graphDatabase;
+      if (!rt) throw new Error("Code-Ingest is still initializing or no workspace is open.");
+      return rt.graphDatabase;
     },
     getTraversal: () => {
       const rt = activeRuntime();
-      return new GraphTraversal(rt ? rt.graphDatabase : runtime!.graphDatabase);
+      if (!rt) throw new Error("Code-Ingest is still initializing or no workspace is open.");
+      return new GraphTraversal(rt.graphDatabase);
     },
     getContextBuilder: () => {
       const rt = activeRuntime();
-      const db = rt ? rt.graphDatabase : runtime!.graphDatabase;
-      const settings = getGraphSettings(rt ? rt.workspaceFolder : runtime!.workspaceFolder);
+      if (!rt) throw new Error("Code-Ingest is still initializing or no workspace is open.");
+      const db = rt.graphDatabase;
+      const settings = getGraphSettings(rt.workspaceFolder);
       return new ContextBuilder({
         tokenBudget: settings.tokenBudget,
         includeSourceContent: settings.includeSourceContent,
@@ -498,13 +559,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
     getEmbeddingService: () => {
       const rt = activeRuntime();
-      const wsRoot = rt ? rt.workspaceFolder.uri.fsPath : runtime!.workspaceFolder.uri.fsPath;
-      const db = rt ? rt.graphDatabase : runtime!.graphDatabase;
-      return new EmbeddingService(wsRoot, db, outputChannel);
+      if (!rt) throw new Error("Code-Ingest is still initializing or no workspace is open.");
+      return new EmbeddingService(rt.workspaceFolder.uri.fsPath, rt.graphDatabase, outputChannel);
     },
     getSettings: () => {
       const rt = activeRuntime();
-      return getGraphSettings(rt ? rt.workspaceFolder : runtime!.workspaceFolder);
+      if (!rt) throw new Error("Code-Ingest is still initializing or no workspace is open.");
+      return getGraphSettings(rt.workspaceFolder);
     },
     outputChannel,
     onFocusFile: async (filePath) => {
@@ -516,15 +577,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   registerGraphCommands(context, {
     getGraphIndexer: () => {
       const rt = activeRuntime();
-      return rt ? rt.graphIndexer : runtime!.graphIndexer;
+      if (!rt) throw new Error("Code-Ingest is still initializing or no workspace is open.");
+      return rt.graphIndexer;
     },
     getGraphDatabase: () => {
       const rt = activeRuntime();
-      return rt ? rt.graphDatabase : runtime!.graphDatabase;
+      if (!rt) throw new Error("Code-Ingest is still initializing or no workspace is open.");
+      return rt.graphDatabase;
     },
     getKnowledgeService: () => {
       const rt = activeRuntime();
-      return rt ? rt.knowledgeService : undefined;
+      if (!rt) throw new Error("Code-Ingest is still initializing or no workspace is open.");
+      return rt.knowledgeService;
     },
     graphViewPanel,
     settingsProvider,

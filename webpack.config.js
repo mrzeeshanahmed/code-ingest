@@ -11,7 +11,7 @@ module.exports = {
     filename: "extension.js",
     path: path.resolve(__dirname, "out"),
     libraryTarget: "commonjs2",
-    clean: true
+    clean: false
   },
   externals: {
     vscode: "commonjs vscode",

@@ -3,6 +3,17 @@
 
   let currentState;
 
+  // ─── Overlay elements ───
+  const overlays = {
+    notInitialized: document.getElementById("overlayNotInitialized"),
+    trustLocked: document.getElementById("overlayTrustLocked"),
+    initializing: document.getElementById("overlayInitializing"),
+    error: document.getElementById("overlayError")
+  };
+  const readyContent = document.getElementById("readyContent");
+  const errorDetail = document.getElementById("errorDetail");
+
+  // ─── Ready-state elements ───
   const elements = {
     statusDot: document.getElementById("statusDot"),
     statusText: document.getElementById("statusText"),
@@ -33,6 +44,10 @@
     exportRawButton: document.getElementById("exportRawButton")
   };
 
+  // ─── Overlay buttons ───
+  var initializeButton = document.getElementById("initializeButton");
+  var retryButton = document.getElementById("retryButton");
+
   function post(type, payload) {
     if (payload === undefined) {
       vscode.postMessage({ type });
@@ -46,14 +61,44 @@
     return currentState && currentState.activeFile ? { filePath: currentState.activeFile } : undefined;
   }
 
+  // ─── State machine: show/hide overlays ───
+  function showView(status, errorMessage) {
+    // Hide everything first.
+    overlays.notInitialized.classList.remove("visible");
+    overlays.trustLocked.classList.remove("visible");
+    overlays.initializing.classList.remove("visible");
+    overlays.error.classList.remove("visible");
+    readyContent.classList.add("hidden");
+
+    switch (status) {
+      case "not-initialized":
+        overlays.notInitialized.classList.add("visible");
+        break;
+      case "trust-locked":
+        overlays.trustLocked.classList.add("visible");
+        break;
+      case "initializing":
+        overlays.initializing.classList.add("visible");
+        break;
+      case "error":
+        overlays.error.classList.add("visible");
+        errorDetail.textContent = errorMessage || "An unknown error occurred.";
+        break;
+      default:
+        // ready, indexing, partial — show main content
+        readyContent.classList.remove("hidden");
+        break;
+    }
+  }
+
   function setStatus(status) {
-    const colors = {
+    var colors = {
       ready: "var(--vscode-testing-iconPassed)",
       indexing: "var(--vscode-testing-iconQueued)",
       partial: "var(--vscode-testing-iconSkipped)",
       error: "var(--vscode-testing-iconFailed)"
     };
-    const labels = {
+    var labels = {
       ready: "Ready",
       indexing: "Indexing",
       partial: "Partial",
@@ -65,67 +110,76 @@
   }
 
   function setNodeMode(mode) {
-    elements.nodeModeButtons.forEach((button) => {
+    elements.nodeModeButtons.forEach(function (button) {
       button.classList.toggle("active", button.dataset.mode === mode);
     });
-    elements.nodeModePill.textContent = `Mode: ${mode}`;
+    elements.nodeModePill.textContent = "Mode: " + mode;
   }
 
   function setHopDepth(value) {
     elements.hopDepthSelect.value = String(value);
-    elements.hopDepthPill.textContent = `Depth: ${value}`;
+    elements.hopDepthPill.textContent = "Depth: " + value;
   }
 
   function renderPatterns(patterns) {
     elements.excludePatterns.innerHTML = "";
 
     if (!patterns || patterns.length === 0) {
-      const empty = document.createElement("span");
+      var empty = document.createElement("span");
       empty.className = "muted";
       empty.textContent = "No extra exclusions";
       elements.excludePatterns.appendChild(empty);
       return;
     }
 
-    patterns.forEach((pattern) => {
-      const button = document.createElement("button");
+    patterns.forEach(function (pattern) {
+      var button = document.createElement("button");
       button.className = "pill";
       button.textContent = pattern;
-      button.title = `Remove ${pattern}`;
-      button.addEventListener("click", () => post("remove-exclude-pattern", { pattern }));
+      button.title = "Remove " + pattern;
+      button.addEventListener("click", function () { post("remove-exclude-pattern", { pattern: pattern }); });
       elements.excludePatterns.appendChild(button);
     });
   }
 
   function addPattern() {
-    const pattern = elements.excludePatternInput.value.trim();
+    var pattern = elements.excludePatternInput.value.trim();
     if (!pattern) {
       return;
     }
 
-    post("add-exclude-pattern", { pattern });
+    post("add-exclude-pattern", { pattern: pattern });
     elements.excludePatternInput.value = "";
   }
 
-  elements.rebuildButton.addEventListener("click", () => post("rebuild-graph"));
-  elements.openGraphButton.addEventListener("click", () => post("open-graph-view", activeFilePayload()));
-  elements.sendToChatButton.addEventListener("click", () => post("send-to-chat", activeFilePayload()));
-  elements.primaryOpenGraph.addEventListener("click", () => post("open-graph-view", activeFilePayload()));
-  elements.editIgnoreButton.addEventListener("click", () => post("edit-ignore"));
-  elements.openSettingsButton.addEventListener("click", () => post("open-settings"));
-  elements.addPatternButton.addEventListener("click", addPattern);
-  elements.exportCleanButton.addEventListener("click", () => post("export-clean", { piiPolicy: elements.exportPiiPolicySelect.value }));
-  elements.exportGraphButton.addEventListener("click", () => post("export-graph", { piiPolicy: elements.exportPiiPolicySelect.value }));
-  elements.exportRawButton.addEventListener("click", () => post("export-raw", { piiPolicy: elements.exportPiiPolicySelect.value }));
+  // ─── Event listeners: overlay buttons ───
+  if (initializeButton) {
+    initializeButton.addEventListener("click", function () { post("initialize"); });
+  }
+  if (retryButton) {
+    retryButton.addEventListener("click", function () { post("initialize"); });
+  }
 
-  elements.excludePatternInput.addEventListener("keydown", (event) => {
+  // ─── Event listeners: ready-state buttons ───
+  elements.rebuildButton.addEventListener("click", function () { post("rebuild-graph"); });
+  elements.openGraphButton.addEventListener("click", function () { post("open-graph-view", activeFilePayload()); });
+  elements.sendToChatButton.addEventListener("click", function () { post("send-to-chat", activeFilePayload()); });
+  elements.primaryOpenGraph.addEventListener("click", function () { post("open-graph-view", activeFilePayload()); });
+  elements.editIgnoreButton.addEventListener("click", function () { post("edit-ignore"); });
+  elements.openSettingsButton.addEventListener("click", function () { post("open-settings"); });
+  elements.addPatternButton.addEventListener("click", addPattern);
+  elements.exportCleanButton.addEventListener("click", function () { post("export-clean", { piiPolicy: elements.exportPiiPolicySelect.value }); });
+  elements.exportGraphButton.addEventListener("click", function () { post("export-graph", { piiPolicy: elements.exportPiiPolicySelect.value }); });
+  elements.exportRawButton.addEventListener("click", function () { post("export-raw", { piiPolicy: elements.exportPiiPolicySelect.value }); });
+
+  elements.excludePatternInput.addEventListener("keydown", function (event) {
     if (event.key === "Enter") {
       addPattern();
     }
   });
 
-  elements.hopDepthSelect.addEventListener("change", () => {
-    const hopDepth = Number(elements.hopDepthSelect.value);
+  elements.hopDepthSelect.addEventListener("change", function () {
+    var hopDepth = Number(elements.hopDepthSelect.value);
     setHopDepth(hopDepth);
     post("update-setting", {
       section: "codeIngest.graph",
@@ -134,9 +188,9 @@
     });
   });
 
-  elements.nodeModeButtons.forEach((button) => {
-    button.addEventListener("click", () => {
-      const mode = button.dataset.mode || "file";
+  elements.nodeModeButtons.forEach(function (button) {
+    button.addEventListener("click", function () {
+      var mode = button.dataset.mode || "file";
       setNodeMode(mode);
       post("update-setting", {
         section: "codeIngest.graph",
@@ -146,28 +200,40 @@
     });
   });
 
-  window.addEventListener("message", (event) => {
-    const message = event.data || {};
+  // ─── Message handler ───
+  window.addEventListener("message", function (event) {
+    var message = event.data || {};
     if (message.type !== "sidebar-state") {
       return;
     }
 
-    const payload = message.payload || {};
+    var payload = message.payload || {};
     currentState = payload;
 
-    setStatus(payload.status || "ready");
-    elements.nodeCount.textContent = String(payload.nodeCount || 0);
-    elements.edgeCount.textContent = String(payload.edgeCount || 0);
-    elements.fileCount.textContent = String(payload.fileCount || 0);
-    elements.lastIndexed.textContent = payload.lastIndexed ? new Date(payload.lastIndexed).toLocaleString() : "Never";
-    elements.dbSize.textContent = `${Math.round((payload.databaseSizeBytes || 0) / 1024)} KB`;
-    elements.activeFile.textContent = payload.activeFile || "No editor open";
-    elements.dependencyCount.textContent = String(payload.dependencyCount || 0);
-    elements.dependentCount.textContent = String(payload.dependentCount || 0);
+    var status = payload.status || "ready";
 
-    const settings = payload.settings || {};
-    setHopDepth(settings.hopDepth || 2);
-    setNodeMode(settings.defaultNodeMode || "file");
-    renderPatterns(settings.excludePatterns || []);
+    // Switch between overlay views and ready content.
+    showView(status, payload.errorMessage);
+
+    // Only update ready-state fields if we're actually showing them.
+    if (status === "ready" || status === "indexing" || status === "partial") {
+      setStatus(status);
+      elements.nodeCount.textContent = String(payload.nodeCount || 0);
+      elements.edgeCount.textContent = String(payload.edgeCount || 0);
+      elements.fileCount.textContent = String(payload.fileCount || 0);
+      elements.lastIndexed.textContent = payload.lastIndexed ? new Date(payload.lastIndexed).toLocaleString() : "Never";
+      elements.dbSize.textContent = Math.round((payload.databaseSizeBytes || 0) / 1024) + " KB";
+      elements.activeFile.textContent = payload.activeFile || "No editor open";
+      elements.dependencyCount.textContent = String(payload.dependencyCount || 0);
+      elements.dependentCount.textContent = String(payload.dependentCount || 0);
+
+      var settings = payload.settings || {};
+      setHopDepth(settings.hopDepth || 2);
+      setNodeMode(settings.defaultNodeMode || "file");
+      renderPatterns(settings.excludePatterns || []);
+    }
   });
+
+  // ─── Initial state: show not-initialized by default until a message arrives ───
+  showView("not-initialized");
 })();

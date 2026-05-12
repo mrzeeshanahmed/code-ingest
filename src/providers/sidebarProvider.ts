@@ -4,7 +4,7 @@ import { GraphSettings } from "../config/constants";
 import { setWebviewHtml } from "./webviewHelpers";
 
 export interface SidebarState {
-  status: "trust-locked" | "not-initialized" | "ready" | "indexing" | "partial" | "error";
+  status: "trust-locked" | "not-initialized" | "initializing" | "ready" | "indexing" | "partial" | "error";
   nodeCount: number;
   edgeCount: number;
   fileCount: number;
@@ -13,11 +13,13 @@ export interface SidebarState {
   activeFile?: string | undefined;
   dependencyCount: number;
   dependentCount: number;
+  errorMessage?: string | undefined;
   settings: Pick<GraphSettings, "hopDepth" | "defaultNodeMode" | "excludePatterns">;
 }
 
 interface SidebarProviderOptions {
   extensionUri: vscode.Uri;
+  onInitialize?: (() => Promise<void> | void) | undefined;
   onRebuildGraph: () => Promise<void> | void;
   onOpenGraphView: (filePath?: string) => Promise<void> | void;
   onSendToChat: (filePath?: string) => Promise<void> | void;
@@ -88,6 +90,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const payload = candidate.payload ?? {};
 
     switch (candidate.type) {
+      case "initialize":
+        if (this.options.onInitialize) {
+          await this.options.onInitialize();
+        }
+        break;
       case "rebuild-graph":
         await this.options.onRebuildGraph();
         break;
