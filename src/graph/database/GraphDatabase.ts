@@ -134,6 +134,7 @@ export class GraphDatabase {
     fs.mkdirSync(path.dirname(this.databasePath), { recursive: true });
 
     // Lockfile guard to prevent concurrent access from multiple VS Code windows.
+    // If a stale lockfile exists from a crashed/killed process, remove it.
     this.lockFilePath = `${this.databasePath}.lock`;
     try {
       const lockFd = fs.openSync(this.lockFilePath, "wx");
@@ -141,29 +142,61 @@ export class GraphDatabase {
       fs.closeSync(lockFd);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-        throw new Error(`Database is locked by another process. Lockfile: ${this.lockFilePath}`);
+        // Check if the owning PID is still alive.
+        let ownerAlive = false;
+        try {
+          const ownerPid = parseInt(fs.readFileSync(this.lockFilePath, "utf8").trim(), 10);
+          if (!isNaN(ownerPid) && ownerPid !== process.pid) {
+            // process.kill(pid, 0) throws if the PID doesn't exist.
+            process.kill(ownerPid, 0);
+            ownerAlive = true;
+          }
+        } catch {
+          // Either the PID file is unreadable, the PID is invalid, or the process is dead.
+          ownerAlive = false;
+        }
+
+        if (ownerAlive) {
+          throw new Error(`Database is locked by another process. Lockfile: ${this.lockFilePath}`);
+        }
+
+        // Stale lockfile — previous process crashed or was killed without cleanup.
+        this.outputChannel?.appendLine(`[GraphDatabase] Removing stale lockfile from previous session: ${this.lockFilePath}`);
+        fs.unlinkSync(this.lockFilePath);
+        const lockFd = fs.openSync(this.lockFilePath, "wx");
+        fs.writeSync(lockFd, String(process.pid));
+        fs.closeSync(lockFd);
+      } else {
+        throw error;
       }
-      throw error;
     }
 
     const VFS = await loadSqliteConstants();
-    this.db = await this.sqlite3.open_v2(
-      this.databasePath,
-      VFS.SQLITE_OPEN_CREATE | VFS.SQLITE_OPEN_READWRITE,
-      this.vfs.name
-    );
+    try {
+      this.db = await this.sqlite3.open_v2(
+        this.databasePath,
+        VFS.SQLITE_OPEN_CREATE | VFS.SQLITE_OPEN_READWRITE,
+        this.vfs.name
+      );
 
-    for (const statement of CORE_DDL) {
-      await this.sqlite3.run(this.db, statement);
+      for (const statement of CORE_DDL) {
+        await this.sqlite3.run(this.db, statement);
+      }
+
+      await this.loadStructuralCache();
+    } catch (error) {
+      await this.close();
+      throw error;
     }
-
-    await this.loadStructuralCache();
   }
 
   public async close(): Promise<void> {
     if (this.db) {
       await this.sqlite3.close(this.db);
       this.db = undefined as unknown as number;
+    }
+    if (this.vfs) {
+      await this.vfs.dispose();
     }
     if (this.lockFilePath && fs.existsSync(this.lockFilePath)) {
       try {

@@ -239,7 +239,12 @@
   <div id="overlayInitializing" class="state-overlay">
     <div class="spinner-dot"></div>
     <h2>Initializing…</h2>
-    <p>Scanning files and building the code graph. This may take a moment for large workspaces.</p>
+    <p id="progressMessage">Scanning files and building the code graph. This may take a moment for large workspaces.</p>
+    <div id="progressStats" class="stats" style="margin-top: 12px; display: none;">
+      <div>Nodes<br><strong id="progressNodeCount">0</strong></div>
+      <div>Edges<br><strong id="progressEdgeCount">0</strong></div>
+      <div>Files<br><strong id="progressFileCount">0</strong></div>
+    </div>
   </div>
 
   <!-- ═══ State: Error ═══ -->

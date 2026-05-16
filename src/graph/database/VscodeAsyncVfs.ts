@@ -21,9 +21,11 @@ export interface VscodeAsyncVfs {
   xUnlock(fileId: number, flags: number): number;
   xCheckReservedLock(fileId: number, pResOut: DataView): number;
   xFileControl(fileId: number, op: number, pArg: DataView): number;
+  xSectorSize(fileId: number): number;
   xDeviceCharacteristics(fileId: number): number;
   xDelete(name: string, syncDir: number): number;
   xAccess(name: string, flags: number, pResOut: DataView): number;
+  dispose(): Promise<void>;
 }
 
 export class VscodeAsyncVfsImpl implements VscodeAsyncVfs {
@@ -215,8 +217,21 @@ export class VscodeAsyncVfsImpl implements VscodeAsyncVfs {
     return this.VFS.SQLITE_NOTFOUND;
   }
 
+  public xSectorSize(_fileId: number): number {
+    return 4096;
+  }
+
   public xDeviceCharacteristics(_fileId: number): number {
     return 0;
+  }
+
+  public async dispose(): Promise<void> {
+    const closePromises: Promise<void>[] = [];
+    for (const [fileId, handle] of this.handles.entries()) {
+      closePromises.push(handle.close().catch(() => {}));
+    }
+    this.handles.clear();
+    await Promise.all(closePromises);
   }
 }
 

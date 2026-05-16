@@ -1,20 +1,25 @@
 (function () {
-  const vscode = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : { postMessage() {} };
+  var vscode = typeof acquireVsCodeApi === "function" ? acquireVsCodeApi() : { postMessage: function() {}, setState: function() {}, getState: function() { return null; } };
 
-  let currentState;
+  var currentState;
 
   // ─── Overlay elements ───
-  const overlays = {
+  var overlays = {
     notInitialized: document.getElementById("overlayNotInitialized"),
     trustLocked: document.getElementById("overlayTrustLocked"),
     initializing: document.getElementById("overlayInitializing"),
     error: document.getElementById("overlayError")
   };
-  const readyContent = document.getElementById("readyContent");
-  const errorDetail = document.getElementById("errorDetail");
+  var readyContent = document.getElementById("readyContent");
+  var errorDetail = document.getElementById("errorDetail");
+  var progressMessage = document.getElementById("progressMessage");
+  var progressStats = document.getElementById("progressStats");
+  var progressNodeCount = document.getElementById("progressNodeCount");
+  var progressEdgeCount = document.getElementById("progressEdgeCount");
+  var progressFileCount = document.getElementById("progressFileCount");
 
   // ─── Ready-state elements ───
-  const elements = {
+  var elements = {
     statusDot: document.getElementById("statusDot"),
     statusText: document.getElementById("statusText"),
     nodeCount: document.getElementById("nodeCount"),
@@ -50,11 +55,10 @@
 
   function post(type, payload) {
     if (payload === undefined) {
-      vscode.postMessage({ type });
+      vscode.postMessage({ type: type });
       return;
     }
-
-    vscode.postMessage({ type, payload });
+    vscode.postMessage({ type: type, payload: payload });
   }
 
   function activeFilePayload() {
@@ -63,7 +67,6 @@
 
   // ─── State machine: show/hide overlays ───
   function showView(status, errorMessage) {
-    // Hide everything first.
     overlays.notInitialized.classList.remove("visible");
     overlays.trustLocked.classList.remove("visible");
     overlays.initializing.classList.remove("visible");
@@ -89,6 +92,20 @@
         readyContent.classList.remove("hidden");
         break;
     }
+  }
+
+  function updateProgressUI(payload) {
+    if (progressMessage && payload.progressMessage) {
+      progressMessage.textContent = payload.progressMessage;
+    }
+    // Show live counts during initialization if available.
+    var hasStats = (payload.nodeCount > 0 || payload.edgeCount > 0 || payload.fileCount > 0);
+    if (progressStats) {
+      progressStats.style.display = hasStats ? "grid" : "none";
+    }
+    if (progressNodeCount) progressNodeCount.textContent = String(payload.nodeCount || 0);
+    if (progressEdgeCount) progressEdgeCount.textContent = String(payload.edgeCount || 0);
+    if (progressFileCount) progressFileCount.textContent = String(payload.fileCount || 0);
   }
 
   function setStatus(status) {
@@ -144,10 +161,7 @@
 
   function addPattern() {
     var pattern = elements.excludePatternInput.value.trim();
-    if (!pattern) {
-      return;
-    }
-
+    if (!pattern) return;
     post("add-exclude-pattern", { pattern: pattern });
     elements.excludePatternInput.value = "";
   }
@@ -173,47 +187,42 @@
   elements.exportRawButton.addEventListener("click", function () { post("export-raw", { piiPolicy: elements.exportPiiPolicySelect.value }); });
 
   elements.excludePatternInput.addEventListener("keydown", function (event) {
-    if (event.key === "Enter") {
-      addPattern();
-    }
+    if (event.key === "Enter") addPattern();
   });
 
   elements.hopDepthSelect.addEventListener("change", function () {
     var hopDepth = Number(elements.hopDepthSelect.value);
     setHopDepth(hopDepth);
-    post("update-setting", {
-      section: "codeIngest.graph",
-      key: "hopDepth",
-      value: hopDepth
-    });
+    post("update-setting", { section: "codeIngest.graph", key: "hopDepth", value: hopDepth });
   });
 
   elements.nodeModeButtons.forEach(function (button) {
     button.addEventListener("click", function () {
       var mode = button.dataset.mode || "file";
       setNodeMode(mode);
-      post("update-setting", {
-        section: "codeIngest.graph",
-        key: "defaultNodeMode",
-        value: mode
-      });
+      post("update-setting", { section: "codeIngest.graph", key: "defaultNodeMode", value: mode });
     });
   });
 
   // ─── Message handler ───
   window.addEventListener("message", function (event) {
     var message = event.data || {};
-    if (message.type !== "sidebar-state") {
-      return;
-    }
+    if (message.type !== "sidebar-state") return;
 
     var payload = message.payload || {};
     currentState = payload;
-
     var status = payload.status || "ready";
+
+    // Persist state so the webview can restore on visibility change.
+    vscode.setState(payload);
 
     // Switch between overlay views and ready content.
     showView(status, payload.errorMessage);
+
+    // Update progress UI when initializing.
+    if (status === "initializing") {
+      updateProgressUI(payload);
+    }
 
     // Only update ready-state fields if we're actually showing them.
     if (status === "ready" || status === "indexing" || status === "partial") {
@@ -234,6 +243,16 @@
     }
   });
 
-  // ─── Initial state: show not-initialized by default until a message arrives ───
-  showView("not-initialized");
+  // ─── Restore persisted state on re-mount ───
+  var savedState = vscode.getState();
+  if (savedState && savedState.status) {
+    currentState = savedState;
+    showView(savedState.status, savedState.errorMessage);
+    if (savedState.status === "initializing") {
+      updateProgressUI(savedState);
+    }
+  } else {
+    // Initial state: show not-initialized until a message arrives.
+    showView("not-initialized");
+  }
 })();

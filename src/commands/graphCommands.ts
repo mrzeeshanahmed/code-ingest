@@ -72,11 +72,7 @@ export function registerGraphCommands(context: vscode.ExtensionContext, deps: Gr
     await deps.graphViewPanel.exportPng();
   });
 
-  register("codeIngest.initializeCodebase", async () => {
-    const result = await deps.getGraphIndexer().indexWorkspace();
-    await deps.onIndexed(result);
-    void vscode.window.showInformationMessage(`Codebase initialized: ${result.nodeCount} nodes, ${result.edgeCount} edges.`);
-  });
+
 
   register("codeIngest.synthesizeKnowledge", async (targetPath?: unknown) => {
     const ks = deps.getKnowledgeService();

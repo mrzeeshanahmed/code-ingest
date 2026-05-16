@@ -14,6 +14,8 @@ export interface SidebarState {
   dependencyCount: number;
   dependentCount: number;
   errorMessage?: string | undefined;
+  /** Optional progress message to display during initialization. */
+  progressMessage?: string | undefined;
   settings: Pick<GraphSettings, "hopDepth" | "defaultNodeMode" | "excludePatterns">;
 }
 
@@ -42,6 +44,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       localResourceRoots: [vscode.Uri.joinPath(this.options.extensionUri, "out", "resources", "webview")]
     };
 
+    // Keep the webview alive when it's hidden so it doesn't lose state.
+    webviewView.onDidChangeVisibility(() => {
+      if (webviewView.visible && this.state) {
+        void this.postState();
+      }
+    });
+
     setWebviewHtml(webviewView.webview, this.options.extensionUri, "out/resources/webview/sidebar/sidebar.html", {
       state: this.state
     });
@@ -50,6 +59,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       void this.handleMessage(message);
     });
 
+    // Re-send state when the webview is created or re-created.
     if (this.state) {
       void this.postState();
     }
@@ -57,6 +67,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
   public setState(state: SidebarState): void {
     this.state = state;
+    void this.postState();
+  }
+
+  /** Update only specific fields without replacing the full state. */
+  public patchState(patch: Partial<SidebarState>): void {
+    if (this.state) {
+      this.state = { ...this.state, ...patch };
+    } else {
+      // If no state exists, create a minimal one with the patch.
+      this.state = {
+        status: "not-initialized",
+        nodeCount: 0,
+        edgeCount: 0,
+        fileCount: 0,
+        databaseSizeBytes: 0,
+        dependencyCount: 0,
+        dependentCount: 0,
+        settings: { hopDepth: 2, defaultNodeMode: "file", excludePatterns: [] },
+        ...patch
+      };
+    }
     void this.postState();
   }
 

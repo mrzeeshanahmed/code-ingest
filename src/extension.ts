@@ -160,82 +160,87 @@ async function initializeRoot(
   await graphDatabase.open();
   outputChannel?.appendLine(`[activation] Graph database initialized at ${graphDatabase.databasePath}`);
 
-  const traversal = new GraphTraversal(graphDatabase);
-  const embeddingService = new EmbeddingService(workspaceFolder.uri.fsPath, graphDatabase, outputChannel);
-  const contextBuilder = new ContextBuilder({
-    tokenBudget: graphSettings().tokenBudget,
-    includeSourceContent: graphSettings().includeSourceContent,
-    redactSecrets: graphSettings().redactSecrets,
-    copilotReserveTokensPercent: graphSettings().copilotReserveTokensPercent,
-    copilotReserveTokensMin: graphSettings().copilotReserveTokensMin
-  });
-  const graphIndexer = new GraphIndexer({
-    workspaceRoot: workspaceFolder.uri,
-    extensionUri: context.extensionUri,
-    fileScanner,
-    filterService,
-    graphDatabase,
-    getSettings: graphSettings,
-    ...(outputChannel ? { outputChannel } : {})
-  });
+  try {
+    const traversal = new GraphTraversal(graphDatabase);
+    const embeddingService = new EmbeddingService(workspaceFolder.uri.fsPath, graphDatabase, outputChannel);
+    const contextBuilder = new ContextBuilder({
+      tokenBudget: graphSettings().tokenBudget,
+      includeSourceContent: graphSettings().includeSourceContent,
+      redactSecrets: graphSettings().redactSecrets,
+      copilotReserveTokensPercent: graphSettings().copilotReserveTokensPercent,
+      copilotReserveTokensMin: graphSettings().copilotReserveTokensMin
+    });
+    const graphIndexer = new GraphIndexer({
+      workspaceRoot: workspaceFolder.uri,
+      extensionUri: context.extensionUri,
+      fileScanner,
+      filterService,
+      graphDatabase,
+      getSettings: graphSettings,
+      ...(outputChannel ? { outputChannel } : {})
+    });
 
-  const gitActivityMonitor = new GitActivityMonitor({
-    workspaceRoot: workspaceFolder.uri.fsPath,
-    ...(outputChannel ? { outputChannel } : {}),
-    onActivityStart: () => {
-      outputChannel?.appendLine("[git-monitor] Git activity detected; pausing watchers.");
-    },
-    onActivityEnd: () => {
-      outputChannel?.appendLine("[git-monitor] Git activity ended; resuming watchers.");
+    const gitActivityMonitor = new GitActivityMonitor({
+      workspaceRoot: workspaceFolder.uri.fsPath,
+      ...(outputChannel ? { outputChannel } : {}),
+      onActivityStart: () => {
+        outputChannel?.appendLine("[git-monitor] Git activity detected; pausing watchers.");
+      },
+      onActivityEnd: () => {
+        outputChannel?.appendLine("[git-monitor] Git activity ended; resuming watchers.");
+      }
+    });
+
+    const knowledgeService = new KnowledgeService(graphDatabase, graphDatabase.writerQueue, outputChannel);
+
+    const relativePattern = new vscode.RelativePattern(workspaceFolder, "**/*");
+    const fileWatcher = new FileWatcher({
+      workspaceRoot: workspaceFolder.uri,
+      relativePattern,
+      debounceMs: graphSettings().watcherDebounceMs,
+      ...(outputChannel ? { outputChannel } : {}),
+      isPaused: () => gitActivityMonitor.isGitActive(),
+      onFilesChanged: async (relativePaths) => {
+        const runtime = rootRegistry?.getRuntime(workspaceFolder.uri);
+        if (!runtime) return;
+        await runtime.graphDatabase.writerQueue.waitForQuiescent();
+        const result = await graphIndexer.reindexRelativePaths(relativePaths);
+        outputChannel?.appendLine(`[watcher] Reindexed ${result.indexedFiles} file(s) in ${result.durationMs}ms.`);
+      }
+    });
+
+    const runtime: RootRuntime = {
+      workspaceFolder,
+      graphDatabase,
+      fileWatcher,
+      gitActivityMonitor,
+      graphIndexer,
+      knowledgeService,
+      disposables: [fileWatcher]
+    };
+
+    await rootRegistry?.register(runtime);
+
+    const indexState = graphDatabase.getIndexState();
+    const shouldRebuild = graphSettings().rebuildOnActivation || graphDatabase.needsSchemaUpgrade();
+    const changedFiles = shouldRebuild ? [] : await detectChangedFiles(graphDatabase, workspaceFolder.uri);
+
+    if (shouldRebuild || !indexState) {
+      outputChannel?.appendLine("[activation] Running full rebuild.");
+      const result = await graphIndexer.indexWorkspace();
+      outputChannel?.appendLine(`[activation] Full rebuild complete: ${result.indexedFiles} file(s).`);
+    } else if (changedFiles.length > 0) {
+      outputChannel?.appendLine(`[activation] Detected ${changedFiles.length} changed file(s); running delta re-index.`);
+      await graphIndexer.reindexRelativePaths(changedFiles);
+    } else {
+      outputChannel?.appendLine("[activation] Graph loaded from cache.");
     }
-  });
 
-  const knowledgeService = new KnowledgeService(graphDatabase, graphDatabase.writerQueue, outputChannel);
-
-  const relativePattern = new vscode.RelativePattern(workspaceFolder, "**/*");
-  const fileWatcher = new FileWatcher({
-    workspaceRoot: workspaceFolder.uri,
-    relativePattern,
-    debounceMs: graphSettings().watcherDebounceMs,
-    ...(outputChannel ? { outputChannel } : {}),
-    isPaused: () => gitActivityMonitor.isGitActive(),
-    onFilesChanged: async (relativePaths) => {
-      const runtime = rootRegistry?.getRuntime(workspaceFolder.uri);
-      if (!runtime) return;
-      await runtime.graphDatabase.writerQueue.waitForQuiescent();
-      const result = await graphIndexer.reindexRelativePaths(relativePaths);
-      outputChannel?.appendLine(`[watcher] Reindexed ${result.indexedFiles} file(s) in ${result.durationMs}ms.`);
-    }
-  });
-
-  const runtime: RootRuntime = {
-    workspaceFolder,
-    graphDatabase,
-    fileWatcher,
-    gitActivityMonitor,
-    graphIndexer,
-    knowledgeService,
-    disposables: [fileWatcher]
-  };
-
-  await rootRegistry?.register(runtime);
-
-  const indexState = graphDatabase.getIndexState();
-  const shouldRebuild = graphSettings().rebuildOnActivation || graphDatabase.needsSchemaUpgrade();
-  const changedFiles = shouldRebuild ? [] : await detectChangedFiles(graphDatabase, workspaceFolder.uri);
-
-  if (shouldRebuild || !indexState) {
-    outputChannel?.appendLine("[activation] Running full rebuild.");
-    const result = await graphIndexer.indexWorkspace();
-    outputChannel?.appendLine(`[activation] Full rebuild complete: ${result.indexedFiles} file(s).`);
-  } else if (changedFiles.length > 0) {
-    outputChannel?.appendLine(`[activation] Detected ${changedFiles.length} changed file(s); running delta re-index.`);
-    await graphIndexer.reindexRelativePaths(changedFiles);
-  } else {
-    outputChannel?.appendLine("[activation] Graph loaded from cache.");
+    return runtime;
+  } catch (error) {
+    await graphDatabase.dispose();
+    throw error;
   }
-
-  return runtime;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -444,6 +449,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Set sidebar to "initializing" before work begins.
     sidebarProvider.setState({
       status: "initializing",
+      progressMessage: "Preparing workspace…",
       nodeCount: 0,
       edgeCount: 0,
       fileCount: 0,
@@ -458,25 +464,40 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     });
 
     let anyRootInitialized = false;
+    const totalFolders = workspaceFolders.length;
+    const folderErrors: string[] = [];
+
     try {
-      await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: "Code-Ingest: Initializing workspace graph...",
-          cancellable: false
-        },
-        async (progress) => {
-          for (const folder of workspaceFolders) {
-            progress.report({ message: `Indexing ${folder.name}...` });
-            try {
-              await initializeRoot(context, folder);
-              anyRootInitialized = true;
-            } catch (error) {
-              outputChannel?.appendLine(`[activation] Failed to initialize root ${folder.uri.fsPath}: ${(error as Error).message}`);
-            }
-          }
+      for (let i = 0; i < totalFolders; i++) {
+        const folder = workspaceFolders[i];
+        const folderLabel = totalFolders > 1
+          ? `Indexing ${folder.name} (${i + 1}/${totalFolders})…`
+          : `Indexing ${folder.name}…`;
+
+        sidebarProvider.patchState({
+          progressMessage: folderLabel
+        });
+
+        outputChannel?.appendLine(`[activation] Initializing root: ${folder.uri.fsPath}`);
+
+        try {
+          const runtime = await initializeRoot(context, folder);
+          anyRootInitialized = true;
+
+          // Post live stats after each root completes.
+          const stats = runtime.graphDatabase.getStats();
+          sidebarProvider.patchState({
+            progressMessage: `${folderLabel} done — ${stats.nodeCount} nodes, ${stats.edgeCount} edges`,
+            nodeCount: stats.nodeCount,
+            edgeCount: stats.edgeCount,
+            fileCount: stats.fileCount
+          });
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          outputChannel?.appendLine(`[activation] Failed to initialize root ${folder.uri.fsPath}: ${msg}`);
+          folderErrors.push(`${folder.name}: ${msg}`);
         }
-      );
+      }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       outputChannel?.appendLine(`[activation] Initialization failed: ${errorMessage}`);
@@ -498,10 +519,32 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return;
     }
 
-    if (anyRootInitialized && !hasInitialized) {
+    if (!anyRootInitialized) {
+      const detail = folderErrors.length > 0
+        ? folderErrors.join("\n")
+        : "Unknown error. Check the Output panel (Code-Ingest) for details.";
+      sidebarProvider.setState({
+        status: "error",
+        errorMessage: detail,
+        nodeCount: 0,
+        edgeCount: 0,
+        fileCount: 0,
+        databaseSizeBytes: 0,
+        dependencyCount: 0,
+        dependentCount: 0,
+        settings: {
+          hopDepth: GRAPH_DEFAULTS.hopDepth,
+          defaultNodeMode: GRAPH_DEFAULTS.defaultNodeMode,
+          excludePatterns: GRAPH_DEFAULTS.excludePatterns
+        }
+      });
+      return;
+    }
+
+    if (!hasInitialized) {
       await context.globalState.update("code-ingest.hasInitialized", true);
     }
-    
+
     await updateSidebar();
   };
 
