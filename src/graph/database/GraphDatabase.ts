@@ -11,8 +11,12 @@ import { PendingWriteBatch, SingleWriterQueue, WriteExecutor } from "./SingleWri
 import { createVscodeAsyncVfs, VscodeAsyncVfs } from "./VscodeAsyncVfs";
 import { loadSqliteConstants, loadWaSqliteAsyncModule, loadWaSqliteFactory, SQLiteAPI } from "./waSqliteLoader";
 
+let _sqlitePromise: Promise<SQLiteAPI> | null = null;
 async function getSqlite3(): Promise<SQLiteAPI> {
-  return initializeSqlite3();
+  if (!_sqlitePromise) {
+    _sqlitePromise = initializeSqlite3();
+  }
+  return _sqlitePromise;
 }
 
 async function initializeSqlite3(): Promise<SQLiteAPI> {
@@ -101,6 +105,43 @@ function mapEdge(row: Array<unknown>): GraphEdge {
   return edge;
 }
 
+class LRUCache<K, V> {
+  private cache = new Map<K, V>();
+  constructor(private capacity: number) {}
+  get(key: K): V | undefined {
+    if (!this.cache.has(key)) return undefined;
+    const value = this.cache.get(key)!;
+    this.cache.delete(key);
+    this.cache.set(key, value);
+    return value;
+  }
+  set(key: K, value: V): void {
+    this.cache.delete(key);
+    this.cache.set(key, value);
+    if (this.cache.size > this.capacity) {
+      const firstKey = this.cache.keys().next().value;
+      if (firstKey !== undefined) {
+        this.cache.delete(firstKey);
+      }
+    }
+  }
+  delete(key: K): void {
+    this.cache.delete(key);
+  }
+  clear(): void {
+    this.cache.clear();
+  }
+  values(): IterableIterator<V> {
+    return this.cache.values();
+  }
+  get size(): number {
+    return this.cache.size;
+  }
+  [Symbol.iterator]() {
+    return this.cache[Symbol.iterator]();
+  }
+}
+
 export class GraphDatabase {
   public readonly workspaceHash: string;
   public readonly databasePath: string;
@@ -111,8 +152,9 @@ export class GraphDatabase {
   private vfs!: VscodeAsyncVfs;
   public readonly writerQueue: SingleWriterQueue;
 
-  private nodes = new Map<string, GraphNode>();
-  private edges = new Map<string, GraphEdge>();
+  private nodes = new LRUCache<string, GraphNode>(50000);
+  private edges = new LRUCache<string, GraphEdge>(100000);
+  private nodesByRelativePath = new Map<string, GraphNode[]>();
   private indexState: IndexStateRecord | undefined;
 
   constructor(private readonly workspaceRoot: string, options: GraphDatabaseOptions = {}) {
@@ -179,8 +221,19 @@ export class GraphDatabase {
         this.vfs.name
       );
 
-      for (const statement of CORE_DDL) {
-        await this.sqlite3.run(this.db, statement);
+      let currentVersion = 0;
+      try {
+        const result = await this.sqlite3.execWithParams(this.db, "SELECT schema_version FROM index_state LIMIT 1");
+        if (result.rows.length > 0) currentVersion = Number(result.rows[0][0]);
+      } catch {
+        // Table might not exist yet
+      }
+
+      if (currentVersion !== GRAPH_SCHEMA_VERSION) {
+        this.outputChannel?.appendLine(`[GraphDatabase] Schema version mismatch or uninitialized (current: ${currentVersion}, target: ${GRAPH_SCHEMA_VERSION}). Initializing schema...`);
+        for (const statement of CORE_DDL) {
+          await this.sqlite3.run(this.db, statement);
+        }
       }
 
       await this.loadStructuralCache();
@@ -272,6 +325,7 @@ export class GraphDatabase {
 
     this.nodes.clear();
     this.edges.clear();
+    this.nodesByRelativePath.clear();
     this.indexState = undefined;
   }
 
@@ -316,18 +370,18 @@ export class GraphDatabase {
   }
 
   public getNodeByRelativePath(relativePath: string, type: NodeType = "file"): GraphNode | undefined {
-    for (const node of this.nodes.values()) {
-      if (node.relativePath === relativePath && node.type === type) {
-        return node;
+    const list = this.nodesByRelativePath.get(relativePath);
+    if (list) {
+      for (const node of list) {
+        if (node.type === type) return node;
       }
     }
     return undefined;
   }
 
   public getNodesByRelativePath(relativePath: string): GraphNode[] {
-    return Array.from(this.nodes.values())
-      .filter((node) => node.relativePath === relativePath)
-      .sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0));
+    const list = this.nodesByRelativePath.get(relativePath) || [];
+    return [...list].sort((a, b) => (a.startLine ?? 0) - (b.startLine ?? 0));
   }
 
   public getAllNodes(nodeMode: "file" | "function" = "file"): GraphNode[] {
@@ -550,6 +604,65 @@ export class GraphDatabase {
         ]);
       }
 
+      for (const term of batch.termUpserts ?? []) {
+        await this.sqlite3.run(this.db, `
+          INSERT INTO terms (id, term, frequency) VALUES (?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET frequency = excluded.frequency
+        `, [term.id, term.term, term.frequency]);
+      }
+
+      for (const link of batch.termLinkUpserts ?? []) {
+        await this.sqlite3.run(this.db, `
+          INSERT INTO term_links (term_id, node_id) VALUES (?, ?)
+          ON CONFLICT(term_id, node_id) DO NOTHING
+        `, [link.term_id, link.node_id]);
+      }
+
+      for (const ds of batch.directoryStateUpserts ?? []) {
+        await this.sqlite3.run(this.db, `
+          INSERT INTO directory_state (relative_path, parent_relative_path, merkle_hash, child_count, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+          ON CONFLICT(relative_path) DO UPDATE SET
+            parent_relative_path = excluded.parent_relative_path,
+            merkle_hash = excluded.merkle_hash,
+            child_count = excluded.child_count,
+            updated_at = excluded.updated_at
+        `, [ds.relative_path, ds.parent_relative_path ?? null, ds.merkle_hash, ds.child_count, ds.updated_at]);
+      }
+
+      for (const em of batch.embeddingMetadataUpserts ?? []) {
+        await this.sqlite3.run(this.db, `
+          INSERT INTO embedding_document_metadata (id, kind, source_table, source_id, content_hash, artifact_key, last_embedded)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            content_hash = excluded.content_hash,
+            artifact_key = excluded.artifact_key,
+            last_embedded = excluded.last_embedded
+        `, [em.id, em.kind, em.source_table, em.source_id, em.content_hash, em.artifact_key, em.last_embedded]);
+      }
+
+      for (const art of batch.artifactStateUpserts ?? []) {
+        await this.sqlite3.run(this.db, `
+          INSERT INTO artifact_state (artifact_key, kind, backend, artifact_path, doc_count, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(artifact_key) DO UPDATE SET
+            doc_count = excluded.doc_count,
+            updated_at = excluded.updated_at
+        `, [art.artifact_key, art.kind, art.backend, art.artifact_path, art.doc_count, art.updated_at]);
+      }
+
+      for (const ms of batch.moduleSummaryUpserts ?? []) {
+        await this.sqlite3.run(this.db, `
+          INSERT INTO module_summaries (id, module_path, summary, file_count, source_merkle_root, created_at, stale)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            summary = excluded.summary,
+            file_count = excluded.file_count,
+            source_merkle_root = excluded.source_merkle_root,
+            stale = excluded.stale
+        `, [ms.id, ms.module_path, ms.summary, ms.file_count, ms.source_merkle_root, ms.created_at, ms.stale ? 1 : 0]);
+      }
+
       const VALID_DELETE_TABLES = new Set([
         "nodes", "edges", "code_chunks", "comment_chunks", "knowledge_chunks",
         "knowledge_links", "terms", "term_links", "module_summaries",
@@ -579,6 +692,17 @@ export class GraphDatabase {
     // Update in-memory cache after successful commit.
     for (const node of batch.nodeUpserts) {
       this.nodes.set(node.id, node);
+      let list = this.nodesByRelativePath.get(node.relativePath);
+      if (!list) {
+        list = [];
+        this.nodesByRelativePath.set(node.relativePath, list);
+      }
+      const existingIdx = list.findIndex(n => n.id === node.id);
+      if (existingIdx !== -1) {
+        list[existingIdx] = node;
+      } else {
+        list.push(node);
+      }
     }
     for (const edge of batch.edgeUpserts) {
       this.edges.set(edge.id, edge);
@@ -586,11 +710,22 @@ export class GraphDatabase {
     for (const del of batch.deletes) {
       if (del.ids) {
         for (const id of del.ids) {
-          if (del.table === "nodes") this.nodes.delete(id);
+          if (del.table === "nodes") {
+            const node = this.nodes.get(id);
+            if (node) {
+              const list = this.nodesByRelativePath.get(node.relativePath);
+              if (list) {
+                const idx = list.findIndex(n => n.id === id);
+                if (idx !== -1) list.splice(idx, 1);
+              }
+            }
+            this.nodes.delete(id);
+          }
           if (del.table === "edges") this.edges.delete(id);
         }
       }
       if (del.filePath && del.table === "nodes") {
+        this.nodesByRelativePath.delete(del.filePath);
         const idsToDelete: string[] = [];
         for (const [id, node] of this.nodes) {
           if (node.relativePath === del.filePath) {
@@ -614,6 +749,12 @@ export class GraphDatabase {
     for (const row of nodeResult.rows) {
       const node = mapNode(row);
       this.nodes.set(node.id, node);
+      let list = this.nodesByRelativePath.get(node.relativePath);
+      if (!list) {
+        list = [];
+        this.nodesByRelativePath.set(node.relativePath, list);
+      }
+      list.push(node);
     }
 
     const edgeResult = await this.sqlite3.execWithParams(this.db, "SELECT * FROM edges");

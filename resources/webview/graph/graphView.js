@@ -66,8 +66,27 @@
     ramEstimateMb: 0,
     focusOpacity: 0.15,
     maxNodes: 500,
-    lastIndexed: undefined
+    lastIndexed: undefined,
+    lastZoomMode: "close"
   };
+
+  const emptyStateContainer = document.getElementById("emptyStateContainer");
+  const emptyStateIcon = document.getElementById("emptyStateIcon");
+  const emptyStateTitle = document.getElementById("emptyStateTitle");
+  const emptyStateDesc = document.getElementById("emptyStateDesc");
+
+  function showEmptyState(icon, title, desc) {
+    emptyStateContainer.style.display = "flex";
+    emptyStateIcon.textContent = icon;
+    emptyStateTitle.textContent = title;
+    emptyStateDesc.textContent = desc;
+    document.getElementById("cy").style.display = "none";
+  }
+
+  function hideEmptyState() {
+    emptyStateContainer.style.display = "none";
+    document.getElementById("cy").style.display = "block";
+  }
 
   loadFullGraphButton.addEventListener("click", () => {
     vscode.postMessage({ type: "load-full-graph" });
@@ -362,6 +381,31 @@
       }
     });
 
+    state.cy.on("zoom", () => {
+      const zoom = state.cy.zoom();
+      let mode = "close";
+      if (zoom < 0.3) mode = "far";
+      else if (zoom < 0.8) mode = "medium";
+      
+      if (state.lastZoomMode !== mode) {
+        state.lastZoomMode = mode;
+        const nodes = state.cy.nodes();
+        const edges = state.cy.edges();
+        if (mode === "far") {
+          nodes.addClass("zoom-far");
+          nodes.removeClass("zoom-medium");
+          edges.addClass("zoom-far");
+        } else if (mode === "medium") {
+          nodes.addClass("zoom-medium");
+          nodes.removeClass("zoom-far");
+          edges.removeClass("zoom-far");
+        } else {
+          nodes.removeClass("zoom-far zoom-medium");
+          edges.removeClass("zoom-far");
+        }
+      }
+    });
+
     applySearch();
     runLayout();
   }
@@ -402,6 +446,17 @@
   window.addEventListener("message", (event) => {
     const message = event.data || {};
     if (message.type === "load-graph") {
+      if (message.payload.status && message.payload.status !== "ready" && message.payload.status !== "partial") {
+        if (message.payload.status === "trust-locked") return showEmptyState("🔒", "Workspace Not Trusted", "Graph features are disabled in untrusted workspaces.");
+        if (message.payload.status === "not-initialized") return showEmptyState("🔬", "Not Initialized", "Initialize the codebase from the Code-Ingest sidebar to view the graph.");
+        if (message.payload.status === "initializing") return showEmptyState("⏳", "Indexing in Progress", "The graph is being built. Please wait...");
+        if (message.payload.status === "error") return showEmptyState("⚠️", "Graph Error", "Failed to load graph data.");
+      }
+      if (!message.payload.nodes || message.payload.nodes.length === 0) {
+        return showEmptyState("📭", "Empty Graph", "No nodes matched the current filters or the graph is empty.");
+      }
+      hideEmptyState();
+
       state.graph = message.payload;
       state.focusFile = message.payload.focusFile;
       state.layout = message.payload.layout || state.layout;

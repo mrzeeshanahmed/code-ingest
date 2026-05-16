@@ -200,7 +200,7 @@ Each trusted workspace root stores its data in:
 - `.vscode/code-ingest/graph.db.lock`
 - `.vscode/code-ingest/semantic-index/`
 
-The SQLite file is managed by a WASM runtime and a Node-backed random-access VFS. It is the source of truth for graph topology, chunks, metadata, and cache state. The HNSW sidecar is the source of truth for fast vector retrieval. To prevent database corruption across multiple VS Code window instances, access is strictly serialized using an exclusive file lock (`graph.db.lock`).
+The SQLite file is managed by a WASM runtime and a Node-backed random-access VFS. It is the source of truth for graph topology, chunks, metadata, and cache state. The HNSW sidecar is the source of truth for fast vector retrieval. To prevent database corruption across multiple VS Code window instances, access is strictly serialized using an exclusive file lock (`graph.db.lock`). The system must implement a tiered memory-bounded LRU cache (for frequently-accessed nodes and edges) with a configurable capacity cap tied to `codeIngest.indexing.maxFiles` to prevent unbounded heap growth on large repositories.
 
 The reference v1 storage runtime is an Asyncify-enabled `wa-sqlite` build. However, the SQLite pager for `.vscode/code-ingest/graph.db` MUST NOT use `vscode.workspace.fs` for page reads or writes because `workspace.fs` lacks offset-based partial-write semantics. A design that buffers the entire database and rewrites it on every transaction is out of spec.
 
@@ -377,12 +377,12 @@ Removed workspace roots must not leave behind locked DB files, orphaned workers,
 #### Queue Guarantees
 
 - Full rebuilds, delta updates, and watcher batches are serialized.
-- The queue batches writes in short windows with explicit thresholds: a time window of roughly `5-20ms` and a maximum operations-per-flush cap.
+- The queue batches writes in short windows with explicit thresholds: a time window of roughly `5-20ms` and a maximum operations-per-flush cap (e.g. enforced via `MAX_BATCH_SIZE`).
 - While a write is active, later requests are coalesced by `filePath` and prioritized as `HIGH` (active file), `MEDIUM` (recent changes), and `LOW` (background rebuild).
 - The queue applies bounded backpressure and cancellation. Superseded low-priority deltas may be merged, but active-file work must not be starved.
 - Flushes occur inside one SQLite transaction per batch.
 - No queue path may commit `last_full_index` for partial work.
-- `GraphDatabase` public writes are exclusive to `SingleWriterQueue.executeWriteBatch(...)`; other callers get read-only APIs.
+- `GraphDatabase` public writes are exclusive to `SingleWriterQueue.executeWriteBatch(...)`; other callers get read-only APIs backed by the memory-bounded LRU cache and secondary memory indexes (e.g., `nodesByRelativePath`) to eliminate O(n) linear scans.
 - The queue MUST await Asyncify VFS drain after each write batch before accepting the next write batch.
 - VFS drain waits are bounded by `VFS_DRAIN_TIMEOUT_MS` with a default of `5000`; if the timeout wins, the root runtime emits an Output Channel warning and enters a degraded-but-not-disposed state.
 - During a full rebuild, watcher deltas are held in a pending set until rebuild completion and diffed before enqueue.

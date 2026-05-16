@@ -44,9 +44,13 @@
     openSettingsButton: document.getElementById("openSettingsButton"),
     addPatternButton: document.getElementById("addPatternButton"),
     exportPiiPolicySelect: document.getElementById("exportPiiPolicySelect"),
-    exportCleanButton: document.getElementById("exportCleanButton"),
-    exportGraphButton: document.getElementById("exportGraphButton"),
-    exportRawButton: document.getElementById("exportRawButton")
+    exportFormatSelect: document.getElementById("exportFormatSelect"),
+    exportPreviewButton: document.getElementById("exportPreviewButton"),
+    exportExecuteButton: document.getElementById("exportExecuteButton"),
+    exportSizeEstimate: document.getElementById("exportSizeEstimate"),
+    exportTokenEstimate: document.getElementById("exportTokenEstimate"),
+    contextBudgetBar: document.getElementById("contextBudgetBar"),
+    contextBudgetLabel: document.getElementById("contextBudgetLabel")
   };
 
   // ─── Overlay buttons ───
@@ -182,9 +186,13 @@
   elements.editIgnoreButton.addEventListener("click", function () { post("edit-ignore"); });
   elements.openSettingsButton.addEventListener("click", function () { post("open-settings"); });
   elements.addPatternButton.addEventListener("click", addPattern);
-  elements.exportCleanButton.addEventListener("click", function () { post("export-clean", { piiPolicy: elements.exportPiiPolicySelect.value }); });
-  elements.exportGraphButton.addEventListener("click", function () { post("export-graph", { piiPolicy: elements.exportPiiPolicySelect.value }); });
-  elements.exportRawButton.addEventListener("click", function () { post("export-raw", { piiPolicy: elements.exportPiiPolicySelect.value }); });
+  elements.exportPreviewButton.addEventListener("click", function () { 
+    elements.exportPreviewButton.textContent = "Estimating...";
+    post("export-preview", { piiPolicy: elements.exportPiiPolicySelect.value, format: elements.exportFormatSelect.value }); 
+  });
+  elements.exportExecuteButton.addEventListener("click", function () { 
+    post("export-execute", { piiPolicy: elements.exportPiiPolicySelect.value, format: elements.exportFormatSelect.value }); 
+  });
 
   elements.excludePatternInput.addEventListener("keydown", function (event) {
     if (event.key === "Enter") addPattern();
@@ -240,6 +248,22 @@
       setHopDepth(settings.hopDepth || 2);
       setNodeMode(settings.defaultNodeMode || "file");
       renderPatterns(settings.excludePatterns || []);
+
+      if (payload.contextBudget) {
+        var pct = Math.min(100, Math.max(0, (payload.contextBudget.used / payload.contextBudget.total) * 100));
+        elements.contextBudgetBar.style.width = pct + "%";
+        elements.contextBudgetBar.style.background = pct > 90 ? "var(--vscode-testing-iconFailed)" : pct > 75 ? "var(--vscode-testing-iconQueued)" : "var(--vscode-testing-iconPassed)";
+        elements.contextBudgetLabel.textContent = payload.contextBudget.used + " / " + payload.contextBudget.total + " tokens";
+      }
+
+      if (payload.exportPreviewResult) {
+        elements.exportPreviewButton.textContent = "Preview Export";
+        elements.exportSizeEstimate.textContent = Math.round(payload.exportPreviewResult.sizeBytes / 1024) + " KB";
+        elements.exportTokenEstimate.textContent = payload.exportPreviewResult.tokens || "N/A";
+        elements.exportExecuteButton.disabled = false;
+        elements.exportExecuteButton.classList.remove("secondary");
+        elements.exportExecuteButton.classList.add("primary");
+      }
     }
   });
 

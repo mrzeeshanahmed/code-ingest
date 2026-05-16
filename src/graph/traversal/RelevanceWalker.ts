@@ -7,6 +7,7 @@ export interface RelevanceWalkOptions {
   maxDepth: number;
   maxNodes: number;
   direction?: "both" | "incoming" | "outgoing";
+  abortSignal?: AbortSignal;
 }
 
 export interface RelevanceWalkResult {
@@ -20,69 +21,99 @@ export class RelevanceWalker {
   constructor(private readonly graphDatabase: GraphDatabase) {}
 
   public walk(options: RelevanceWalkOptions): RelevanceWalkResult {
-    const { startNodeIds, maxDepth, maxNodes, direction = "both" } = options;
-    const scores = new Map<string, number>();
-    const visited = new Set<string>();
+    const { startNodeIds, maxDepth, maxNodes, direction = "both", abortSignal } = options;
     const nodes = new Map<string, GraphNode>();
     const edges = new Map<string, GraphEdge>();
 
-    // Initialize scores for start nodes.
+    // 1. Gather Subgraph (BFS up to maxDepth)
+    let frontier = new Set<string>(startNodeIds);
     for (const id of startNodeIds) {
-      scores.set(id, 1.0);
       const node = this.graphDatabase.getNodeById(id);
-      if (node) {
-        nodes.set(id, node);
-      }
+      if (node) nodes.set(id, node);
     }
 
-    let frontier = new Map<string, number>();
-    for (const id of startNodeIds) {
-      frontier.set(id, scores.get(id)!);
-    }
+    for (let depth = 0; depth < maxDepth && frontier.size > 0 && nodes.size < maxNodes; depth++) {
+      if (abortSignal?.aborted) break;
 
-    for (let depth = 0; depth < maxDepth && frontier.size > 0 && nodes.size < maxNodes; depth += 1) {
-      const nextFrontier = new Map<string, number>();
-      const currentIds = Array.from(frontier.keys());
+      const currentIds = Array.from(frontier);
       const batch = this.graphDatabase.getNeighbors(currentIds, direction);
-
+      
+      const nextFrontier = new Set<string>();
       for (const node of batch.nodes) {
-        if (!nodes.has(node.id)) {
+        if (!nodes.has(node.id) && nodes.size < maxNodes) {
           nodes.set(node.id, node);
+          nextFrontier.add(node.id);
         }
       }
-
       for (const edge of batch.edges) {
         edges.set(edge.id, edge);
-        const weight = edge.weight ?? 1.0;
-        const sourceScore = frontier.get(edge.sourceId) ?? scores.get(edge.sourceId) ?? 0;
-        const targetScore = frontier.get(edge.targetId) ?? scores.get(edge.targetId) ?? 0;
-
-        // Compute scores for both directions based on the walk direction.
-        const pairs: Array<{ neighborId: string; score: number }> = [];
-        // Outgoing: walk from source to target, carrying sourceScore.
-        if (direction !== "incoming" && sourceScore > 0) {
-          pairs.push({ neighborId: edge.targetId, score: sourceScore * weight });
-        }
-        // Incoming: walk from target to source, carrying targetScore.
-        if (direction !== "outgoing" && targetScore > 0) {
-          pairs.push({ neighborId: edge.sourceId, score: targetScore * weight });
-        }
-
-        for (const { neighborId, score } of pairs) {
-          const current = scores.get(neighborId) ?? 0;
-          const updated = Math.max(current, score);
-          scores.set(neighborId, updated);
-
-          if (!visited.has(neighborId) && nodes.size < maxNodes) {
-            nextFrontier.set(neighborId, updated);
-          }
-        }
-      }
-
-      for (const id of currentIds) {
-        visited.add(id);
       }
       frontier = nextFrontier;
+    }
+
+    const validEdges = Array.from(edges.values()).filter(
+      (e) => nodes.has(e.sourceId) && nodes.has(e.targetId)
+    );
+
+    // 2. Personalized PageRank
+    const DAMPING = 0.85;
+    const RESTART = 1 - DAMPING;
+    const MAX_ITERATIONS = 50;
+    const CONVERGENCE_TOLERANCE = 1e-4;
+
+    let scores = new Map<string, number>();
+    for (const id of nodes.keys()) {
+      scores.set(id, startNodeIds.includes(id) ? 1.0 / startNodeIds.length : 0);
+    }
+
+    // Precompute degree for super-node penalty
+    const outDegree = new Map<string, number>();
+    const inDegree = new Map<string, number>();
+    for (const e of validEdges) {
+      outDegree.set(e.sourceId, (outDegree.get(e.sourceId) || 0) + 1);
+      inDegree.set(e.targetId, (inDegree.get(e.targetId) || 0) + 1);
+    }
+
+    for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+      if (abortSignal?.aborted) break;
+
+      const nextScores = new Map<string, number>();
+      let diff = 0;
+
+      for (const id of nodes.keys()) {
+        const restartProb = startNodeIds.includes(id) ? RESTART / startNodeIds.length : 0;
+        nextScores.set(id, restartProb);
+      }
+
+      for (const edge of validEdges) {
+        const src = edge.sourceId;
+        const tgt = edge.targetId;
+        const weight = edge.weight ?? 1.0;
+
+        if (direction !== "incoming") {
+          const srcOut = outDegree.get(src) || 1;
+          const srcScore = scores.get(src) || 0;
+          // Super-node penalty: distribute score by out-degree
+          const contribution = (srcScore / srcOut) * weight;
+          nextScores.set(tgt, (nextScores.get(tgt) || 0) + DAMPING * contribution);
+        }
+
+        if (direction !== "outgoing") {
+          const tgtOut = inDegree.get(tgt) || 1;
+          const tgtScore = scores.get(tgt) || 0;
+          const reverseContrib = (tgtScore / tgtOut) * weight;
+          nextScores.set(src, (nextScores.get(src) || 0) + DAMPING * reverseContrib);
+        }
+      }
+
+      for (const id of nodes.keys()) {
+        diff += Math.abs((nextScores.get(id) || 0) - (scores.get(id) || 0));
+      }
+
+      scores = nextScores;
+      if (diff < CONVERGENCE_TOLERANCE) {
+        break;
+      }
     }
 
     const orderedNodeIds = Array.from(nodes.keys()).sort((left, right) => {
@@ -96,7 +127,7 @@ export class RelevanceWalker {
 
     return {
       nodes: Array.from(nodes.values()),
-      edges: Array.from(edges.values()),
+      edges: validEdges,
       orderedNodeIds,
       scores
     };

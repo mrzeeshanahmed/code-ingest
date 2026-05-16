@@ -140,11 +140,11 @@ export class ContextBuilder {
 
     let payload = [structuralPayload, ...fileContentSections, "=== END GRAPH CONTEXT ==="].join("\n");
 
-    // Batched token verification: one model-scoped countTokens() call for the whole payload.
     let finalTokenEstimate = fastEstimate;
     if (this.languageModel) {
       try {
-        finalTokenEstimate = await this.tokenBudgetService.countTokens(payload, this.languageModel);
+        const count = await this.tokenBudgetService.countTokens(payload, this.languageModel);
+        if (count !== null) finalTokenEstimate = count;
       } catch {
         // Keep fast local estimate if model counting fails.
       }
@@ -164,7 +164,8 @@ export class ContextBuilder {
       }
       payload = [structuralPayload, ...fileContentSections, "=== END GRAPH CONTEXT ==="].join("\n");
       try {
-        finalTokenEstimate = await this.tokenBudgetService.countTokens(payload, this.languageModel!);
+        const count = await this.tokenBudgetService.countTokens(payload, this.languageModel!);
+        if (count !== null) finalTokenEstimate = count;
       } catch {
         break;
       }

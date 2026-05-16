@@ -319,7 +319,11 @@
         "codeIngest.pii.mode": {
           "type": "string",
           "default": "mask",
-          "enum": ["strict", "mask", "allow"],
+          "enum": [
+            "strict",
+            "mask",
+            "allow"
+          ],
           "description": "PII handling mode for storage and export."
         },
         "codeIngest.pii.strictForExport": {
@@ -343,7 +347,9 @@
         "codeIngest.knowledge.mode": {
           "type": "string",
           "default": "jit",
-          "enum": ["jit"],
+          "enum": [
+            "jit"
+          ],
           "description": "Knowledge synthesis mode (jit only in v1)."
         },
         "codeIngest.knowledge.cooldownMs": {
@@ -355,7 +361,11 @@
         "codeIngest.knowledge.softPrefetchMode": {
           "type": "string",
           "default": "active-file",
-          "enum": ["off", "active-file", "active-module"],
+          "enum": [
+            "off",
+            "active-file",
+            "active-module"
+          ],
           "description": "Scope for soft prefetch of knowledge during idle windows."
         },
         "codeIngest.knowledge.maxConcurrentSyntheses": {
@@ -436,8 +446,6 @@
   },
   "devDependencies": {
     "@babel/core": "^7.28.4",
-    "better-sqlite3": "^12.9.0",
-    "sqlite-vec": "^0.1.9",
     "@babel/preset-env": "^7.28.3",
     "@types/jest": "^29.5.14",
     "@types/jsdom": "^21.1.7",
@@ -448,6 +456,7 @@
     "@vscode/test-cli": "^0.0.11",
     "@vscode/test-electron": "^2.5.2",
     "babel-jest": "^29.7.0",
+    "better-sqlite3": "^12.9.0",
     "copy-webpack-plugin": "^11.0.0",
     "cytoscape": "^3.33.2",
     "cytoscape-cose-bilkent": "^4.1.0",
@@ -457,6 +466,7 @@
     "jest-environment-jsdom": "^29.7.0",
     "jsdom": "^24.1.1",
     "rimraf": "^5.0.5",
+    "sqlite-vec": "^0.1.9",
     "ts-jest": "^29.4.1",
     "ts-loader": "^9.5.1",
     "typescript": "^5.6.3",

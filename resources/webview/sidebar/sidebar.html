@@ -283,6 +283,14 @@
     </section>
 
     <section class="panel">
+      <h3>Context Budget</h3>
+      <div style="background: var(--vscode-input-background); border-radius: 99px; height: 8px; margin-bottom: 6px; overflow: hidden;">
+        <div id="contextBudgetBar" style="background: var(--vscode-testing-iconPassed); width: 0%; height: 100%; transition: width 0.3s ease;"></div>
+      </div>
+      <div class="muted" style="text-align: center; font-size: 11px;" id="contextBudgetLabel">Loading estimate...</div>
+    </section>
+
+    <section class="panel">
       <h3>Exclusion Patterns</h3>
       <div id="excludePatterns" class="pill-list"></div>
       <div class="pattern-editor">
@@ -303,9 +311,20 @@
             <option value="allow">Allow</option>
           </select>
         </div>
-        <button id="exportCleanButton">Clean Export (PII Compliant)</button>
-        <button id="exportGraphButton" class="secondary">Graph Export</button>
-        <button id="exportRawButton" class="secondary">Raw Export (Legacy)</button>
+        <div class="field-row">
+          <label for="exportFormatSelect">Format</label>
+          <select id="exportFormatSelect">
+            <option value="clean">Clean (PII Compliant)</option>
+            <option value="graph">Graph (Context Aware)</option>
+            <option value="raw">Raw (Legacy)</option>
+          </select>
+        </div>
+        <div class="stats" style="margin-top: 4px;">
+          <div>Size<br><strong id="exportSizeEstimate">--</strong></div>
+          <div>Tokens<br><strong id="exportTokenEstimate">--</strong></div>
+        </div>
+        <button id="exportPreviewButton">Preview Export</button>
+        <button id="exportExecuteButton" class="secondary" disabled>Execute Export</button>
       </div>
     </section>
 

@@ -15,7 +15,7 @@ export async function loadWaSqliteAsyncModule(): Promise<any> {
   return async () => {
     const require = createRequire(__filename);
     const wasmPath = require.resolve("wa-sqlite/dist/wa-sqlite-async.wasm");
-    const wasmBinary = fs.readFileSync(wasmPath);
+    const wasmBinary = await fs.promises.readFile(wasmPath);
     return SQLiteAsyncESMFactory({ wasmBinary });
   };
 }

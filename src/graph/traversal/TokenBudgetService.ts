@@ -30,7 +30,7 @@ export class TokenBudgetService {
     return this.effectiveBudget;
   }
 
-  public async countTokens(text: string, model?: vscode.LanguageModelChat): Promise<number> {
+  public async countTokens(text: string, model?: vscode.LanguageModelChat): Promise<number | null> {
     if (!text.trim()) {
       return 0;
     }
@@ -38,15 +38,13 @@ export class TokenBudgetService {
       try {
         return await model.countTokens(text);
       } catch {
-        // Fallback to heuristic if LM counting fails.
+        return null;
       }
     }
-    // Heuristic fallback: ~1.3 tokens per word.
-    const words = text.split(/\s+/u).filter(Boolean).length;
-    return Math.max(1, Math.ceil(words * 1.3));
+    return null;
   }
 
-  public async batchCountTokens(items: string[], model?: vscode.LanguageModelChat): Promise<number[]> {
+  public async batchCountTokens(items: string[], model?: vscode.LanguageModelChat): Promise<Array<number | null>> {
     if (items.length === 0) {
       return [];
     }
@@ -54,6 +52,10 @@ export class TokenBudgetService {
     const separator = "\n\n---BATCH-SEPARATOR---\n\n";
     const combined = items.join(separator);
     const totalTokens = await this.countTokens(combined, model);
+
+    if (totalTokens === null) {
+      return items.map(() => null);
+    }
 
     // Distribute proportionally by text length.
     const totalLength = items.reduce((sum, item) => sum + item.length, 0);

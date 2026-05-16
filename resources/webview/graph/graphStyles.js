@@ -74,6 +74,22 @@
         }
       },
       {
+        selector: "node.zoom-far",
+        style: {
+          label: "",
+          width: 12,
+          height: 12,
+          "border-width": 0
+        }
+      },
+      {
+        selector: "node.zoom-medium",
+        style: {
+          "font-size": 9,
+          "text-max-width": 80
+        }
+      },
+      {
         selector: "edge",
         style: {
           width: 2,
@@ -127,6 +143,13 @@
         selector: "edge.dimmed",
         style: {
           opacity: 0.1
+        }
+      },
+      {
+        selector: "edge.zoom-far",
+        style: {
+          width: 1,
+          "arrow-scale": 0.5
         }
       }
     ];

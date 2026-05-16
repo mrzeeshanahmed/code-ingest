@@ -20,6 +20,12 @@ export interface PendingWriteBatch {
   knowledgeChunkUpserts: GraphKnowledgeChunk[];
   deletes: Array<{ table: string; filePath?: string; ids?: string[] }>;
   dirtyBufferSnapshots?: DirtyBufferSnapshot[];
+  termUpserts?: any[];
+  termLinkUpserts?: any[];
+  directoryStateUpserts?: any[];
+  embeddingMetadataUpserts?: any[];
+  artifactStateUpserts?: any[];
+  moduleSummaryUpserts?: any[];
 }
 
 export type WriteExecutor = (batch: PendingWriteBatch) => Promise<void>;
@@ -102,7 +108,10 @@ export class SingleWriterQueue {
 
     try {
       const merged = this.coalesceBatches(batches);
-      await this.executeWithDrain(merged);
+      const split = this.splitBatch(merged, this.MAX_BATCH_SIZE);
+      for (const b of split) {
+        await this.executeWithDrain(b);
+      }
       for (const batch of batches) {
         (batch as PendingWriteBatch & { _resolve?: () => void })._resolve?.();
       }
@@ -128,6 +137,12 @@ export class SingleWriterQueue {
     const commentChunks = new Map<string, GraphCommentChunk>();
     const knowledgeChunks = new Map<string, GraphKnowledgeChunk>();
     const deletes: Array<{ table: string; filePath?: string; ids?: string[] }> = [];
+    const termUpserts: any[] = [];
+    const termLinkUpserts: any[] = [];
+    const directoryStateUpserts: any[] = [];
+    const embeddingMetadataUpserts: any[] = [];
+    const artifactStateUpserts: any[] = [];
+    const moduleSummaryUpserts: any[] = [];
     let highestPriority: "HIGH" | "MEDIUM" | "LOW" = "LOW";
     const reasons: string[] = [];
     const dirtyBufferSnapshots = new Map<string, DirtyBufferSnapshot>();
@@ -156,6 +171,12 @@ export class SingleWriterQueue {
       for (const snap of batch.dirtyBufferSnapshots ?? []) {
         dirtyBufferSnapshots.set(snap.relativePath, snap);
       }
+      if (batch.termUpserts) termUpserts.push(...batch.termUpserts);
+      if (batch.termLinkUpserts) termLinkUpserts.push(...batch.termLinkUpserts);
+      if (batch.directoryStateUpserts) directoryStateUpserts.push(...batch.directoryStateUpserts);
+      if (batch.embeddingMetadataUpserts) embeddingMetadataUpserts.push(...batch.embeddingMetadataUpserts);
+      if (batch.artifactStateUpserts) artifactStateUpserts.push(...batch.artifactStateUpserts);
+      if (batch.moduleSummaryUpserts) moduleSummaryUpserts.push(...batch.moduleSummaryUpserts);
 
       if (batch.priority === "HIGH" || (batch.priority === "MEDIUM" && highestPriority === "LOW")) {
         highestPriority = batch.priority;
@@ -171,10 +192,56 @@ export class SingleWriterQueue {
       codeChunkUpserts: Array.from(codeChunks.values()),
       commentChunkUpserts: Array.from(commentChunks.values()),
       knowledgeChunkUpserts: Array.from(knowledgeChunks.values()),
-      deletes
+      deletes,
+      termUpserts,
+      termLinkUpserts,
+      directoryStateUpserts,
+      embeddingMetadataUpserts,
+      artifactStateUpserts,
+      moduleSummaryUpserts
     };
     if (dirtyBufferSnapshots.size > 0) {
       result.dirtyBufferSnapshots = Array.from(dirtyBufferSnapshots.values());
+    }
+    return result;
+  }
+
+  private splitBatch(batch: PendingWriteBatch, maxSize: number): PendingWriteBatch[] {
+    const totalSize = Math.max(
+      batch.nodeUpserts.length,
+      batch.edgeUpserts.length,
+      batch.codeChunkUpserts.length,
+      batch.commentChunkUpserts.length,
+      batch.knowledgeChunkUpserts.length,
+      batch.termUpserts?.length ?? 0,
+      batch.termLinkUpserts?.length ?? 0
+    );
+    if (totalSize <= maxSize) return [batch];
+
+    const result: PendingWriteBatch[] = [];
+    let offset = 0;
+    while (offset < totalSize) {
+      const splitBatch: PendingWriteBatch = {
+        reason: batch.reason,
+        priority: batch.priority,
+        filePaths: batch.filePaths, // copy to all chunks
+        nodeUpserts: batch.nodeUpserts.slice(offset, offset + maxSize),
+        edgeUpserts: batch.edgeUpserts.slice(offset, offset + maxSize),
+        codeChunkUpserts: batch.codeChunkUpserts.slice(offset, offset + maxSize),
+        commentChunkUpserts: batch.commentChunkUpserts.slice(offset, offset + maxSize),
+        knowledgeChunkUpserts: batch.knowledgeChunkUpserts.slice(offset, offset + maxSize),
+        deletes: offset === 0 ? batch.deletes : [], // only do deletes once
+      };
+      if (batch.termUpserts) splitBatch.termUpserts = batch.termUpserts.slice(offset, offset + maxSize);
+      if (batch.termLinkUpserts) splitBatch.termLinkUpserts = batch.termLinkUpserts.slice(offset, offset + maxSize);
+      if (batch.directoryStateUpserts) splitBatch.directoryStateUpserts = batch.directoryStateUpserts.slice(offset, offset + maxSize);
+      if (batch.embeddingMetadataUpserts) splitBatch.embeddingMetadataUpserts = batch.embeddingMetadataUpserts.slice(offset, offset + maxSize);
+      if (batch.artifactStateUpserts) splitBatch.artifactStateUpserts = batch.artifactStateUpserts.slice(offset, offset + maxSize);
+      if (batch.moduleSummaryUpserts) splitBatch.moduleSummaryUpserts = batch.moduleSummaryUpserts.slice(offset, offset + maxSize);
+      if (batch.dirtyBufferSnapshots) splitBatch.dirtyBufferSnapshots = batch.dirtyBufferSnapshots;
+
+      result.push(splitBatch);
+      offset += maxSize;
     }
     return result;
   }

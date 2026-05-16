@@ -79,6 +79,10 @@ Before implementation starts, make sure the team is aligned on the v1 direction 
 
 Delete or stop planning around any native database, heuristic token counting, or DOM-heavy graph renderer paths. The v1 implementation path must not depend on platform-specific SQLite bindings or whitespace-based token estimators.
 
+### Step 1.1b — Remove Native SQLite Dependency
+
+Remove `better-sqlite3` from `package.json` completely. The PRD explicitly states no native SQLite dependency in v1. This prevents the native binary from being downloaded and potentially packaged into the VSIX.
+
 ### Step 1.2 — Install the New Runtime Dependencies
 
 Recommended dependency set:
@@ -244,11 +248,14 @@ Mandatory behavior:
 - implement pager I/O with descriptor-based random-access operations such as `fs.open`, `fs.read`, and `fs.write`
 - bypass `vscode.workspace.fs` for the SQLite `.db` file because it cannot satisfy offset-based partial writes
 - fail fast if the runtime resolves to a non-Asyncify SQLite build
-- initialize the WASM module once through a shared singleton promise and await it from every root runtime
+- initialize the WASM module once through a shared singleton promise (e.g. `_sqlitePromise`) and await it from every root runtime to prevent multiple concurrent WASM initializations
+- fix blocking file I/O in the WASM loader (`waSqliteLoader.ts`) by using `fs.promises.readFile`
 - set `PRAGMA foreign_keys = ON`
 - enable WAL when the runtime supports it; otherwise enforce a chunked-commit strategy that still preserves pager-level partial writes
-- initialize schema and migration state
+- initialize schema and execute a schema migration system on `open()` that runs ordered DDL scripts when `index_state.schema_version` differs
 - expose typed CRUD helpers for nodes, edges, chunks, knowledge, and artifact metadata
+- add secondary memory indexes (e.g. `nodesByRelativePath: Map<string, GraphNode[]>`) to eliminate O(n) linear scans
+- implement a memory-bounded LRU cache for nodes and edges instead of an unbounded Map to prevent 200-400MB heap usage
 - create `.vscode/code-ingest/semantic-index/` alongside the DB on first use
 
 The implementation must not buffer the full database into memory and overwrite it on every transaction. If the VFS path would force whole-file rewrites for ordinary SQLite page updates, that design is blocked and must be rejected.
@@ -277,7 +284,15 @@ export interface PendingWriteBatch {
   edgeUpserts: GraphEdge[];
   codeChunkUpserts: GraphCodeChunk[];
   commentChunkUpserts: GraphCommentChunk[];
+  knowledgeChunkUpserts: GraphKnowledgeChunk[];
   deletes: Array<{ table: string; filePath?: string; ids?: string[] }>;
+  termUpserts?: TermRecord[];
+  termLinkUpserts?: TermLinkRecord[];
+  directoryStateUpserts?: DirectoryStateRecord[];
+  embeddingMetadataUpserts?: EmbeddingDocumentMetadata[];
+  artifactStateUpserts?: ArtifactStateRecord[];
+  moduleSummaryUpserts?: ModuleSummaryRecord[];
+  dirtyBufferSnapshots?: DirtyBufferSnapshot[];
 }
 
 export class SingleWriterQueue {
@@ -290,12 +305,13 @@ export class SingleWriterQueue {
 
 Rules:
 
-- all storage writes go through this queue
+- all storage writes go through this queue (including missing tables like terms, directory_state, embedding_document_metadata, etc.)
 - `GraphDatabase` public writes are removed in favor of one exclusive `executeWriteBatch(batch: PendingWriteBatch): Promise<void>` path
 - flushing occurs inside one SQLite transaction
 - concurrent parsing is allowed; concurrent writes are not
 - writes are batched with a short time window and a maximum operations-per-flush threshold
 - queued work is coalesced by `filePath`
+- enforce `MAX_BATCH_SIZE` during `coalesceBatches` to split massive arrays and prevent infinitely large SQLite transactions during watcher storms
 - backpressure is bounded; low-priority rebuild work may be merged, but active-file work must not starve
 - cancellation is honored before flush for superseded or aborted work
 - the queue must await Asyncify VFS drain before accepting the next write batch
@@ -637,10 +653,11 @@ Create `src/graph/traversal/RelevanceWalker.ts`.
 It must:
 
 - accept semantic and lexical seeds
-- run a personalized random walk / PPR pass
+- run an iterative true Personalized PageRank (PPR) pass with a damping factor (e.g. 0.85), convergence checking, and restart probability
 - apply explicit edge weights from the PRD instead of treating all edges uniformly
-- down-rank generic hubs unless reinforced by the query
+- apply a super-node penalty to down-rank generic high-degree utility hubs unless reinforced by the query
 - return ordered nodes and edges for context building
+- check the cancellation contract between iterations
 
 `GraphTraversal` may remain as a primitive, but `CopilotParticipant` and export flows must call `RelevanceWalker` rather than BFS directly.
 
@@ -655,7 +672,7 @@ Rules:
 - use `vscode.lm.countTokens()` only as a verifier for each candidate block
 - reserve a configurable percentage for system/output tokens
 - apply a minimum reserve floor so the effective reserve becomes `max(percent reserve, minimum reserve)`
-- if model counting is unavailable, fall back to structure-only context rather than a whitespace heuristic
+- completely remove the forbidden `words * 1.3` or whitespace-based heuristic fallback; if model counting is unavailable, return `null` and let callers degrade cleanly
 
 Representative API:
 
@@ -933,7 +950,7 @@ Track `transferInProgress` in the webview layer. Never call `vscode.setState()` 
 - toolbar controls
 - selection state
 - keyboard navigation
-- empty-state rendering
+- 6 explicit empty states (trust-locked, not initialized, indexing in progress, filter-empty, no supported files, DB/index error)
 - `vscode.setState()` / `getState()`
 
 Persisted graph-view state must also carry a schema version. If the saved state version is unknown or incompatible, discard it and restore from a clean default instead of attempting partial migration during normal load.
@@ -943,7 +960,7 @@ Persisted graph-view state must also carry a schema version. If the saved state 
 `graph.worker.js` is responsible for:
 
 - layout and physics
-- semantic zoom thresholds
+- semantic zoom thresholds and Level of Detail (LOD) rendering (e.g., Far: dots only; Medium: icons+abbr labels; Close: full labels+edges)
 - batch position updates
 - graph-state restoration support
 
@@ -985,10 +1002,10 @@ Must support:
 
 ### Step 9.1 — Implement the Sidebar State Shell
 
-Render these states explicitly:
+Render these states explicitly via a typed `setState(state: InitState)` method that drives the webview's rendering mode:
 
 - `Trust-Locked`
-- `Not Initialized`
+- `Not Initialized` (Shows a welcome card with purpose + 3 feature highlights + CTA)
 - `Initializing`
 - `Ready`
 
@@ -1021,7 +1038,7 @@ Every envelope must include a version field so host and webview layers can rejec
 
 ### Step 9.2b — Wire the Ready-State Token Indicator
 
-The Ready-state context-window indicator must be live, not static.
+The Ready-state context-window indicator must be live, not static, and visually displayed as a progress bar or percentage readout (`used / total context budget`) in the sidebar.
 
 It must:
 
@@ -1099,6 +1116,7 @@ Rules:
 - `preview()` runs before `export()`
 - Raw mode delegates to `DigestGenerator` only through `ExportController`
 - Clean and Graph modes delegate to `ContextBuilder`
+- The sidebar's export section must include: PII policy selector, Format selector, Size estimate, Token estimate, and a mandatory Preview button
 
 ### Step 10.2 — Add the Mandatory Raw Policy Gate
 
